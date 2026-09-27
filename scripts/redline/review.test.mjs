@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
-  parseEnvFile, safePath, buildDiff, quoteIsGrounded, corpusOf, checkSubmission, finalVerdict,
+  parseEnvFile, readPrompt, safePath, buildDiff, quoteIsGrounded, corpusOf, checkSubmission, finalVerdict,
   renderBody, verdictAtHead, runTool, runReview, buildBrief, REVIEWER_LOGIN, LIMITS, metaPhrase,
   verdictRecord, verdictProblem, saveVerdict, VERDICT_VERSION,
 } from './review.mjs';
@@ -30,6 +30,24 @@ console.log('\n  parseEnvFile');
   const e = parseEnvFile('# c\nA=1\n\nB="two words"\nC=\'x=y\'\n bad \nD = spaced \r\n');
   check('values, quotes and = inside a value', e.A === '1' && e.B === 'two words' && e.C === 'x=y' && e.D === 'spaced');
   check('comments and malformed lines are skipped', !('# c' in e) && !('bad' in e));
+}
+
+// The prompt is a file on the runner host, named by an environment variable; this repository is
+// public and carries none, so the tests use the three-line stand-in under test-fixtures.
+const PROMPT_FIXTURE = fileURLToPath(new URL('./test-fixtures/prompt.md', import.meta.url));
+console.log('\n  readPrompt');
+{
+  const dir = mkdtempSync(join(tmpdir(), 'redline-prompt-'));
+  const err = (env) => { try { readPrompt(env, 'REDLINE_PROMPT_FILE'); return ''; } catch (e) { return e.message; } };
+  check('the file the variable names is the prompt, whole', readPrompt({ REDLINE_PROMPT_FILE: PROMPT_FIXTURE }, 'REDLINE_PROMPT_FILE') === readFileSync(PROMPT_FIXTURE, 'utf8'));
+  check('an unset or empty variable is an error naming it', /^REDLINE_PROMPT_FILE is not set/.test(err({})) && /^REDLINE_PROMPT_FILE is not set/.test(err({ REDLINE_PROMPT_FILE: '' })));
+  check('a file that cannot be read is an error naming the variable and the file', /^REDLINE_PROMPT_FILE: cannot read .*nope\.md/.test(err({ REDLINE_PROMPT_FILE: join(dir, 'nope.md') })));
+  writeFileSync(join(dir, 'empty.md'), ' \n\n');
+  check('an empty file is an error naming the variable', /^REDLINE_PROMPT_FILE: .*empty\.md is empty$/.test(err({ REDLINE_PROMPT_FILE: join(dir, 'empty.md') })));
+  check('the stand-in is three lines, not a rubric', readFileSync(PROMPT_FIXTURE, 'utf8').split('\n').filter(Boolean).length === 3);
+  const src = readFileSync(fileURLToPath(new URL('./review.mjs', import.meta.url)), 'utf8');
+  check('review.mjs reads the prompt from REDLINE_PROMPT_FILE and bundles none', src.includes("readPrompt(env, 'REDLINE_PROMPT_FILE')") && !/new URL\(['"]\.\/[\w.-]*prompt/.test(src));
+  rmSync(dir, { recursive: true, force: true });
 }
 
 const root = mkdtempSync(join(tmpdir(), 'redline-'));
@@ -106,7 +124,7 @@ console.log('\n  submission, verdict and body');
   check('a suggestion containing a 3-backtick fence gets a 4-backtick fence', fencedBody.includes('````\nRun:\n```\nnpm test\n```\n````'));
   check('a suggestion with no backticks keeps a 3-backtick fence', renderBody(checkSubmission({ verdict: 'REQUEST_CHANGES', summary: 's', findings: [{ ...blocking, suggestion: 'const x = 1;' }] }).review, 'REQUEST_CHANGES', HEAD).includes('```\nconst x = 1;\n```\n'));
   check('an approval carries no rule line', !renderBody(checkSubmission({ verdict: 'APPROVE', summary: 's', findings: [] }).review, 'APPROVE', HEAD).includes('rule:'));
-  check('the fixed text uses no em dash', !renderBody(approveButBlocking, 'REQUEST_CHANGES', HEAD, ['n']).replace(/Leaks X\.|Looks fine\./g, '').includes('—'));
+  check('the fixed text uses no em dash', !renderBody(approveButBlocking, 'REQUEST_CHANGES', HEAD, ['n']).replace(/Leaks X\.|Looks fine\./g, '').includes(String.fromCharCode(0x2014)));
 }
 
 // The review is public. 2026-09-26: truecopy#221's approval read "contains no secrets, private hosts,
@@ -447,11 +465,17 @@ console.log('\n  CLI');
   writeFileSync(envFile, 'DARIO_URL=http://127.0.0.1:9\n');
   mkdirSync(join(dir, 'redline-verdict'));
   writeFileSync(stale, '{"stale":true}\n');
-  const s = spawnSync(process.execPath, [script], {
-    env: { PATH: process.env.PATH, REDLINE_ENV_FILE: envFile, REDLINE_VERDICT_FILE: stale, REPO: 'askalf/r', PR: '7', HEAD_SHA: HEAD, CHECKOUT: dir, GH_READ_TOKEN: 'read' },
-    encoding: 'utf8',
-  });
-  check('a reviewer token is optional: the next missing key is the model key', s.status === 2 && s.stderr.includes('::error::DARIO_API_KEY is not set') && !/GITHUB_PAT_REVIEWER|REDLINE_GITHUB_TOKEN/.test(s.stderr));
+  const base = { PATH: process.env.PATH, REDLINE_ENV_FILE: envFile, REDLINE_VERDICT_FILE: stale, REPO: 'askalf/r', PR: '7', HEAD_SHA: HEAD, CHECKOUT: dir, GH_READ_TOKEN: 'read' };
+  const run = (env) => spawnSync(process.execPath, [script], { env, encoding: 'utf8' });
+  const noPrompt = run(base);
+  check('no REDLINE_PROMPT_FILE: exit 2, the error names the variable, nothing else is tried', noPrompt.status === 2 && noPrompt.stderr.includes('::error::REDLINE_PROMPT_FILE is not set') && !/DARIO_API_KEY/.test(noPrompt.stderr));
+  const gone = run({ ...base, REDLINE_PROMPT_FILE: join(dir, 'gone.md') });
+  check('a prompt file that is not there: exit 2, the error names the variable and the file', gone.status === 2 && /::error::REDLINE_PROMPT_FILE: cannot read .*gone\.md/.test(gone.stderr));
+  writeFileSync(join(dir, 'empty.md'), '\n');
+  const empty = run({ ...base, REDLINE_PROMPT_FILE: join(dir, 'empty.md') });
+  check('an empty prompt file: exit 2, the error names the variable', empty.status === 2 && /::error::REDLINE_PROMPT_FILE: .*empty\.md is empty/.test(empty.stderr));
+  const s = run({ ...base, REDLINE_PROMPT_FILE: PROMPT_FIXTURE });
+  check('with the prompt file, a reviewer token is optional: the next missing key is the model key', s.status === 2 && s.stderr.includes('::error::DARIO_API_KEY is not set') && !/GITHUB_PAT_REVIEWER|REDLINE_GITHUB_TOKEN|REDLINE_PROMPT_FILE/.test(s.stderr));
   let staleLeft = true;
   try { readFileSync(stale); } catch { staleLeft = false; }
   check('a verdict file left by an earlier run is removed before the review starts', !staleLeft);
@@ -465,13 +489,15 @@ console.log('\n  the reusable workflow');
   check('redline-ref is a required string input', /\n      redline-ref:\n(?:        .*\n)*?        required: true\n        type: string\n/.test(wf));
   const steps = wf.split(/\n      - /).slice(1);
   const stepNamed = (name) => steps.findIndex((s) => s.startsWith(`name: ${name}\n`));
-  const fetchAt = stepNamed('Fetch the review script from askalf/askalf');
+  const fetchAt = stepNamed('Fetch the review script from askalf/ci');
   check('the script is fetched at redline-ref, not job_workflow_sha or a branch',
     fetchAt >= 0 && steps[fetchAt].includes('ref: ${{ inputs.redline-ref }}') && !/ref: \$\{\{ github\.job_workflow_sha/.test(wf) && !/ref: main\b/.test(wf));
+  check('the script comes from askalf/ci, and nothing names the old home', steps[fetchAt].includes('repository: askalf/ci\n') && !wf.includes('askalf/askalf'));
   const guardAt = stepNamed('Check the review ref is a full commit sha');
   check('the sha guard is the first step', guardAt === 0);
-  check('the on-main check runs before the fetch', stepNamed('Check the review ref is on askalf/askalf main') > guardAt
-    && stepNamed('Check the review ref is on askalf/askalf main') < fetchAt);
+  const mainAt = stepNamed('Check the review ref is on askalf/ci main');
+  check('the on-main check runs before the fetch', mainAt > guardAt && mainAt < fetchAt);
+  check('the on-main check compares against askalf/ci', (steps[mainAt] ?? '').includes('repos/askalf/ci/compare/'));
   check('the ref reaches the guards through env, not interpolated into run',
     steps.every((s) => !s.includes('run:') || !s.slice(s.indexOf('run:')).includes('${{ inputs.redline-ref')));
   // The guard's own shell, run against good and bad refs.
@@ -498,6 +524,8 @@ console.log('\n  the reusable workflow');
   const cleanAt = stepNamed('Remove the checkouts');
   const upload = steps[uploadAt] ?? '';
   check('the review step names the verdict file in the workspace', (steps[reviewAt] ?? '').includes('REDLINE_VERDICT_FILE: ${{ github.workspace }}/redline-verdict/verdict.json'));
+  check('the review step names the host prompt file, and no prompt is fetched with the script',
+    (steps[reviewAt] ?? '').includes('REDLINE_PROMPT_FILE: /etc/askalf/redline-prompt.md') && !/prompt/.test(steps[fetchAt]));
   check('the verdict is uploaded after the review, before the cleanup', reviewAt >= 0 && uploadAt === reviewAt + 1 && cleanAt === uploadAt + 1);
   check('the upload runs on pass or fail, only when there is a file', upload.includes("if: always() && hashFiles('redline-verdict/verdict.json') != ''"));
   check('the upload is the pinned upload-artifact, as redline-verdict, short-lived',
@@ -512,28 +540,30 @@ console.log('\n  pin bump');
   const NEW = 'c0ffee0000000000000000000000000000000001';
   const OLD = '116935d3803fc5904d96efb56991b93539c1714c';
   const job = (body) => `name: Redline\n\non:\n  pull_request:\n\njobs:\n  review:\n    if: github.event.pull_request.draft == false\n${body}`;
-  const uses = (sha) => `    uses: ${REVIEW_WORKFLOW}@${sha}  # main 2026-09-25, askalf/askalf#64\n`;
-  const pinnedTo = (y) => new RegExp(`uses: ${REVIEW_WORKFLOW}@${NEW} # main 2026-09-27, askalf/askalf#72\\n`).test(y);
+  const NOTE = 'main 2026-09-27, askalf/ci#72';
+  const uses = (sha) => `    uses: ${REVIEW_WORKFLOW}@${sha}  # main 2026-09-25, askalf/ci#64\n`;
+  const pinnedTo = (y) => y.includes(`uses: ${REVIEW_WORKFLOW}@${NEW} # ${NOTE}\n`);
   const refs = (y) => [...y.matchAll(/redline-ref: (\S+)/g)].map((m) => m[1]);
+  check('the workflows pinned are this repository\'s', REVIEW_WORKFLOW === 'askalf/ci/.github/workflows/redline-review.yml');
 
   const oldShape = job(`${uses(OLD)}    with:\n      runner-label: redline\n`);
-  const a = bumpCaller(oldShape, NEW, 'main 2026-09-27, askalf/askalf#72');
+  const a = bumpCaller(oldShape, NEW, NOTE);
   check('old shape: the pin moves', pinnedTo(a) && !a.includes(OLD));
   check('old shape: redline-ref is added under with, at the same sha', a.includes(`    with:\n      redline-ref: ${NEW}\n      runner-label: redline\n`));
 
   const newShape = job(`${uses(OLD)}    with:\n      runner-label: redline\n      redline-ref: ${OLD}\n`);
-  const b = bumpCaller(newShape, NEW, 'main 2026-09-27, askalf/askalf#72');
+  const b = bumpCaller(newShape, NEW, NOTE);
   check('new shape: the pin and redline-ref both move, once each', pinnedTo(b) && refs(b).join() === NEW && !b.includes(OLD));
   check('new shape: the other input stays', b.includes('      runner-label: redline\n'));
-  check('a second bump changes nothing', bumpCaller(b, NEW, 'main 2026-09-27, askalf/askalf#72') === b);
+  check('a second bump changes nothing', bumpCaller(b, NEW, NOTE) === b);
 
   const withFirst = job(`    with:\n      runner-label: redline\n${uses(OLD)}`);
-  const c = bumpCaller(withFirst, NEW, 'main 2026-09-27, askalf/askalf#72');
+  const c = bumpCaller(withFirst, NEW, NOTE);
   check('with above uses: redline-ref still lands in it', c.includes(`    with:\n      redline-ref: ${NEW}\n      runner-label: redline\n`) && pinnedTo(c));
 
   const noWith = job(uses(OLD));
-  const d = bumpCaller(noWith, NEW, 'main 2026-09-27, askalf/askalf#72');
-  check('no with block: one is added with redline-ref', d.includes(`@${NEW} # main 2026-09-27, askalf/askalf#72\n    with:\n      redline-ref: ${NEW}\n`));
+  const d = bumpCaller(noWith, NEW, NOTE);
+  check('no with block: one is added with redline-ref', d.includes(`@${NEW} # ${NOTE}\n    with:\n      redline-ref: ${NEW}\n`));
 
   const nextJob = job(`${uses(OLD)}    with:\n      runner-label: redline\n\n  other:\n    runs-on: x\n    with:\n      redline-ref: keep\n`);
   const e = bumpCaller(nextJob, NEW, 'n');
@@ -549,6 +579,12 @@ console.log('\n  pin bump');
 
   const bump = readFileSync(fileURLToPath(new URL('../../.github/workflows/redline-pin-bump.yml', import.meta.url)), 'utf8');
   check('the bump workflow rewrites callers with pin.mjs', bump.includes('node scripts/redline/pin.mjs "$SHA" "$note"') && !/sed -E/.test(bump));
+  const callers = (/\n      CALLERS: >-\n((?: {8}\S.*\n)+)/.exec(bump)?.[1] ?? '').split(/\s+/).filter(Boolean);
+  const expected = ['askalf/ci', 'askalf/askalf', 'askalf/dario', 'askalf/amnesia', 'askalf/browser-bridge', 'askalf/redstamp',
+    'askalf/truecopy', 'askalf/truecopy-action', 'askalf/cordon', 'askalf/plumbline', 'askalf/checkout-with-retry'];
+  check('the bump job knows the eleven callers, this repository first', callers.join() === expected.join());
+  check('this repo\'s caller pins askalf/ci and the same sha as redline-ref',
+    /uses: askalf\/ci\/\.github\/workflows\/redline-review\.yml@([0-9a-f]{40})/.exec(own)?.[1] === refs(own)[0] && !own.includes('askalf/askalf/') && own.includes('runner-label: redline\n'));
 }
 
 rmSync(root, { recursive: true, force: true });

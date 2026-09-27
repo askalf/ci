@@ -562,6 +562,12 @@ if (!gitOk) {
 console.log('\n  CLI');
 {
   const script = fileURLToPath(new URL('./fix.mjs', import.meta.url));
+  // The fixer's prompt is a file on the exec runner host, named by FIX_PROMPT_FILE; the tests hand
+  // the script the three-line stand-in under test-fixtures.
+  const PROMPT_FIXTURE = fileURLToPath(new URL('./test-fixtures/fix-prompt.md', import.meta.url));
+  check('the stand-in is three lines, not a brief', readFileSync(PROMPT_FIXTURE, 'utf8').split('\n').filter(Boolean).length === 3);
+  const src = readFileSync(script, 'utf8');
+  check('fix.mjs reads the prompt from FIX_PROMPT_FILE and bundles none', src.includes("readPrompt(env, 'FIX_PROMPT_FILE')") && !/new URL\(['"]\.\/[\w.-]*prompt/.test(src));
   const r = spawnSync(process.execPath, [script], { env: { PATH: process.env.PATH, SYSTEMROOT: process.env.SYSTEMROOT ?? '' }, encoding: 'utf8' });
   check('missing configuration exits 2 with an annotation', r.status === 2 && r.stderr.includes('::error::FIX_ENV_FILE is not set'));
   const dir = mkdtempSync(join(tmpdir(), 'redline-fix-cli-'));
@@ -570,17 +576,20 @@ console.log('\n  CLI');
   const outDir = join(dir, 'fix-out');
   mkdirSync(outDir);
   writeFileSync(join(outDir, 'fix.json'), '{"stale":true}\n');
-  const s = spawnSync(process.execPath, [script], {
-    env: { PATH: process.env.PATH, SYSTEMROOT: process.env.SYSTEMROOT ?? '', FIX_ENV_FILE: envFile, FIX_OUT: outDir, REPO: 'askalf/r', PR: '7', HEAD_SHA: HEAD, REVIEW_URL, CHECKOUT: dir, GH_READ_TOKEN: 'read' },
-    encoding: 'utf8',
-  });
+  const base = { PATH: process.env.PATH, SYSTEMROOT: process.env.SYSTEMROOT ?? '', FIX_ENV_FILE: envFile, FIX_OUT: outDir, REPO: 'askalf/r', PR: '7', HEAD_SHA: HEAD, REVIEW_URL, CHECKOUT: dir, GH_READ_TOKEN: 'read' };
+  const noPrompt = spawnSync(process.execPath, [script], { env: base, encoding: 'utf8' });
+  check('no FIX_PROMPT_FILE: exit 2, the error names the variable, and the stale output is untouched', noPrompt.status === 2 && noPrompt.stderr.includes('::error::FIX_PROMPT_FILE is not set') && existsSync(join(outDir, 'fix.json')));
+  writeFileSync(join(dir, 'empty.md'), '\n');
+  const empty = spawnSync(process.execPath, [script], { env: { ...base, FIX_PROMPT_FILE: join(dir, 'empty.md') }, encoding: 'utf8' });
+  check('an empty prompt file: exit 2, the error names the variable', empty.status === 2 && /::error::FIX_PROMPT_FILE: .*empty\.md is empty/.test(empty.stderr));
+  const s = spawnSync(process.execPath, [script], { env: { ...base, FIX_PROMPT_FILE: PROMPT_FIXTURE }, encoding: 'utf8' });
   check('the model key is required from the env file, never from the environment', s.status === 2 && s.stderr.includes('::error::DARIO_API_KEY is not set'));
   check('an earlier run\'s output is removed before anything starts', !existsSync(join(outDir, 'fix.json')));
   if (gitOk) {
     const repo = makeRepo();
     writeFileSync(envFile, 'DARIO_API_KEY=dk_test\nDARIO_URL=http://127.0.0.1:9\n');
     const bad = spawnSync(process.execPath, [script], {
-      env: { PATH: process.env.PATH, SYSTEMROOT: process.env.SYSTEMROOT ?? '', FIX_ENV_FILE: envFile, FIX_OUT: outDir, REPO: 'askalf/r', PR: '7', HEAD_SHA: repo.head, REVIEW_URL: 'https://github.com/askalf/r/pull/7', CHECKOUT: repo.dir, GH_READ_TOKEN: 'read' },
+      env: { ...base, FIX_PROMPT_FILE: PROMPT_FIXTURE, HEAD_SHA: repo.head, REVIEW_URL: 'https://github.com/askalf/r/pull/7', CHECKOUT: repo.dir },
       encoding: 'utf8',
     });
     const written = JSON.parse(readFileSync(join(outDir, 'fix.json'), 'utf8'));
@@ -602,8 +611,8 @@ console.log('\n  the reusable workflow');
   const at = (name) => steps.findIndex((s) => s.startsWith(`name: ${name}\n`));
   const guardAt = at('Check the review ref is a full commit sha');
   const inputsAt = at('Check the head and the review link');
-  const mainAt = at('Check the review ref is on askalf/askalf main');
-  const fetchAt = at('Fetch the fix script from askalf/askalf');
+  const mainAt = at('Check the review ref is on askalf/ci main');
+  const fetchAt = at('Fetch the fix script from askalf/ci');
   const prAt = at('Check out the PR head to fix');
   const headAt = at('Check the checkout is at the head');
   const nodeAt = steps.findIndex((s) => s.startsWith('uses: actions/setup-node@'));
@@ -615,6 +624,8 @@ console.log('\n  the reusable workflow');
     fetchAt === 3 && prAt === 4 && headAt === 5 && nodeAt === 6 && fixAt === 7 && uploadAt === 8 && cleanAt === 9 && steps.length === 10);
   check('the script is fetched at redline-ref, not job_workflow_sha or a branch',
     steps[fetchAt].includes('ref: ${{ inputs.redline-ref }}') && steps[fetchAt].includes('sparse-checkout: scripts/redline') && !/ref: \$\{\{ github\.job_workflow_sha/.test(wf) && !/ref: main\b/.test(wf));
+  check('the script comes from askalf/ci, the on-main check compares against it, and nothing names the old home',
+    steps[fetchAt].includes('repository: askalf/ci\n') && steps[mainAt].includes('repos/askalf/ci/compare/') && !wf.includes('askalf/askalf'));
   check('the PR is checked out at the head input, into pr/', steps[prAt].includes('ref: ${{ inputs.head }}') && steps[prAt].includes('path: pr\n'));
   check('no input is interpolated into a run step: everything goes through env', steps.every((s) => !s.includes('run:') || !/\$\{\{\s*inputs\./.test(s.slice(s.indexOf('run:')))));
   check('the head check compares the checkout with HEAD_SHA from env and fails', steps[headAt].includes('HEAD_SHA: ${{ inputs.head }}') && /git -C pr rev-parse HEAD/.test(steps[headAt]) && /exit 1/.test(steps[headAt]));
@@ -642,6 +653,7 @@ console.log('\n  the reusable workflow');
   const fix = steps[fixAt] ?? '';
   check('the fix step runs the fetched script with the contract env', fix.includes('run: node .redline/scripts/redline/fix.mjs') && fix.includes('CHECKOUT: ${{ github.workspace }}/pr') && fix.includes('FIX_OUT: ${{ github.workspace }}/fix-out')
     && fix.includes('FIX_ENV_FILE: /etc/askalf/fix-exec.env') && fix.includes('GH_READ_TOKEN: ${{ github.token }}') && fix.includes('REVIEW_URL: ${{ inputs.review }}') && fix.includes("DRY_RUN: ${{ inputs.dry_run && '1' || '0' }}"));
+  check('the fix step names the host prompt file, and no prompt is fetched with the script', fix.includes('FIX_PROMPT_FILE: /etc/askalf/fix-prompt.md') && !/prompt/.test(steps[fetchAt]));
   check('no secret from GitHub reaches the fix step', !/secrets\./.test(wf));
   const upload = steps[uploadAt] ?? '';
   check('the upload runs whatever the outcome, as redline-fix from fix-out, short-lived, overwriting',
@@ -656,7 +668,7 @@ console.log('\n  the reusable workflow');
 console.log('\n  the caller');
 {
   const NEW = 'c0ffee0000000000000000000000000000000001';
-  const y = fixCallerYaml(NEW, 'dario-exec', 'askalf/askalf#80');
+  const y = fixCallerYaml(NEW, 'dario-exec', 'askalf/ci#80');
   check('name and run-name', /^name: Redline fix$/m.test(y) && y.includes('run-name: Redline fix ${{ github.repository }}#${{ inputs.pr }} @ ${{ inputs.head }}\n'));
   const on = /\non:\n((?:  .*\n|\n)+?)(?=\S)/.exec(y)?.[1] ?? '';
   check('it runs on workflow_dispatch only', /^  workflow_dispatch:\n/.test(on) && !/pull_request|push|schedule/.test(on));
@@ -665,7 +677,8 @@ console.log('\n  the caller');
   check('permissions are read-only', /\npermissions:\n  contents: read\n  pull-requests: read\n\n/.test(y) && !/write/.test(y));
   check('one queued run per PR', y.includes('group: fix-${{ github.repository }}-${{ inputs.pr }}\n') && y.includes('cancel-in-progress: false'));
   const jobs = [...y.slice(y.search(/^jobs:/m)).matchAll(/^  ([\w-]+):$/gm)].map((m) => m[1]);
-  check('one job, fix, calling the pinned reusable workflow with redline-ref at the same sha', jobs.join() === 'fix' && y.includes(`uses: ${FIX_WORKFLOW}@${NEW} # askalf/askalf#80\n`) && y.includes(`redline-ref: ${NEW}\n`));
+  check('one job, fix, calling the pinned reusable workflow with redline-ref at the same sha', jobs.join() === 'fix' && y.includes(`uses: ${FIX_WORKFLOW}@${NEW} # askalf/ci#80\n`) && y.includes(`redline-ref: ${NEW}\n`));
+  check('the workflow it pins is this repository\'s, and the caller names no other home', FIX_WORKFLOW === 'askalf/ci/.github/workflows/redline-fix-run.yml' && !y.includes('askalf/askalf'));
   check('the runner label and every dispatch input are passed through', y.includes('runner-label: dario-exec\n') && y.includes('pr: ${{ inputs.pr }}') && y.includes('head: ${{ inputs.head }}') && y.includes('review: ${{ inputs.review }}') && y.includes('dry_run: ${{ inputs.dry_run }}'));
   check('the caller job has no runs-on of its own', !/runs-on/.test(y));
   check('no em dash', !/[\u2013\u2014]/.test(y));
@@ -676,7 +689,7 @@ console.log('\n  pin bump, both callers');
 {
   const NEW = 'c0ffee0000000000000000000000000000000001';
   const OLD = '116935d3803fc5904d96efb56991b93539c1714c';
-  const note = 'main 2026-09-27, askalf/askalf#80';
+  const note = 'main 2026-09-27, askalf/ci#80';
   const refs = (y) => [...y.matchAll(/redline-ref: (\S+)/g)].map((m) => m[1]);
   check('the two callers are known by workflow and path', CALLERS.map((c) => c.path).join() === '.github/workflows/redline.yml,.github/workflows/redline-fix.yml' && CALLERS[0].workflow === REVIEW_WORKFLOW && CALLERS[1].workflow === FIX_WORKFLOW);
   const fixCaller = fixCallerYaml(OLD, 'dario-exec', 'old');
@@ -688,7 +701,7 @@ console.log('\n  pin bump, both callers');
   const reviewCaller = `name: Redline\n\non:\n  pull_request:\n\njobs:\n  review:\n    uses: ${REVIEW_WORKFLOW}@${OLD} # old\n    with:\n      redline-ref: ${OLD}\n      runner-label: redline\n`;
   const r = bumpCaller(reviewCaller, NEW, note);
   check('the review caller still bumps', r.includes(`uses: ${REVIEW_WORKFLOW}@${NEW} # ${note}\n`) && refs(r).join() === NEW);
-  check('a file that calls neither is refused', (await throws(() => bumpCaller('name: x\n', NEW)))?.message.includes('no askalf/askalf/.github/workflows/redline-review.yml or askalf/askalf/.github/workflows/redline-fix-run.yml call'));
+  check('a file that calls neither is refused', (await throws(() => bumpCaller('name: x\n', NEW)))?.message.includes('no askalf/ci/.github/workflows/redline-review.yml or askalf/ci/.github/workflows/redline-fix-run.yml call'));
   const bump = readFileSync(fileURLToPath(new URL('../../.github/workflows/redline-pin-bump.yml', import.meta.url)), 'utf8');
   check('the bump workflow rewrites both caller paths with pin.mjs', /CALLER_PATHS: .*redline\.yml .*redline-fix\.yml/.test(bump.replace(/\n\s+/g, ' ')) && bump.includes('node scripts/redline/pin.mjs "$SHA" "$note"') && /redline-\(review\|fix-run\)\.yml/.test(bump));
   check('the bump workflow runs when the fix workflow changes', /- \.github\/workflows\/redline-fix-run\.yml/.test(bump));

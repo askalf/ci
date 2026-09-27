@@ -11,8 +11,11 @@ Each repository's `.github/workflows/redline.yml` runs on `pull_request` and cal
 account, reads only). `review.mjs` gives the model the PR and its diff, read-only tools over the
 checkout, and ends when the model submits a verdict. The job's status is the verdict: APPROVE
 passes, REQUEST_CHANGES fails. The finished review goes up as the `redline-verdict` artifact and
-forge posts it as `sprayberry-redline` after checking where the run came from. `prompt.md` is the
-reviewer's brief; `review.test.mjs` runs it all against a stubbed GitHub and model.
+forge posts it as `sprayberry-redline` after checking where the run came from. The reviewer's brief is
+`/etc/askalf/redline-prompt.md` on the runner host, named by `REDLINE_PROMPT_FILE`, never a file in
+this repository; `review.test.mjs` runs it all against a stubbed GitHub and model, with the three-line
+stand-in in `test-fixtures/`. `tools.json` is `TOOLS` as a file, for a truecopy pin;
+`dump-tools.mjs --check` fails when the two drift apart.
 
 ## The fix: `redline-fix-run.yml` and `fix.mjs`
 
@@ -41,14 +44,15 @@ forge verifies the artifact and pushes the commit to the PR branch with its own 
 comments with the notes. The model key is the named dario key `first-party-fix` in
 `/etc/askalf/fix-exec.env`, root:gha-exec 640, readable by the exec account and by no other
 (never by gha-oss, which runs untrusted upstream candidates' suites on the same host).
-`fix-prompt.md` is the fixer's brief; `fix.test.mjs` covers the parsing, the sandbox, the
-allowlist, the limits, the commit and bundle on a real repository, and both workflows.
+The fixer's brief is `/etc/askalf/fix-prompt.md` on the same host, named by `FIX_PROMPT_FILE`, with
+the env file's owner and mode; `fix.test.mjs` covers the parsing, the sandbox, the allowlist, the
+limits, the commit and bundle on a real repository, and both workflows.
 
 ## The pin: `pin.mjs` and `redline-pin-bump.yml`
 
-Both callers pin `askalf/askalf` by full sha and pass the same sha as `redline-ref`, which the
+Both callers pin `askalf/ci` by full sha and pass the same sha as `redline-ref`, which the
 reusable workflow checks is a commit on `main` before fetching the script at it. A push to `main`
 that changes any of this runs `redline-pin-bump.yml`, which rewrites `redline.yml` and, where a
-repository has one, `redline-fix.yml` in every caller through `pin.mjs` and opens one bump PR per
-repository. `node scripts/redline/pin.mjs --caller <sha> <repo>-exec` prints a new repository's
+repository has one, `redline-fix.yml` in every caller (this repository's own included) through
+`pin.mjs` and opens one bump PR per repository. `node scripts/redline/pin.mjs --caller <sha> <repo>-exec` prints a new repository's
 `redline-fix.yml`.

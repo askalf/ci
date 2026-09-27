@@ -1,5 +1,6 @@
-# Redline, the gating code review, as this repo's CI check. The review itself lives in
-# askalf/askalf (redline-review.yml): same-repo PRs only, read-only tools, verdict = pass or fail.
+# Redline, the gating code review, as this repo's CI check. The review itself is this repo's own
+# redline-review.yml, called at a pinned commit like every other caller does: same-repo PRs only,
+# read-only tools, verdict = pass or fail.
 name: Redline
 
 on:
@@ -20,7 +21,7 @@ jobs:
     # fork's code never reaches the self-hosted runner even if the callee changes.
     if: github.event.pull_request.draft == false && github.event.pull_request.head.repo.full_name == github.repository
     # Pinned so a change to the review workflow reaches this repo only through a reviewed bump here.
-    uses: askalf/askalf/.github/workflows/redline-review.yml@7c9db26c0d59e11b85120bdd4441649d46963279 # main 2026-09-26, askalf/askalf#76
+    uses: askalf/ci/.github/workflows/redline-review.yml@1012ce7b35c2bf7b97d291117e4f4e09a8315695 # main 2026-09-26, import from askalf/askalf
     with:
-      redline-ref: 7c9db26c0d59e11b85120bdd4441649d46963279
+      redline-ref: 1012ce7b35c2bf7b97d291117e4f4e09a8315695
       runner-label: redline

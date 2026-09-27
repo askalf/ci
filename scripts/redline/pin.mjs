@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Rewrites a Redline caller so it calls its askalf/askalf reusable workflow at one commit and has
+// Rewrites a Redline caller so it calls its askalf/ci reusable workflow at one commit and has
 // the script fetched at that same commit. Two callers share the shape: redline.yml calls
 // redline-review.yml (the review) and redline-fix.yml calls redline-fix-run.yml (the fix). The
 // reusable workflow cannot learn its own commit (github.job_workflow_sha is not available to
@@ -12,8 +12,8 @@
 import { readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 
-export const REVIEW_WORKFLOW = 'askalf/askalf/.github/workflows/redline-review.yml';
-export const FIX_WORKFLOW = 'askalf/askalf/.github/workflows/redline-fix-run.yml';
+export const REVIEW_WORKFLOW = 'askalf/ci/.github/workflows/redline-review.yml';
+export const FIX_WORKFLOW = 'askalf/ci/.github/workflows/redline-fix-run.yml';
 /** Every reusable workflow a caller pins, and the caller file that pins it. */
 export const CALLERS = [
   { workflow: REVIEW_WORKFLOW, path: '.github/workflows/redline.yml' },
@@ -29,7 +29,7 @@ const blank = (l) => l.trim() === '' || l.trimStart().startsWith('#');
  * and a `with:` block for it, when the caller has neither. Throws when there is no pinned call.
  * @param {string} yaml
  * @param {string} sha
- * @param {string} [note] the pin's trailing comment, e.g. "main 2026-09-26, askalf/askalf#72"
+ * @param {string} [note] the pin's trailing comment, e.g. "main 2026-09-26, askalf/ci#72"
  */
 export function bumpCaller(yaml, sha, note = '') {
   if (!SHA.test(sha)) throw new Error(`not a full commit sha: ${sha}`);
@@ -77,7 +77,7 @@ export function fixCallerYaml(sha, runnerLabel, note = '') {
   if (!/^[a-z0-9][a-z0-9-]{0,62}$/.test(runnerLabel)) throw new Error(`not a runner label: ${runnerLabel}`);
   return `# Redline fix: when Redline requests changes on a pull request here, forge dispatches this run
 # with the PR, the head Redline reviewed and the review. The fix itself is computed by
-# askalf/askalf (redline-fix-run.yml) on this repository's non-root exec runner and uploaded as
+# askalf/ci (redline-fix-run.yml) on this repository's non-root exec runner and uploaded as
 # the redline-fix artifact. Nothing here pushes or comments, and no token that could is on the
 # runner: forge verifies the artifact and pushes the fix to the PR branch with its own token.
 name: Redline fix

@@ -1,7 +1,7 @@
-// Writes the tools Redline hands the model (TOOLS in review.mjs) to tools.json, where
-// truecopy.lock pins them next to prompt.md. The descriptions are what the reviewing model reads
-// and acts on, so a change to one has to be regenerated and re-pinned on purpose, and is
-// poison-scanned when it is.
+// Writes the tools Redline hands the model (TOOLS in review.mjs) to tools.json, the reviewer's tool
+// surface as one file that truecopy can pin and poison-scan. The descriptions are what the reviewing
+// model reads and acts on, so a change to one has to be regenerated and re-pinned on purpose. The
+// system prompt is not here: it is installed on the runner host and never committed to this repository.
 //
 //   node scripts/redline/dump-tools.mjs           regenerate tools.json
 //   node scripts/redline/dump-tools.mjs --check   exit 1 if tools.json no longer matches TOOLS

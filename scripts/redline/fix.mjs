@@ -35,16 +35,20 @@
 //
 // CLI (the workflow's fix step):
 //   REPO=owner/name PR=<n> HEAD_SHA=<sha> REVIEW_URL=<review html_url> CHECKOUT=<dir> \
-//   GH_READ_TOKEN=... FIX_ENV_FILE=/etc/askalf/fix-exec.env FIX_OUT=<dir> [DRY_RUN=1] node fix.mjs
+//   GH_READ_TOKEN=... FIX_ENV_FILE=/etc/askalf/fix-exec.env FIX_PROMPT_FILE=/etc/askalf/fix-prompt.md \
+//   FIX_OUT=<dir> [DRY_RUN=1] node fix.mjs
 // The env file holds DARIO_API_KEY (the named key first-party-fix), and optionally DARIO_URL
-// (default http://127.0.0.1:3456) and FIX_MODEL (default claude-opus-5-5).
+// (default http://127.0.0.1:3456) and FIX_MODEL (default claude-opus-5-5). FIX_PROMPT_FILE names the
+// system prompt, installed on the runner host: this repository is public and carries no prompt, so
+// there is no bundled fallback, and a variable that is unset, a file that cannot be read or an empty
+// file ends the run.
 
 import { readFileSync, writeFileSync, mkdirSync, rmSync, existsSync, lstatSync, realpathSync, statSync, readdirSync, appendFileSync, mkdtempSync } from 'node:fs';
 import { join, resolve, relative, dirname, sep, posix } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
-import { pathToFileURL, fileURLToPath } from 'node:url';
-import { parseEnvFile, safePath, runTool as readTool, rejectsForcedToolChoice, metaPhrase, gh, ghAll, callModelWith, buildDiff } from './review.mjs';
+import { pathToFileURL } from 'node:url';
+import { parseEnvFile, readPrompt, safePath, runTool as readTool, rejectsForcedToolChoice, metaPhrase, gh, ghAll, callModelWith, buildDiff } from './review.mjs';
 
 export const AUTHOR = { name: 'askalf', email: '263217947+askalf@users.noreply.github.com' };
 export const DEFAULT_MODEL = 'claude-opus-5-5';
@@ -717,6 +721,8 @@ async function main() {
   const env = process.env;
   const need = (k, src = env) => { if (!src[k]) { console.error(`::error::${k} is not set`); process.exit(2); } return src[k]; };
   const secrets = parseEnvFile(readFileSync(need('FIX_ENV_FILE'), 'utf8'));
+  let system;
+  try { system = readPrompt(env, 'FIX_PROMPT_FILE'); } catch (e) { console.error(`::error::${e.message}`); process.exit(2); }
   // The runner's workspace outlives the job, so an earlier run's output is removed before this
   // one can leave anything to be uploaded.
   const out = resolve(need('FIX_OUT'));
@@ -726,7 +732,7 @@ async function main() {
   const ctx = {
     repo: need('REPO'), pr: Number(need('PR')), headSha: need('HEAD_SHA'), reviewUrl: need('REVIEW_URL'), checkout: need('CHECKOUT'), out,
     readToken: need('GH_READ_TOKEN'), darioUrl, darioKey: need('DARIO_API_KEY', secrets), model: secrets.FIX_MODEL || DEFAULT_MODEL,
-    system: readFileSync(fileURLToPath(new URL('./fix-prompt.md', import.meta.url)), 'utf8'),
+    system,
     fetch: onlyOrigins(globalThis.fetch, ['https://api.github.com', darioUrl]),
     sleep: (ms) => new Promise((r) => setTimeout(r, ms)), now: () => Date.now(),
     dryRun: env.DRY_RUN === '1' || env.DRY_RUN === 'true',

@@ -34,9 +34,10 @@ jobs:
     permissions:
       contents: read
     env:
-      # Every repo whose .github/workflows/redline.yml calls askalf/askalf's redline-review.yml.
+      # Every repo whose .github/workflows/redline.yml calls this repository's redline-review.yml,
+      # this repository included: its own caller moves through a bump PR like every other one.
       CALLERS: >-
-        askalf/askalf askalf/dario askalf/amnesia askalf/browser-bridge askalf/redstamp
+        askalf/ci askalf/askalf askalf/dario askalf/amnesia askalf/browser-bridge askalf/redstamp
         askalf/truecopy askalf/truecopy-action askalf/cordon askalf/plumbline askalf/checkout-with-retry
       # A bot-shaped branch opened by askalf: the fleet lanes treat it as a bot PR.
       BRANCH: bot/redline-pin
@@ -100,7 +101,7 @@ jobs:
                 continue
               fi
               if ! printf '%s\n' "$current" | grep -Eq "$pattern"; then
-                echo "::error::${repo}: ${path} has no pinned askalf/askalf call"; failed=1; continue
+                echo "::error::${repo}: ${path} has no pinned ${SOURCE} call"; failed=1; continue
               fi
               if printf '%s\n' "$current" | grep -Eq "redline-(review|fix-run).yml@${SHA}" && printf '%s\n' "$current" | grep -q "redline-ref: ${SHA}"; then
                 echo "${path} already at ${short}"; continue
@@ -133,7 +134,7 @@ jobs:
               gh pr edit "$open" --repo "$repo" --title "ci: bump Redline to ${SOURCE}@${short}" >/dev/null
               echo "updated #${open}"
             else
-              body="Moves the pinned askalf/askalf calls and their redline-ref inputs to ${SOURCE}@${SHA}, the main commit that last changed the review or the fix (${note}). The scripts are fetched at that same commit. The pins are the only change."
+              body="Moves the pinned ${SOURCE} calls and their redline-ref inputs to ${SOURCE}@${SHA}, the main commit that last changed the review or the fix (${note}). The scripts are fetched at that same commit. The pins are the only change."
               gh pr create --repo "$repo" --base "$base" --head "$BRANCH" \
                 --title "ci: bump Redline to ${SOURCE}@${short}" --body "$body"
             fi

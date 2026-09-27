@@ -31,14 +31,16 @@
 //
 // CLI (the workflow's review step):
 //   REPO=owner/name PR=<n> HEAD_SHA=<sha> CHECKOUT=<dir> GH_READ_TOKEN=... \
-//   REDLINE_ENV_FILE=/etc/askalf/redline.env node review.mjs
+//   REDLINE_ENV_FILE=/etc/askalf/redline.env REDLINE_PROMPT_FILE=/etc/askalf/redline-prompt.md node review.mjs
 // The env file holds DARIO_API_KEY, and optionally REDLINE_GITHUB_TOKEN (or GITHUB_PAT_REVIEWER),
-// DARIO_URL (default http://127.0.0.1:3456) and REDLINE_MODEL. REDLINE_VERDICT_FILE, when set, is
-// where verdict.json goes.
+// DARIO_URL (default http://127.0.0.1:3456) and REDLINE_MODEL. REDLINE_PROMPT_FILE names the system
+// prompt, installed on the runner host: this repository is public and carries no prompt, so there is
+// no bundled fallback, and a variable that is unset, a file that cannot be read or an empty file ends
+// the run. REDLINE_VERDICT_FILE, when set, is where verdict.json goes.
 
 import { readFileSync, readdirSync, lstatSync, realpathSync, appendFileSync, openSync, readSync, closeSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
 import { join, resolve, relative, isAbsolute, sep, dirname } from 'node:path';
-import { pathToFileURL, fileURLToPath } from 'node:url';
+import { pathToFileURL } from 'node:url';
 
 export const REVIEWER_LOGIN = 'sprayberry-redline';
 
@@ -105,6 +107,20 @@ export function parseEnvFile(text) {
     out[line.slice(0, eq).trim()] = v;
   }
   return out;
+}
+
+/**
+ * The system prompt: the whole of the file named by env[name]. The prompt is installed on the
+ * runner host and is never committed to this public repository, so there is no fallback: an
+ * unset variable, a file that cannot be read and an empty file each throw, naming the variable.
+ */
+export function readPrompt(env, name) {
+  const file = env[name];
+  if (!file) throw new Error(`${name} is not set; it must name the system prompt file on the runner host`);
+  let text;
+  try { text = readFileSync(file, 'utf8'); } catch (e) { throw new Error(`${name}: cannot read ${file} (${e.code ?? e.message})`); }
+  if (!text.trim()) throw new Error(`${name}: ${file} is empty`);
+  return text;
 }
 
 /** Resolve p under root, refusing anything (including a symlink) that lands outside it. */
@@ -544,6 +560,8 @@ async function main() {
   const env = process.env;
   const need = (k, src = env) => { if (!src[k]) { console.error(`::error::${k} is not set`); process.exit(2); } return src[k]; };
   const secrets = parseEnvFile(readFileSync(need('REDLINE_ENV_FILE'), 'utf8'));
+  let system;
+  try { system = readPrompt(env, 'REDLINE_PROMPT_FILE'); } catch (e) { console.error(`::error::${e.message}`); process.exit(2); }
   // The runner's workspace outlives the job, so a file from an earlier run is removed before this
   // one can leave it to be uploaded.
   const verdictFile = env.REDLINE_VERDICT_FILE || '';
@@ -554,7 +572,7 @@ async function main() {
     reviewToken: secrets.REDLINE_GITHUB_TOKEN || secrets.GITHUB_PAT_REVIEWER || '',
     darioUrl: secrets.DARIO_URL || 'http://127.0.0.1:3456', darioKey: need('DARIO_API_KEY', secrets),
     model: secrets.REDLINE_MODEL || DEFAULT_MODEL,
-    system: readFileSync(fileURLToPath(new URL('./prompt.md', import.meta.url)), 'utf8'),
+    system,
     fetch: globalThis.fetch, sleep: (ms) => new Promise((r) => setTimeout(r, ms)), now: () => Date.now(),
     dryRun: env.REDLINE_DRY_RUN === '1',
     log: (line) => console.log(line),

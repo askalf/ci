@@ -1,6 +1,7 @@
 # Runs Redline's tests on any change to the review or fix scripts, their reusable workflows, this
 # repo's callers, or the pin bump workflow, all of which the tests read.
-# The model and GitHub are stubbed; no credentials are used.
+# The model and GitHub are stubbed; no credentials are used. The prompts the tests hand the scripts
+# are the three-line stand-ins under scripts/redline/test-fixtures, never the rubric.
 name: Redline self-test
 
 on:
@@ -30,3 +31,5 @@ jobs:
           node-version: 22
       - run: node scripts/redline/review.test.mjs
       - run: node scripts/redline/fix.test.mjs
+      # tools.json is TOOLS as a file; it fails here when review.mjs changed a tool without it.
+      - run: node scripts/redline/dump-tools.mjs --check
