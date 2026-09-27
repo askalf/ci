@@ -14,8 +14,9 @@ passes, REQUEST_CHANGES fails. The finished review goes up as the `redline-verdi
 forge posts it as `sprayberry-redline` after checking where the run came from. The reviewer's brief is
 `/etc/askalf/redline-prompt.md` on the runner host, named by `REDLINE_PROMPT_FILE`, never a file in
 this repository; `review.test.mjs` runs it all against a stubbed GitHub and model, with the three-line
-stand-in in `test-fixtures/`. `tools.json` is `TOOLS` as a file, for a truecopy pin;
-`dump-tools.mjs --check` fails when the two drift apart.
+stand-in in `test-fixtures/`. `tools.json` is `TOOLS` as a file, pinned in the repository's
+`truecopy.lock` and verified by `truecopy-gate.yml`; `dump-tools.mjs --check` fails when the two
+drift apart.
 
 ## The fix: `redline-fix-run.yml` and `fix.mjs`
 

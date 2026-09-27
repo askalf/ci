@@ -61,3 +61,12 @@ repository in the list; without it the job says so and stops, green.
 `node scripts/redline/review.test.mjs` and `node scripts/redline/fix.test.mjs` run against a stubbed
 GitHub and model and touch no network. `redline-self-test.yml` runs them, and the `tools.json` drift
 check, on every pull request that changes the scripts or the workflows.
+
+## The truecopy gate
+
+`truecopy.lock` pins `scripts/redline/tools.json`, the tool surface the reviewing model reads, and
+`truecopy-gate.yml` verifies it on every pull request and push to `main`: `dump-tools.mjs --check`
+proves the file still matches `TOOLS` in `review.mjs`, then `truecopy verify` proves the pinned bytes
+did not move and still scan clean. A changed tool fails until it is re-pinned with
+`truecopy add scripts/redline/tools.json`. The prompts are not in the lock: they live on the runner
+hosts, not in this repository, so there is nothing here to pin.
