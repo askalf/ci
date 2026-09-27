@@ -21,7 +21,7 @@ jobs:
     # fork's code never reaches the self-hosted runner even if the callee changes.
     if: github.event.pull_request.draft == false && github.event.pull_request.head.repo.full_name == github.repository
     # Pinned so a change to the review workflow reaches this repo only through a reviewed bump here.
-    uses: askalf/ci/.github/workflows/redline-review.yml@1012ce7b35c2bf7b97d291117e4f4e09a8315695 # main 2026-09-26, import from askalf/askalf
+    uses: askalf/ci/.github/workflows/redline-review.yml@0c07d9debea4267e98cb01e882c33b7dee65a7a7 # main 2026-09-26
     with:
-      redline-ref: 1012ce7b35c2bf7b97d291117e4f4e09a8315695
+      redline-ref: 0c07d9debea4267e98cb01e882c33b7dee65a7a7
       runner-label: redline
