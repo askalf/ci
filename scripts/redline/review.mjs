@@ -29,11 +29,17 @@
 //     empty assistant turn is rejected upstream; the same request is simply sent again. A reply
 //     with no content array at all fails the run at once.
 //
+//   - A model dario reports parked (a 429 marked pool_parked: every seat is over that model's quota,
+//     with a reset past the retry budget) is not retried; the turn is sent again on
+//     REDLINE_FALLBACK_MODEL. On 2026-09-28 every seat was out of Fable's included-overage credit
+//     for four days while Opus still served, and each review burned its retries and failed.
+//
 // CLI (the workflow's review step):
 //   REPO=owner/name PR=<n> HEAD_SHA=<sha> CHECKOUT=<dir> GH_READ_TOKEN=... \
 //   REDLINE_ENV_FILE=/etc/askalf/redline.env REDLINE_PROMPT_FILE=/etc/askalf/redline-prompt.md node review.mjs
 // The env file holds DARIO_API_KEY, and optionally REDLINE_GITHUB_TOKEN (or GITHUB_PAT_REVIEWER),
-// DARIO_URL (default http://127.0.0.1:3456) and REDLINE_MODEL. REDLINE_PROMPT_FILE names the system
+// DARIO_URL (default http://127.0.0.1:3456), REDLINE_MODEL and REDLINE_FALLBACK_MODEL (default
+// claude-opus-5-5; set it empty for no fallback). REDLINE_PROMPT_FILE names the system
 // prompt, installed on the runner host: this repository is public and carries no prompt, so there is
 // no bundled fallback, and a variable that is unset, a file that cannot be read or an empty file ends
 // the run. REDLINE_VERDICT_FILE, when set, is where verdict.json goes.
@@ -63,6 +69,7 @@ export function metaPhrase(text) {
   return null;
 }
 export const DEFAULT_MODEL = 'claude-fable-5-1';
+export const DEFAULT_FALLBACK_MODEL = 'claude-opus-5-5';
 
 // Claude Fable 5.1, Claude Mythos 5.1 and Claude Opus 5.5 answer a forced tool_choice (type "tool"
 // or "any") with 400 `tool_choice: type "tool" and "any" are not supported for this model.`, on
@@ -363,6 +370,17 @@ export function runTool(root, name, input = {}) {
 
 // ---------- GitHub and the model ----------
 
+/**
+ * dario's answer when every seat is over the requested model's quota (x-dario-upstream-rejection:
+ * pool_parked). Nothing was sent upstream, and the same model cannot be served before retryAfterMs.
+ */
+export class ModelParked extends Error {
+  constructor(what, retryAfterMs, detail) {
+    super(`${what}: HTTP 429 pool_parked, the model is parked for ${Math.ceil(retryAfterMs / 1000)}s: ${detail}`);
+    this.retryAfterMs = retryAfterMs;
+  }
+}
+
 // Shared with fix.mjs: the same retry, GitHub read and model call serve the review and the fix.
 export async function withRetry(ctx, what, fn) {
   const waits = [5_000, 15_000, 45_000];
@@ -373,6 +391,12 @@ export async function withRetry(ctx, what, fn) {
       await ctx.sleep(waits[attempt]); continue;
     }
     if (res.ok) return res;
+    // A park that outlasts the waits left cannot be retried out of; say so now, not after them.
+    if (res.status === 429 && res.headers?.get?.('x-dario-upstream-rejection') === 'pool_parked') {
+      const retryAfterMs = (Number(res.headers.get('retry-after')) || 0) * 1000;
+      const budget = waits.slice(attempt).reduce((a, b) => a + b, 0);
+      if (!(retryAfterMs > 0) || retryAfterMs > budget) throw new ModelParked(what, retryAfterMs, (await res.text()).slice(0, 300));
+    }
     if ((res.status === 429 || res.status >= 500) && attempt < waits.length) { await ctx.sleep(waits[attempt]); continue; }
     throw new Error(`${what}: HTTP ${res.status} ${(await res.text()).slice(0, 300)}`);
   }
@@ -448,7 +472,7 @@ export function buildBrief(pr, files, commits, diff) {
 
 /**
  * Review one PR head. ctx: { repo, pr, headSha, checkout, readToken, reviewToken, darioUrl, darioKey,
- * model, system, fetch, sleep, now, log }. With no reviewToken the review is built but not posted.
+ * model, fallbackModel, system, fetch, sleep, now, log }. With no reviewToken the review is built but not posted.
  * Returns { outcome: 'posted'|'unposted'|'existing'|'skipped'|'dry-run', verdict?, url?, reason?, record? };
  * record (verdict.json) is set when a review was built for this head, posted or not.
  */
@@ -478,11 +502,21 @@ export async function runReview(ctx) {
   // this script and the model drops tool_choice, so the forced turns never forced anything.
   const TEXT_ONLY_NUDGE = 'That text was discarded: a review is accepted only as a redline_submit tool call. '
     + 'Call redline_submit now with verdict, summary and findings; do not answer in text again.';
-  const canForce = !rejectsForcedToolChoice(ctx.model);
   for (let turn = 1; turn <= LIMITS.turns && !review; turn++) {
     const force = turn >= LIMITS.forceSubmitAt || ctx.now() - started > LIMITS.timeMs;
+    // Read per turn: a fallback below can change the model mid-review.
+    const canForce = !rejectsForcedToolChoice(ctx.model);
     if (force && !canForce) askForSubmit(messages);
-    const res = await callModel(ctx, ctx.system, messages, !force ? null : canForce ? { type: 'tool', name: 'redline_submit' } : { type: 'auto' });
+    let res;
+    try {
+      res = await callModel(ctx, ctx.system, messages, !force ? null : canForce ? { type: 'tool', name: 'redline_submit' } : { type: 'auto' });
+    } catch (e) {
+      if (!(e instanceof ModelParked) || !ctx.fallbackModel || ctx.fallbackModel === ctx.model) throw e;
+      ctx.log?.(`${ctx.model} is parked in dario for ${Math.ceil(e.retryAfterMs / 1000)}s; the review continues on ${ctx.fallbackModel}`);
+      ctx.model = ctx.fallbackModel;
+      turn--;
+      continue;
+    }
     if (!Array.isArray(res?.content)) {
       throw new Error(`the model returned no message content: ${JSON.stringify(res ?? null).slice(0, 300)}`);
     }
@@ -572,6 +606,7 @@ async function main() {
     reviewToken: secrets.REDLINE_GITHUB_TOKEN || secrets.GITHUB_PAT_REVIEWER || '',
     darioUrl: secrets.DARIO_URL || 'http://127.0.0.1:3456', darioKey: need('DARIO_API_KEY', secrets),
     model: secrets.REDLINE_MODEL || DEFAULT_MODEL,
+    fallbackModel: secrets.REDLINE_FALLBACK_MODEL ?? DEFAULT_FALLBACK_MODEL,
     system,
     fetch: globalThis.fetch, sleep: (ms) => new Promise((r) => setTimeout(r, ms)), now: () => Date.now(),
     dryRun: env.REDLINE_DRY_RUN === '1',
