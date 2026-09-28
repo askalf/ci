@@ -1,19 +1,13 @@
-# Runs Redline's tests on any change to the review or fix scripts, their reusable workflows, this
-# repo's callers, or the pin bump workflow, all of which the tests read.
+# Runs Redline's tests on every pull request. The tests read the review and fix scripts, their
+# reusable workflows, this repo's callers and the pin bump workflow; they take seconds. `test` is a
+# required check on main, and a required check from a path-filtered workflow never reports on a PR
+# outside its paths, which then cannot merge (askalf/ci#2 changed only truecopy-gate.yml).
 # The model and GitHub are stubbed; no credentials are used. The prompts the tests hand the scripts
 # are the three-line stand-ins under scripts/redline/test-fixtures, never the rubric.
 name: Redline self-test
 
 on:
   pull_request:
-    paths:
-      - scripts/redline/**
-      - .github/workflows/redline-review.yml
-      - .github/workflows/redline-fix-run.yml
-      - .github/workflows/redline-self-test.yml
-      - .github/workflows/redline-pin-bump.yml
-      - .github/workflows/redline.yml
-      - .github/workflows/redline-fix.yml
 
 permissions:
   contents: read

@@ -706,7 +706,10 @@ console.log('\n  pin bump, both callers');
   check('the bump workflow rewrites both caller paths with pin.mjs', /CALLER_PATHS: .*redline\.yml .*redline-fix\.yml/.test(bump.replace(/\n\s+/g, ' ')) && bump.includes('node scripts/redline/pin.mjs "$SHA" "$note"') && /redline-\(review\|fix-run\)\.yml/.test(bump));
   check('the bump workflow runs when the fix workflow changes', /- \.github\/workflows\/redline-fix-run\.yml/.test(bump));
   const selfTest = readFileSync(fileURLToPath(new URL('../../.github/workflows/redline-self-test.yml', import.meta.url)), 'utf8');
-  check('the self-test runs these tests and watches the fix workflow', selfTest.includes('node scripts/redline/fix.test.mjs') && selfTest.includes('- .github/workflows/redline-fix-run.yml'));
+  // `test` is a required check, so it must report on every PR: no paths filter, which would leave a
+  // PR outside the paths with a check that never runs (askalf/ci#2).
+  check('the self-test runs these tests on every pull request', selfTest.includes('node scripts/redline/fix.test.mjs')
+    && /^on:\n {2}pull_request:\n\n/m.test(selfTest.replace(/\r\n/g, '\n')) && !/^\s+paths(-ignore)?:/m.test(selfTest));
 }
 
 rmSync(root, { recursive: true, force: true });
