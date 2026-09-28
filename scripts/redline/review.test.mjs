@@ -689,8 +689,10 @@ console.log('\n  pin bump');
     /\n  workflow_dispatch:\n    inputs:\n      pr:\n(?:        .*\n)*?        type: string\n      head:\n(?:        .*\n)*?        type: string\n      reread:\n(?:        .*\n)*?        default: false\n        type: boolean\n/.test(own));
   check('the dispatch title is the one forge parses',
     own.includes("run-name: ${{ github.event_name == 'workflow_dispatch' && format('Redline review {0}#{1} @ {2}{3}', github.repository, inputs.pr, inputs.head, inputs.reread && ' (re-read)' || '') || github.event.pull_request.title }}\n"));
-  check('a dispatch is queued, never cancelled; a push still cancels the older pull_request run',
-    own.includes('  group: redline-${{ github.event_name }}-${{ github.event.pull_request.number || inputs.pr }}\n')
+  // A concurrency group holds one pending run and a newer one cancels it, so each dispatch (head and
+  // mode) gets a group of its own; a push still cancels the older pull_request run.
+  check('a dispatch has a group per head and mode and is never cancelled; a push cancels the older pull_request run',
+    own.includes("  group: redline-${{ github.event_name }}-${{ github.event.pull_request.number || inputs.pr }}${{ inputs.head && format('-{0}-{1}', inputs.head, inputs.reread) || '' }}\n")
     && own.includes("  cancel-in-progress: ${{ github.event_name == 'pull_request' }}\n"));
   check('the job runs for a dispatch or a same-repo non-draft PR',
     own.includes("if: github.event_name == 'workflow_dispatch' || (github.event.pull_request.draft == false && github.event.pull_request.head.repo.full_name == github.repository)\n"));
