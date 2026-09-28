@@ -240,8 +240,8 @@ console.log('\n  finish_fix and the loop');
 {
   check('the tool set is the contract', TOOLS.map((t) => t.name).join() === 'fix_list,fix_read,fix_search,fix_write,fix_run,finish_fix');
   // dario remaps a client tool with a common name (read_file, write_file, run, search, list_files, ...)
-  // onto Claude Code's own and sends the rest as mcp__client__<name>; a half-remapped set left Opus 5.5
-  // unable to find finish_fix (2026-09-28). Every name must be one no client uses.
+  // onto Claude Code's own and sends the rest as mcp__client__<name>. Every name must be one no client
+  // uses, so the whole set goes out one way.
   const COMMON = ['list_files', 'read_file', 'search', 'write_file', 'run', 'read', 'write', 'edit', 'bash', 'grep', 'glob', 'shell', 'ls', 'list_dir'];
   check('every tool is fix_* or finish_fix, and none is a common tool name dario remaps',
     TOOLS.every((t) => /^(fix_[a-z]+|finish_fix)$/.test(t.name) && !COMMON.includes(t.name)));

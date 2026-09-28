@@ -359,10 +359,8 @@ export function saveFix(dir, record) {
 
 // Every tool name is fix_* (or finish_fix), never a common tool name. dario maps a non-Claude-Code
 // client's tools named like read_file, write_file, run, search or list_files onto Claude Code's own
-// (Read, Write, Bash, Grep, Glob) and sends the rest as mcp__client__<name>. With half the set
-// remapped, Opus 5.5 did not recognise mcp__client__finish_fix as the finish_fix its brief names,
-// answered in prose and never finished (dario Redline fix runs 36370155080, 36370669378 and
-// 36421993358, 2026-09-28). Names no client uses all go out one way, as Redline's redline_* do.
+// (Read, Write, Bash, Grep, Glob) and sends the rest as mcp__client__<name>. A set split across the
+// two forms can leave the model unable to find finish_fix; names no client uses all go out one way.
 export const TOOLS = [
   { name: 'fix_list', description: 'List a directory of the checkout (directories end with /).',
     input_schema: { type: 'object', properties: { path: { type: 'string', description: 'Directory relative to the repo root; default the root.' } } } },
