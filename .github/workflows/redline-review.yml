@@ -8,6 +8,13 @@
 # only after checking, from the GitHub API, that the run came from the pinned redline.yml at the PR's
 # current head and that the PR changes no workflow or action definitions.
 # The PR's code is checked out only to be read by the review's read-only tools; nothing from it runs.
+#
+# Dispatch mode: a caller's redline.yml also takes workflow_dispatch, and forge dispatches it on the
+# default branch with the PR, the head to review and whether this is a re-read of a head already
+# reviewed. The run then executes the default branch's workflow files, not the PR's, so its verdict
+# holds even for a PR that changes CI definitions. Forge uses it for every head its pull_request run
+# cannot vouch for: a PR that changes CI, a verdict it refused, and a description-only re-read.
+# Fork PRs never come here: the guard below refuses a head outside the repository before any checkout.
 name: Redline review
 
 on:
@@ -23,6 +30,21 @@ on:
           caller's uses pin. The review script is fetched at it. It must be a commit on main.
         required: true
         type: string
+      pr:
+        description: Dispatch mode only. The pull request number; empty on pull_request.
+        required: false
+        default: ''
+        type: string
+      head:
+        description: Dispatch mode only. The full commit sha to review; the run fails if the PR is not at it.
+        required: false
+        default: ''
+        type: string
+      reread:
+        description: Dispatch mode only. Review the head even when a Redline verdict already stands there.
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -30,8 +52,9 @@ permissions:
 
 jobs:
   redline:
-    # Same-repo PRs only: a fork's code never reaches the self-hosted runner. Drafts wait.
-    if: github.event.pull_request.head.repo.full_name == github.repository && !github.event.pull_request.draft
+    # Same-repo PRs only: a fork's code never reaches the self-hosted runner. Drafts wait. A dispatch
+    # names its PR in inputs and is checked by the first steps, before anything is fetched.
+    if: inputs.pr != '' || (github.event.pull_request.head.repo.full_name == github.repository && !github.event.pull_request.draft)
     runs-on: [self-hosted, "${{ inputs.runner-label }}"]
     timeout-minutes: 20
     steps:
@@ -75,6 +98,46 @@ jobs:
             process.exit(1);
           '
 
+      # A dispatch runs the default branch's workflow files, which is the only reason forge trusts
+      # its verdict, so it must be a workflow_dispatch on the default branch. The PR it names must be
+      # open, not a draft, in this repository (a fork's head is never checked out here) and at the
+      # head given. Every check is made before the PR's code is fetched; a failed read fails the run.
+      - name: Check the dispatched PR
+        if: inputs.pr != ''
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          REPO: ${{ github.repository }}
+          PR: ${{ inputs.pr }}
+          HEAD_SHA: ${{ inputs.head }}
+          GH_READ_TOKEN: ${{ github.token }}
+        run: |
+          node --input-type=module -e '
+            const { EVENT_NAME, REF, DEFAULT_BRANCH, REPO, PR, HEAD_SHA } = process.env;
+            const fail = (why) => { console.log(`::error::${why}`); process.exit(1); };
+            if (EVENT_NAME !== "workflow_dispatch") fail(`a pr input is taken only on workflow_dispatch, not ${EVENT_NAME}`);
+            if (!DEFAULT_BRANCH || REF !== `refs/heads/${DEFAULT_BRANCH}`) fail(`a dispatch must run on the default branch ${DEFAULT_BRANCH}, not ${REF}`);
+            if (!/^[1-9][0-9]*$/.test(PR)) fail(`pr must be a pull request number; got ${JSON.stringify(PR)}`);
+            if (!/^[0-9a-f]{40}$/.test(HEAD_SHA)) fail(`head must be the full 40-character commit sha to review; got ${JSON.stringify(HEAD_SHA)}`);
+            const headers = { authorization: `Bearer ${process.env.GH_READ_TOKEN}`, accept: "application/vnd.github+json" };
+            let pr = null;
+            for (let attempt = 1; attempt <= 3 && !pr; attempt++) {
+              try {
+                const res = await fetch(`https://api.github.com/repos/${REPO}/pulls/${PR}`, { headers });
+                if (res.ok) pr = await res.json();
+                else console.log(`attempt ${attempt}: HTTP ${res.status}`);
+              } catch (e) { console.log(`attempt ${attempt}: ${e.message}`); }
+              if (!pr && attempt < 3) await new Promise((r) => setTimeout(r, attempt * 5000));
+            }
+            if (!pr) fail(`could not read ${REPO}#${PR}`);
+            if (pr.state !== "open") fail(`${REPO}#${PR} is ${pr.state}`);
+            if (pr.draft) fail(`${REPO}#${PR} is a draft`);
+            if (pr.head?.repo?.full_name !== REPO) fail(`${REPO}#${PR} has its head outside ${REPO}; a fork head is not reviewed here`);
+            if (pr.head?.sha !== HEAD_SHA) fail(`${REPO}#${PR} is at ${String(pr.head?.sha).slice(0, 7)}, not ${HEAD_SHA.slice(0, 7)}; dispatch again at its head`);
+            console.log(`${REPO}#${PR} is open, in this repository and at ${HEAD_SHA.slice(0, 7)}`);
+          '
+
       - name: Fetch the review script from askalf/ci
         uses: askalf/checkout-with-retry@115a6407547e9711edbc2e915838d495cad9583f  # v1.1.0
         with:
@@ -88,15 +151,16 @@ jobs:
       - name: Check out the PR head to read
         uses: askalf/checkout-with-retry@115a6407547e9711edbc2e915838d495cad9583f  # v1.1.0
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
+          ref: ${{ inputs.head || github.event.pull_request.head.sha }}
           path: pr
           persist-credentials: false
 
       - name: Review
         env:
           REPO: ${{ github.repository }}
-          PR: ${{ github.event.pull_request.number }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR: ${{ inputs.pr || github.event.pull_request.number }}
+          HEAD_SHA: ${{ inputs.head || github.event.pull_request.head.sha }}
+          REDLINE_REREAD: ${{ inputs.pr != '' && inputs.reread && '1' || '0' }}
           CHECKOUT: ${{ github.workspace }}/pr
           GH_READ_TOKEN: ${{ github.token }}
           REDLINE_ENV_FILE: /etc/askalf/redline.env
