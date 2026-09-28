@@ -18,7 +18,7 @@
 // Hardening, each with a reason:
 //   - The review must be a CHANGES_REQUESTED review of this PR at this head: an old review, a
 //     review on another PR, a moved head or a fork PR is refused before the model is called.
-//   - write_file stays inside the checkout (symlinks resolved) and never touches .github/: a
+//   - fix_write stays inside the checkout (symlinks resolved) and never touches .github/: a
 //     workflow change from this lane would run with the PR's own permissions on the next push.
 //   - run takes an allowlist only, without a shell: the package.json test, lint, typecheck and
 //     build scripts through the detected package manager, and node <file> inside the checkout.
@@ -357,16 +357,22 @@ export function saveFix(dir, record) {
 
 // ---------- tools ----------
 
+// Every tool name is fix_* (or finish_fix), never a common tool name. dario maps a non-Claude-Code
+// client's tools named like read_file, write_file, run, search or list_files onto Claude Code's own
+// (Read, Write, Bash, Grep, Glob) and sends the rest as mcp__client__<name>. With half the set
+// remapped, Opus 5.5 did not recognise mcp__client__finish_fix as the finish_fix its brief names,
+// answered in prose and never finished (dario Redline fix runs 36370155080, 36370669378 and
+// 36421993358, 2026-09-28). Names no client uses all go out one way, as Redline's redline_* do.
 export const TOOLS = [
-  { name: 'list_files', description: 'List a directory of the checkout (directories end with /).',
+  { name: 'fix_list', description: 'List a directory of the checkout (directories end with /).',
     input_schema: { type: 'object', properties: { path: { type: 'string', description: 'Directory relative to the repo root; default the root.' } } } },
-  { name: 'read_file', description: 'Read numbered lines of a file in the checkout. At most 400 lines per call.',
+  { name: 'fix_read', description: 'Read numbered lines of a file in the checkout. At most 400 lines per call.',
     input_schema: { type: 'object', required: ['path'], properties: { path: { type: 'string' }, start_line: { type: 'integer', minimum: 1 }, end_line: { type: 'integer', minimum: 1 } } } },
-  { name: 'search', description: 'Search the checkout with a JavaScript regular expression. At most 80 matches.',
+  { name: 'fix_search', description: 'Search the checkout with a JavaScript regular expression. At most 80 matches.',
     input_schema: { type: 'object', required: ['pattern'], properties: { pattern: { type: 'string' }, path: { type: 'string', description: 'Directory or file to search; default the root.' } } } },
-  { name: 'write_file', description: 'Write a whole file in the checkout (created if absent). Read it first and write it back complete. Never under .github/, .git/ or node_modules/.',
+  { name: 'fix_write', description: 'Write a whole file in the checkout (created if absent). Read it first and write it back complete. Never under .github/, .git/ or node_modules/.',
     input_schema: { type: 'object', required: ['path', 'content'], properties: { path: { type: 'string' }, content: { type: 'string' } } } },
-  { name: 'run', description: `Run one allowed command in the checkout, without a shell; stdout and stderr together, capped. Default timeout ${LIMITS.runDefaultS}s, at most ${LIMITS.runMaxS}s. The allowed commands are listed in the brief.`,
+  { name: 'fix_run', description: `Run one allowed command in the checkout, without a shell; stdout and stderr together, capped. Default timeout ${LIMITS.runDefaultS}s, at most ${LIMITS.runMaxS}s. The allowed commands are listed in the brief.`,
     input_schema: { type: 'object', required: ['command'], properties: { command: { type: 'string' }, timeout_seconds: { type: 'integer', minimum: 1, maximum: LIMITS.runMaxS } } } },
   { name: 'finish_fix', description: 'Finish. Call exactly once, last, after the tests have run on your edits.',
     input_schema: { type: 'object', required: ['outcome', 'summary'], properties: {
@@ -617,10 +623,10 @@ export async function runFix(ctx) {
     const record = (argv, r) => { const row = { command: argv.join(' '), exit: r.exit, out: r.out, timedOut: r.timedOut, seq: ++seq, isTest: isTest(argv) }; runs.push(row); return row; };
 
     const tool = (name, input) => {
-      if (name === 'list_files') return readTool(root, 'redline_list', input);
-      if (name === 'read_file') return readTool(root, 'redline_read', input);
-      if (name === 'search') return readTool(root, 'redline_search', input);
-      if (name === 'write_file') {
+      if (name === 'fix_list') return readTool(root, 'redline_list', input);
+      if (name === 'fix_read') return readTool(root, 'redline_read', input);
+      if (name === 'fix_search') return readTool(root, 'redline_search', input);
+      if (name === 'fix_write') {
         try {
           const abs = safeWritePath(root, input.path);
           const content = String(input.content ?? '');
@@ -635,7 +641,7 @@ export async function runFix(ctx) {
           return `wrote ${rel} (${content.split('\n').length} lines)`;
         } catch (e) { return `error: ${e.message}`; }
       }
-      if (name === 'run') {
+      if (name === 'fix_run') {
         const a = allowedArgv(input.command, plan, root);
         if (a.error) return `error: ${a.error}`;
         const s = Math.min(LIMITS.runMaxS, Math.max(1, Number(input.timeout_seconds) || LIMITS.runDefaultS));

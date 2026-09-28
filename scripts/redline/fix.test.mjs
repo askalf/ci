@@ -238,7 +238,13 @@ console.log('\n  fix.json');
 
 console.log('\n  finish_fix and the loop');
 {
-  check('the tool set is the contract', TOOLS.map((t) => t.name).join() === 'list_files,read_file,search,write_file,run,finish_fix');
+  check('the tool set is the contract', TOOLS.map((t) => t.name).join() === 'fix_list,fix_read,fix_search,fix_write,fix_run,finish_fix');
+  // dario remaps a client tool with a common name (read_file, write_file, run, search, list_files, ...)
+  // onto Claude Code's own and sends the rest as mcp__client__<name>; a half-remapped set left Opus 5.5
+  // unable to find finish_fix (2026-09-28). Every name must be one no client uses.
+  const COMMON = ['list_files', 'read_file', 'search', 'write_file', 'run', 'read', 'write', 'edit', 'bash', 'grep', 'glob', 'shell', 'ls', 'list_dir'];
+  check('every tool is fix_* or finish_fix, and none is a common tool name dario remaps',
+    TOOLS.every((t) => /^(fix_[a-z]+|finish_fix)$/.test(t.name) && !COMMON.includes(t.name)));
   check('finish_fix needs a summary and, when fixed, a subject', /summary/.test(checkFinish({ outcome: 'fixed' }).error) && /subject/.test(checkFinish({ outcome: 'fixed', summary: 's' }).error));
   check('refused needs a reason', /reason/.test(checkFinish({ outcome: 'refused' }).error) && checkFinish({ outcome: 'refused', reason: 'r' }).sub.reason === 'r');
   check('an unknown outcome is refused', /outcome/.test(checkFinish({ outcome: 'partial', summary: 's', subject: 'x' }).error));
@@ -266,19 +272,19 @@ function loopWorld(turns, { canForce = true } = {}) {
   return { ctx, calls, tools };
 }
 {
-  const w = loopWorld([use('read_file', { path: 'a' }), use('finish_fix', { summary: 's', subject: 'x' })]);
+  const w = loopWorld([use('fix_read', { path: 'a' }), use('finish_fix', { summary: 's', subject: 'x' })]);
   const r = await runLoop(w.ctx, 'brief');
-  check('a tool call runs and its result goes back; finish_fix ends the loop', r.sub?.summary === 's' && r.turns === 2 && w.tools[0][0] === 'read_file' && JSON.stringify(w.calls[1].messages.at(-1)).includes('ran read_file'));
+  check('a tool call runs and its result goes back; finish_fix ends the loop', r.sub?.summary === 's' && r.turns === 2 && w.tools[0][0] === 'fix_read' && JSON.stringify(w.calls[1].messages.at(-1)).includes('ran fix_read'));
   check('the brief is the first user turn, ending with the instruction', w.calls[0].messages[0].content.endsWith('finish with finish_fix.'));
 }
 {
-  const w = loopWorld([use('list_files', {})]);
+  const w = loopWorld([use('fix_list', {})]);
   const r = await runLoop(w.ctx, 'brief');
   check(`a model that never finishes is refused after ${LIMITS.turns} turns, not thrown`, /within 40 turns/.test(r.refused) && r.turns === LIMITS.turns && w.calls.length === LIMITS.turns);
   check(`tools are refused from turn ${LIMITS.forceFinishAt} on, with a forced tool_choice`, w.calls[LIMITS.forceFinishAt - 1].toolChoice?.name === 'finish_fix' && JSON.stringify(w.calls[LIMITS.forceFinishAt].messages.at(-1)).includes('budget is spent') && w.tools.length === LIMITS.forceFinishAt - 1);
 }
 {
-  const w = loopWorld([(messages, tc) => (tc?.type === 'auto' && JSON.stringify(messages.at(-1)).includes(FINISH_REQUIRED.slice(0, 20)) ? use('finish_fix', { summary: 's', subject: 'x' }) : use('list_files', {}))], { canForce: false });
+  const w = loopWorld([(messages, tc) => (tc?.type === 'auto' && JSON.stringify(messages.at(-1)).includes(FINISH_REQUIRED.slice(0, 20)) ? use('finish_fix', { summary: 's', subject: 'x' }) : use('fix_list', {}))], { canForce: false });
   const r = await runLoop(w.ctx, 'brief');
   check('a model that rejects a forced choice gets tool_choice auto and the instruction in the user turn, then finishes',
     r.sub && w.calls.length === LIMITS.forceFinishAt && w.calls.every((c) => c.toolChoice?.type !== 'tool') && w.calls.at(-1).toolChoice?.type === 'auto');
@@ -368,7 +374,7 @@ if (!gitOk) {
   console.log('\n  runFix: a fix');
   {
     const repo = makeRepo();
-    const w = world(repo, { turns: [tool('read_file', { path: 'src/b.js' }), tool('write_file', { path: 'src/b.js', content: FIXED_B }), tool('run', { command: 'node test.mjs' }), finish()] });
+    const w = world(repo, { turns: [tool('fix_read', { path: 'src/b.js' }), tool('fix_write', { path: 'src/b.js', content: FIXED_B }), tool('fix_run', { command: 'node test.mjs' }), finish()] });
     const { record: r } = await runFix(w.ctx);
     check('outcome fixed with a new head past the base', r.outcome === 'fixed' && SHA.test(r.new_head) && r.new_head !== repo.head && r.base_head === repo.head);
     check('one commit, the sanitised subject, the file', r.commits.length === 1 && r.commits[0].sha === r.new_head && r.commits[0].subject === 'fix: read the token from the config' && r.files.join() === 'src/b.js');
@@ -400,7 +406,7 @@ if (!gitOk) {
   console.log('\n  runFix: a dry run');
   {
     const repo = makeRepo();
-    const w = world(repo, { dryRun: true, turns: [tool('write_file', { path: 'src/b.js', content: FIXED_B }), tool('run', { command: 'node test.mjs' }), finish()] });
+    const w = world(repo, { dryRun: true, turns: [tool('fix_write', { path: 'src/b.js', content: FIXED_B }), tool('fix_run', { command: 'node test.mjs' }), finish()] });
     const { record: r } = await runFix(w.ctx);
     check('a dry run is fixed with no commit and no new head', r.outcome === 'fixed' && r.new_head === null && r.commits.length === 0 && r.files.join() === 'src/b.js' && fixProblem(r) === null);
     check('diff.patch holds the change and no bundle is written', existsSync(join(w.out, 'diff.patch')) && readFileSync(join(w.out, 'diff.patch'), 'utf8').includes('+export const token = read();') && !existsSync(join(w.out, 'fix.bundle')));
@@ -413,9 +419,9 @@ if (!gitOk) {
   {
     const repo = makeRepo();
     const w = world(repo, { turns: [
-      tool('write_file', { path: '../escape.js', content: 'x' }), tool('write_file', { path: '.github/workflows/ci.yml', content: 'x' }),
-      tool('write_file', { path: 'src/../../escape.js', content: 'x' }), tool('run', { command: 'npm test' }), tool('run', { command: 'node test.mjs; rm -rf /' }),
-      tool('run', { command: 'node ../x.mjs' }), tool('read_file', { path: '../../etc/passwd' }), finish(),
+      tool('fix_write', { path: '../escape.js', content: 'x' }), tool('fix_write', { path: '.github/workflows/ci.yml', content: 'x' }),
+      tool('fix_write', { path: 'src/../../escape.js', content: 'x' }), tool('fix_run', { command: 'npm test' }), tool('fix_run', { command: 'node test.mjs; rm -rf /' }),
+      tool('fix_run', { command: 'node ../x.mjs' }), tool('fix_read', { path: '../../etc/passwd' }), finish(),
     ] });
     const { record: r } = await runFix(w.ctx);
     const result = (i) => JSON.stringify(w.calls.model[i].messages.at(-1));
@@ -435,7 +441,7 @@ if (!gitOk) {
   console.log('\n  runFix: limits');
   {
     const repo = makeRepo();
-    const w = world(repo, { turns: [tool('list_files', {})] });
+    const w = world(repo, { turns: [tool('fix_list', {})] });
     const { record: r } = await runFix(w.ctx);
     check(`turns: refused after ${LIMITS.turns} model calls`, r.outcome === 'refused' && /within 40 turns/.test(r.notes) && r.turns === LIMITS.turns && w.calls.model.length === LIMITS.turns && fixProblem(r) === null);
     rmSync(w.out, { recursive: true, force: true });
@@ -444,7 +450,7 @@ if (!gitOk) {
   {
     const repo = makeRepo();
     const gen = `import { writeFileSync } from 'node:fs'; for (let i = 0; i < ${LIMITS.files}; i++) writeFileSync('g' + i + '.txt', 'x');\n`;
-    const w = world(repo, { turns: [tool('write_file', { path: 'gen.mjs', content: gen }), tool('run', { command: 'node gen.mjs' }), finish()] });
+    const w = world(repo, { turns: [tool('fix_write', { path: 'gen.mjs', content: gen }), tool('fix_run', { command: 'node gen.mjs' }), finish()] });
     const { record: r } = await runFix(w.ctx);
     check(`files: more than ${LIMITS.files} changed files is refused, with no bundle`, r.outcome === 'refused' && /files; the limit is 30/.test(r.notes) && !existsSync(join(w.out, 'fix.bundle')) && fixProblem(r) === null);
     rmSync(w.out, { recursive: true, force: true });
@@ -453,8 +459,8 @@ if (!gitOk) {
   {
     const repo = makeRepo();
     const writes = [];
-    for (let i = 0; i < LIMITS.files; i++) writes.push(tool('write_file', { path: `f${i}.txt`, content: 'x' }));
-    const w = world(repo, { turns: [...writes, tool('write_file', { path: 'one-more.txt', content: 'x' }), finish()] });
+    for (let i = 0; i < LIMITS.files; i++) writes.push(tool('fix_write', { path: `f${i}.txt`, content: 'x' }));
+    const w = world(repo, { turns: [...writes, tool('fix_write', { path: 'one-more.txt', content: 'x' }), finish()] });
     const { record: r } = await runFix(w.ctx);
     check(`files: the ${LIMITS.files + 1}th write is refused at the tool and the fix stays at the limit`, /the limit; no further file/.test(JSON.stringify(w.calls.model[LIMITS.files + 1].messages.at(-1))) && r.outcome === 'fixed' && r.files.length === LIMITS.files);
     rmSync(w.out, { recursive: true, force: true });
@@ -463,10 +469,10 @@ if (!gitOk) {
   {
     const repo = makeRepo();
     const half = 'y'.repeat(LIMITS.diffBytes / 2 + 1000);
-    const w = world(repo, { turns: [tool('write_file', { path: 'a.txt', content: half }), tool('write_file', { path: 'b.txt', content: half }), finish()] });
+    const w = world(repo, { turns: [tool('fix_write', { path: 'a.txt', content: half }), tool('fix_write', { path: 'b.txt', content: half }), finish()] });
     const { record: r } = await runFix(w.ctx);
     check(`size: a diff over ${LIMITS.diffBytes} bytes is refused, with no bundle`, r.outcome === 'refused' && /the diff is \d+ bytes; the limit/.test(r.notes) && !existsSync(join(w.out, 'fix.bundle')));
-    const big = world(makeRepo(), { turns: [tool('write_file', { path: 'a.txt', content: 'z'.repeat(LIMITS.writeBytes + 1) }), finish()] });
+    const big = world(makeRepo(), { turns: [tool('fix_write', { path: 'a.txt', content: 'z'.repeat(LIMITS.writeBytes + 1) }), finish()] });
     const { record: rb } = await runFix(big.ctx);
     check(`size: one write over ${LIMITS.writeBytes} bytes is refused at the tool`, /larger than/.test(JSON.stringify(big.calls.model[1].messages.at(-1))) && rb.outcome === 'no_change');
     rmSync(w.out, { recursive: true, force: true });
@@ -507,7 +513,7 @@ if (!gitOk) {
     const { record: r } = await runFix(w.ctx);
     check('a refusal from the model is refused with its reason and no bundle', r.outcome === 'refused' && r.notes === 'The finding asks for a behaviour the PR does not add.' && !existsSync(join(w.out, 'fix.bundle')) && r.turns === 1);
     rmSync(w.out, { recursive: true, force: true });
-    const w2 = world(repo, { turns: [tool('write_file', { path: 'src/b.js', content: FIXED_B }), finish({ summary: 'Removed the AI-generated line.' }), finish()] });
+    const w2 = world(repo, { turns: [tool('fix_write', { path: 'src/b.js', content: FIXED_B }), finish({ summary: 'Removed the AI-generated line.' }), finish()] });
     const { record: r2 } = await runFix(w2.ctx);
     const bounced = w2.calls.model[2].messages.at(-1).content[0];
     check('a summary that narrates is bounced with the phrase named, and the clean one lands', r2.outcome === 'fixed' && bounced.is_error === true && /"AI-generated"/.test(bounced.content) && r2.turns === 3);
@@ -518,7 +524,7 @@ if (!gitOk) {
   console.log('\n  runFix: the model that rejects a forced tool_choice');
   {
     const repo = makeRepo();
-    const w = world(repo, { model: DEFAULT_MODEL, turns: [(b) => (JSON.stringify(b.messages.at(-1)).includes('budget is spent') ? finish() : tool('list_files', {}))] });
+    const w = world(repo, { model: DEFAULT_MODEL, turns: [(b) => (JSON.stringify(b.messages.at(-1)).includes('budget is spent') ? finish() : tool('fix_list', {}))] });
     const { record: r } = await runFix(w.ctx);
     check(`${DEFAULT_MODEL}: no request carries a forced choice, the instruction arrives at turn ${LIMITS.forceFinishAt}, and it finishes`,
       r.outcome === 'no_change' && w.calls.model.every((b) => b.tool_choice?.type !== 'tool') && w.calls.model.length === LIMITS.forceFinishAt && w.calls.model.at(-1).tool_choice?.type === 'auto');
@@ -532,7 +538,7 @@ if (!gitOk) {
     console.log('\n  runFix: the test script');
     {
       const repo = makeRepo({ pkg: { name: 'r', private: true, scripts: { test: 'node test.mjs' } } });
-      const w = world(repo, { turns: [tool('write_file', { path: 'src/b.js', content: FIXED_B }), finish()] });
+      const w = world(repo, { turns: [tool('fix_write', { path: 'src/b.js', content: FIXED_B }), finish()] });
       const { record: r } = await runFix(w.ctx);
       check('the model skipped the tests: the script ran them after the last edit and recorded them', r.outcome === 'fixed' && r.tests?.command === 'npm test' && r.tests.exit_code === 0 && /Tests: `npm test` exited 0/.test(r.notes) && fixProblem(r) === null);
       check('package.json and package-lock.json from the install are not in the commit', r.files.join() === 'src/b.js');
@@ -541,7 +547,7 @@ if (!gitOk) {
     }
     {
       const repo = makeRepo({ pkg: { name: 'r', private: true, scripts: { test: 'node test.mjs' } }, testExit: 1 });
-      const w = world(repo, { turns: [tool('write_file', { path: 'src/b.js', content: FIXED_B }), finish(), finish()] });
+      const w = world(repo, { turns: [tool('fix_write', { path: 'src/b.js', content: FIXED_B }), finish(), finish()] });
       const { record: r } = await runFix(w.ctx);
       check('a failing suite is bounced to the model once, then reported as tests_failed', r.outcome === 'tests_failed' && r.tests.exit_code === 1 && JSON.stringify(w.calls.model[2].messages.at(-1)).includes('test script fails') && w.calls.model.length === 3);
       check('tests_failed: diff.patch, no bundle, no commit, schema ok', existsSync(join(w.out, 'diff.patch')) && !existsSync(join(w.out, 'fix.bundle')) && r.new_head === null && sh(repo.dir, ['rev-parse', 'HEAD']) === repo.head && fixProblem(r) === null);
@@ -550,7 +556,7 @@ if (!gitOk) {
     }
     {
       const repo = makeRepo({ pkg: { name: 'r', private: true, scripts: { test: 'node test.mjs' } } });
-      const w = world(repo, { turns: [tool('write_file', { path: 'src/b.js', content: FIXED_B }), tool('run', { command: 'npm test' }), finish()] });
+      const w = world(repo, { turns: [tool('fix_write', { path: 'src/b.js', content: FIXED_B }), tool('fix_run', { command: 'npm test' }), finish()] });
       const { record: r } = await runFix(w.ctx);
       check('a test run by the model after its edit is the one recorded', r.outcome === 'fixed' && r.tests?.command === 'npm test' && w.calls.model.length === 3 && JSON.stringify(w.calls.model[2].messages.at(-1)).includes('exit 0'));
       rmSync(w.out, { recursive: true, force: true });
