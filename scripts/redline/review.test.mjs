@@ -161,7 +161,7 @@ console.log('\n  verdictAtHead');
 // ---------- end to end against a fake GitHub and a fake model ----------
 
 const PATCH = '@@ -1 +1,2 @@\n+export const token = process.env.X;\n const y = 2;';
-function world({ reviews = [], heads = [HEAD], turns, modelStatus = [] } = {}) {
+function world({ reviews = [], heads = [HEAD], turns, modelStatus = [], draft = false } = {}) {
   const calls = { posted: [], model: [], sleeps: 0 };
   let headReads = 0;
   const json = (body, status = 200, headers = {}) => ({ ok: status < 300, status, headers: new Headers(headers), json: async () => body, text: async () => JSON.stringify(body) });
@@ -181,7 +181,7 @@ function world({ reviews = [], heads = [HEAD], turns, modelStatus = [] } = {}) {
     }
     const p = u.pathname;
     if (init.method === 'POST' && p.endsWith('/reviews')) { const b = JSON.parse(init.body); calls.posted.push({ ...b, auth: init.headers.authorization }); return json({ html_url: 'https://x/review/1' }); }
-    if (/\/pulls\/7$/.test(p)) { const sha = heads[Math.min(headReads++, heads.length - 1)]; return json({ number: 7, state: 'open', title: 'feat: add token', body: 'Adds it.', user: { login: 'askalf' }, head: { sha, ref: 'feat/x', repo: { full_name: 'askalf/r' } }, base: { ref: 'main', repo: { full_name: 'askalf/r' } } }); }
+    if (/\/pulls\/7$/.test(p)) { const sha = heads[Math.min(headReads++, heads.length - 1)]; return json({ number: 7, state: 'open', draft, title: 'feat: add token', body: 'Adds it.', user: { login: 'askalf' }, head: { sha, ref: 'feat/x', repo: { full_name: 'askalf/r' } }, base: { ref: 'main', repo: { full_name: 'askalf/r' } } }); }
     if (p.endsWith('/reviews')) return json(u.searchParams.get('page') === '1' ? reviews : []);
     if (p.endsWith('/files')) return json(u.searchParams.get('page') === '1' ? [{ filename: 'src/b.js', status: 'modified', additions: 1, deletions: 0, patch: PATCH }] : []);
     if (p.endsWith('/commits')) return json(u.searchParams.get('page') === '1' ? [{ sha: HEAD, commit: { message: 'feat: add token' } }] : []);
@@ -210,6 +210,16 @@ console.log('\n  runReview');
   const { ctx, calls } = world({ reviews: [{ user: { login: REVIEWER_LOGIN }, state: 'CHANGES_REQUESTED', commit_id: HEAD, html_url: 'old' }], turns: [submit(APPROVE)] });
   const r = await runReview(ctx);
   check('a verdict already at the head is reused: no model call, no post', r.outcome === 'existing' && r.verdict === 'REQUEST_CHANGES' && calls.model.length === 0 && calls.posted.length === 0);
+}
+{
+  const { ctx, calls } = world({ reviews: [{ user: { login: REVIEWER_LOGIN }, state: 'CHANGES_REQUESTED', commit_id: HEAD, html_url: 'old' }], turns: [submit(APPROVE)] });
+  const r = await runReview({ ...ctx, reread: true });
+  check('a re-read reviews the head again and posts at it', r.outcome === 'posted' && r.verdict === 'APPROVE' && calls.model.length === 1 && calls.posted.length === 1 && calls.posted[0].commit_id === HEAD);
+}
+{
+  const { ctx, calls } = world({ draft: true, turns: [submit(APPROVE)] });
+  const r = await runReview(ctx);
+  check('a draft is skipped before the model is called', r.outcome === 'skipped' && /draft/.test(r.reason) && calls.model.length === 0);
 }
 {
   const { ctx, calls } = world({ heads: [OTHER], turns: [submit(APPROVE)] });
@@ -586,6 +596,40 @@ console.log('\n  the reusable workflow');
     && upload.includes('path: redline-verdict/verdict.json\n') && /retention-days: [1-7]\n/.test(upload));
   check('the cleanup removes the verdict too', /run: rm -rf pr \.redline redline-verdict\s*$/.test(steps[cleanAt] ?? ''));
   check('nothing from the PR is interpolated into a run step',!/run:[^\n]*\$\{\{\s*github\.event\.pull_request\.(title|body|head\.ref)/.test(wf));
+
+  // Dispatch mode: forge dispatches the caller on the default branch with pr, head and reread.
+  check('pr and head are optional string inputs, reread an optional boolean',
+    /\n      pr:\n(?:        .*\n)*?        required: false\n        default: ''\n        type: string\n/.test(wf)
+    && /\n      head:\n(?:        .*\n)*?        required: false\n        default: ''\n        type: string\n/.test(wf)
+    && /\n      reread:\n(?:        .*\n)*?        required: false\n        default: false\n        type: boolean\n/.test(wf));
+  check('the job runs for a dispatch or a same-repo non-draft PR',
+    wf.includes("if: inputs.pr != '' || (github.event.pull_request.head.repo.full_name == github.repository && !github.event.pull_request.draft)"));
+  const dispatchAt = stepNamed('Check the dispatched PR');
+  const checkoutAt = stepNamed('Check out the PR head to read');
+  const ds = steps[dispatchAt] ?? '';
+  check('the dispatch check runs only in dispatch mode, after the ref checks and before anything is fetched',
+    ds.startsWith("name: Check the dispatched PR\n        if: inputs.pr != ''\n") && dispatchAt > mainAt && dispatchAt < fetchAt && dispatchAt < checkoutAt);
+  check('the inputs reach every run step through env, never interpolated into it',
+    steps.every((s) => !s.includes('run:') || !/\$\{\{\s*inputs\.(pr|head|reread)/.test(s.slice(s.indexOf('run:')))));
+  check('the dispatch check reads the PR and refuses closed, draft, fork and moved heads',
+    ds.includes('/repos/${REPO}/pulls/${PR}') && ds.includes('pr.state !== "open"') && ds.includes('if (pr.draft)')
+    && ds.includes('pr.head?.repo?.full_name !== REPO') && ds.includes('pr.head?.sha !== HEAD_SHA'));
+  const dsScript = /node --input-type=module -e '\n([\s\S]*?)\n\s*'\s*$/.exec(ds)?.[1] ?? '';
+  const dsRun = (env) => spawnSync(process.execPath, ['--input-type=module', '-e', dsScript], {
+    env: { PATH: process.env.PATH, GH_READ_TOKEN: 'x', REPO: 'askalf/r', DEFAULT_BRANCH: 'main', REF: 'refs/heads/main', EVENT_NAME: 'workflow_dispatch', PR: '7', HEAD_SHA: HEAD, ...env },
+    encoding: 'utf8', timeout: 20_000,
+  });
+  const refused = (env, why) => { const r = dsRun(env); return r.status === 1 && why.test(r.stdout); };
+  check('the dispatch check script was found', dsScript.includes('workflow_dispatch'));
+  check('a pr input on pull_request is refused before any read', refused({ EVENT_NAME: 'pull_request' }, /only on workflow_dispatch/));
+  check('a dispatch off the default branch is refused before any read', refused({ REF: 'refs/heads/feat/x' }, /default branch/) && refused({ DEFAULT_BRANCH: '' }, /default branch/));
+  check('a pr that is not a number is refused before any read', refused({ PR: '7; rm -rf /' }, /pull request number/) && refused({ PR: '0' }, /pull request number/));
+  check('a head that is not a full sha is refused before any read', refused({ HEAD_SHA: 'main' }, /full 40-character/) && refused({ HEAD_SHA: HEAD.slice(0, 7) }, /full 40-character/));
+  check('the PR checkout takes the dispatched head, else the event head', (steps[checkoutAt] ?? '').includes('ref: ${{ inputs.head || github.event.pull_request.head.sha }}'));
+  const rs = steps[reviewAt] ?? '';
+  check('the review takes the dispatched PR and head, else the event\'s',
+    rs.includes('PR: ${{ inputs.pr || github.event.pull_request.number }}') && rs.includes('HEAD_SHA: ${{ inputs.head || github.event.pull_request.head.sha }}'));
+  check('a re-read is set only in dispatch mode', rs.includes("REDLINE_REREAD: ${{ inputs.pr != '' && inputs.reread && '1' || '0' }}"));
 }
 
 console.log('\n  pin bump');

@@ -13,7 +13,10 @@
 // token never has to sit on a CI runner that a pull request's own workflow files can reach.
 //
 // Hardening, each with a reason:
-//   - A verdict already posted at this head is reused, never posted twice (re-runs are free).
+//   - A verdict already posted at this head is reused, never posted twice (re-runs are free),
+//     except in a re-read (REDLINE_REREAD=1, forge's dispatch after a description-only finding
+//     was answered by an edit), which reviews the head again.
+//   - A draft is not reviewed.
 //   - The head is re-read before posting; a head that moved gets no review (the newer run owns it).
 //   - Every path a tool touches must resolve inside the checkout, symlinks included.
 //   - Findings must quote text that is in the diff, the PR text or a commit message. One repair
@@ -35,7 +38,7 @@
 //     for four days while Opus still served, and each review burned its retries and failed.
 //
 // CLI (the workflow's review step):
-//   REPO=owner/name PR=<n> HEAD_SHA=<sha> CHECKOUT=<dir> GH_READ_TOKEN=... \
+//   REPO=owner/name PR=<n> HEAD_SHA=<sha> CHECKOUT=<dir> GH_READ_TOKEN=... [REDLINE_REREAD=1] \
 //   REDLINE_ENV_FILE=/etc/askalf/redline.env REDLINE_PROMPT_FILE=/etc/askalf/redline-prompt.md node review.mjs
 // The env file holds DARIO_API_KEY, and optionally REDLINE_GITHUB_TOKEN (or GITHUB_PAT_REVIEWER),
 // DARIO_URL (default http://127.0.0.1:3456), REDLINE_MODEL and REDLINE_FALLBACK_MODEL (default
@@ -482,8 +485,10 @@ export async function runReview(ctx) {
   if (pr.state !== 'open') return { outcome: 'skipped', reason: `PR is ${pr.state}` };
   if (pr.head.sha !== headSha) return { outcome: 'skipped', reason: `head moved to ${pr.head.sha.slice(0, 7)}` };
   if (pr.head.repo?.full_name !== repo) return { outcome: 'skipped', reason: 'fork PR' };
+  if (pr.draft) return { outcome: 'skipped', reason: 'draft PR' };
 
-  const standing = verdictAtHead(await ghAll(ctx, `/repos/${repo}/pulls/${n}/reviews`), headSha);
+  // A re-read reviews the head again: the verdict standing there is the one being reconsidered.
+  const standing = ctx.reread ? null : verdictAtHead(await ghAll(ctx, `/repos/${repo}/pulls/${n}/reviews`), headSha);
   if (standing) return { outcome: 'existing', verdict: standing.state === 'APPROVED' ? 'APPROVE' : 'REQUEST_CHANGES', url: standing.html_url };
 
   const files = await ghAll(ctx, `/repos/${repo}/pulls/${n}/files`);
@@ -610,6 +615,7 @@ async function main() {
     system,
     fetch: globalThis.fetch, sleep: (ms) => new Promise((r) => setTimeout(r, ms)), now: () => Date.now(),
     dryRun: env.REDLINE_DRY_RUN === '1',
+    reread: env.REDLINE_REREAD === '1',
     log: (line) => console.log(line),
   };
   let result;
