@@ -164,13 +164,18 @@ const PATCH = '@@ -1 +1,2 @@\n+export const token = process.env.X;\n const y = 2
 function world({ reviews = [], heads = [HEAD], turns, modelStatus = [] } = {}) {
   const calls = { posted: [], model: [], sleeps: 0 };
   let headReads = 0;
-  const json = (body, status = 200) => ({ ok: status < 300, status, json: async () => body, text: async () => JSON.stringify(body) });
+  const json = (body, status = 200, headers = {}) => ({ ok: status < 300, status, headers: new Headers(headers), json: async () => body, text: async () => JSON.stringify(body) });
   const fetch = async (url, init = {}) => {
     const u = new URL(url);
     if (u.pathname.endsWith('/v1/messages')) {
       const body = JSON.parse(init.body);
       calls.model.push(body);
-      if (modelStatus.length) { const s = modelStatus.shift(); if (s !== 200) return json({ error: 'busy' }, s); }
+      if (modelStatus.length) {
+        // A status, or a function of the request body returning one (or [status, headers]).
+        const next = modelStatus.shift();
+        const [s, h] = [].concat(typeof next === 'function' ? next(body) : next);
+        if (s !== 200) return json({ error: 'busy' }, s, h);
+      }
       const step = turns[Math.min(calls.model.length - 1, turns.length - 1)];
       return json({ content: typeof step === 'function' ? step(body) : step });
     }
@@ -240,6 +245,54 @@ console.log('\n  runReview');
   const { ctx, calls } = world({ modelStatus: [429, 503], turns: [submit(APPROVE)] });
   const r = await runReview(ctx);
   check('429 and 5xx from the model are retried with backoff', r.verdict === 'APPROVE' && calls.sleeps === 2);
+}
+{
+  const parked = (retryAfter) => [429, { 'x-dario-upstream-rejection': 'pool_parked', 'retry-after': String(retryAfter) }];
+  {
+    const { ctx, calls } = world({ modelStatus: [parked(351838)], turns: [submit(APPROVE)] });
+    ctx.model = 'claude-fable-5-1'; ctx.fallbackModel = 'claude-opus-5-5';
+    const lines = [];
+    ctx.log = (l) => lines.push(l);
+    const r = await runReview(ctx);
+    check('a model parked past the retry budget is not retried: the turn goes again on the fallback',
+      r.verdict === 'APPROVE' && calls.sleeps === 0 && calls.model.map((b) => b.model).join() === 'claude-fable-5-1,claude-opus-5-5');
+    check('the switch is logged with the park', lines.some((l) => l.includes('claude-fable-5-1 is parked in dario for 351838s; the review continues on claude-opus-5-5')));
+    check('the fallback sees the same first turn', calls.model[1].messages.length === 1 && calls.model[1].messages[0].content === calls.model[0].messages[0].content);
+  }
+  {
+    const { ctx, calls } = world({ modelStatus: [200, 200, parked(351838)], turns: [use('redline_list', {}), use('redline_list', {}), submit(APPROVE)] });
+    ctx.model = 'claude-fable-5-1'; ctx.fallbackModel = 'claude-opus-5-5';
+    const r = await runReview(ctx);
+    check('a park mid-review keeps the history and finishes on the fallback',
+      r.verdict === 'APPROVE' && calls.model.map((b) => b.model).join() === 'claude-fable-5-1,claude-fable-5-1,claude-fable-5-1,claude-opus-5-5'
+        && JSON.stringify(calls.model[3].messages) === JSON.stringify(calls.model[2].messages));
+  }
+  {
+    const { ctx, calls } = world({ modelStatus: [parked(351838), parked(351838)], turns: [submit(APPROVE)] });
+    ctx.model = 'claude-fable-5-1'; ctx.fallbackModel = 'claude-opus-5-5';
+    const e = await throws(() => runReview(ctx));
+    check('a parked fallback fails the run, with no third model', e instanceof reviewModule.ModelParked && /pool_parked/.test(e.message) && calls.model.length === 2 && calls.posted.length === 0);
+  }
+  {
+    const { ctx, calls } = world({ modelStatus: [parked(351838)], turns: [submit(APPROVE)] });
+    ctx.fallbackModel = '';
+    const e = await throws(() => runReview(ctx));
+    check('with no fallback a park fails the run at once', e instanceof reviewModule.ModelParked && calls.model.length === 1 && calls.sleeps === 0);
+  }
+  {
+    const { ctx, calls } = world({ modelStatus: [parked(10)], turns: [submit(APPROVE)] });
+    ctx.fallbackModel = 'claude-opus-5-5';
+    const r = await runReview(ctx);
+    check('a park that ends within the retry budget is waited out on the same model',
+      r.verdict === 'APPROVE' && calls.sleeps === 1 && calls.model.every((b) => b.model === 'm'));
+  }
+  {
+    const { ctx, calls } = world({ modelStatus: [(b) => (b.tool_choice ? 200 : parked(351838))], turns: [(b) => (b.tool_choice || b.model !== 'claude-opus-4-6' ? submit(APPROVE) : use('redline_list', {}))] });
+    ctx.model = 'claude-fable-5-1'; ctx.fallbackModel = 'claude-opus-4-6';
+    const r = await runReview(ctx);
+    check('the fallback\'s own tool_choice rules apply from the switch on',
+      r.verdict === 'APPROVE' && calls.model[1].model === 'claude-opus-4-6' && calls.model.at(-1).tool_choice?.name === 'redline_submit');
+  }
 }
 {
   const { ctx, calls } = world({ modelStatus: [400], turns: [submit(APPROVE)] });
