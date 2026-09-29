@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url';
 import {
   parseReviewUrl, parseReviewBody, inlineItems, formatFinding, detectRunner, allowedCommands, allowedArgv, safeWritePath, stageable,
   commitSubject, hasAttributionTrailer, neutraliseRefs, cleanNotes, summariseTests, renderNotes, fixRecord, fixProblem, saveFix,
+  failingTests, FAILING_NAMES_MAX,
   TOOLS, FINISH_REQUIRED, askForFinish, checkFinish, runLoop, buildBrief, childEnv, onlyOrigins, runFix,
   LIMITS, OUTCOMES, AUTHOR, FIX_VERSION, DEFAULT_MODEL, SUBJECT_BANNED,
 } from './fix.mjs';
@@ -324,13 +325,13 @@ function sh(cwd, args) {
   if (r.status !== 0) throw new Error(`git ${args.join(' ')}: ${r.stderr}`);
   return r.stdout.trim();
 }
-function makeRepo({ pkg = null, testExit = 0 } = {}) {
+function makeRepo({ pkg = null, testExit = 0, testBody = null } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'redline-fix-repo-'));
   sh(dir, ['init', '-q']);
   sh(dir, ['config', 'core.autocrlf', 'false']);
   mkdirSync(join(dir, 'src'));
   writeFileSync(join(dir, 'src', 'b.js'), 'export const token = process.env.X;\nconst y = 2;\n');
-  writeFileSync(join(dir, 'test.mjs'), `process.exit(${testExit});\n`);
+  writeFileSync(join(dir, 'test.mjs'), testBody ?? `process.exit(${testExit});\n`);
   writeFileSync(join(dir, '.gitignore'), 'node_modules/\n');
   if (pkg) writeFileSync(join(dir, 'package.json'), `${JSON.stringify(pkg, null, 2)}\n`);
   sh(dir, ['add', '-A']);
@@ -563,6 +564,34 @@ if (!gitOk) {
       rmSync(repo.dir, { recursive: true, force: true });
     }
   }
+}
+
+console.log('\n  failingTests');
+{
+  const tap = 'TAP version 13\n# Subtest: a.mjs\nok 1 - a.mjs\nnot ok 2 - oauth-detector.mjs\n    not ok 1 - nested case\nnot ok 3 - later.mjs # TODO not yet\nnot ok 4 - skipped.mjs # SKIP no binary\nnot ok 5 - oauth-detector.mjs\n';
+  check('TAP: not ok names in order, nested included, TODO and SKIP left out, unique', failingTests(tap).join('|') === 'oauth-detector.mjs|nested case');
+  check('jest/vitest FAIL lines', failingTests(' PASS  a.test.js\n FAIL  src/b.test.js\nFAIL c.test.ts\n').join('|') === 'src/b.test.js|c.test.ts');
+  check('a [FAIL] marker inside a test is not a name', failingTests('# [FAIL] source is detected\n  [FAIL] x\n').length === 0);
+  check('an output that names nothing: empty', failingTests('Error: boom\n').length === 0 && failingTests(undefined).length === 0);
+  const many = Array.from({ length: FAILING_NAMES_MAX + 5 }, (_, i) => `not ok ${i + 1} - t${i}`).join('\n');
+  check(`at most ${FAILING_NAMES_MAX} names`, failingTests(many).length === FAILING_NAMES_MAX);
+  check('notes name the failed tests', renderNotes({ outcome: 'tests_failed', files: ['a'], tests: { command: 'npm test', exit_code: 1, summary: '1 pass, 1 fail', failing: ['new.mjs'] } }).includes('Failed: `new.mjs`'));
+  const passing = renderNotes({ outcome: 'fixed', files: ['a'], tests: { command: 'npm test', exit_code: 0, summary: '2 pass, 0 fail' } });
+  check('a passing run says only that it passed', passing.includes('Tests: `npm test` exited 0') && !passing.includes('Failed:') && !passing.includes('no test script'));
+}
+
+if (gitOk && npmOk) {
+  console.log('\n  runFix: a failing suite names what failed');
+  const repo = makeRepo({ pkg: { name: 'r', private: true, scripts: { test: 'node test.mjs' } },
+    testBody: "console.log('TAP version 13');\nconsole.log('ok 1 - a.mjs');\nconsole.log('not ok 2 - old.mjs');\nprocess.exit(1);\n" });
+  const w = world(repo, { turns: [tool('fix_write', { path: 'src/b.js', content: FIXED_B }), finish(), finish()] });
+  const { record: r } = await runFix(w.ctx);
+  const bounce = JSON.stringify(w.calls.model[2]?.messages.at(-1) ?? '');
+  check('the bounce names the failed test', bounce.includes('Failed: old.mjs'));
+  check('still tests_failed: a named failure is never excused', r.outcome === 'tests_failed' && r.new_head === null && r.tests.exit_code === 1);
+  check('fix.json and notes carry the name', r.tests.failing.join() === 'old.mjs' && r.notes.includes('Failed: `old.mjs`') && fixProblem(r) === null);
+  rmSync(w.out, { recursive: true, force: true });
+  rmSync(repo.dir, { recursive: true, force: true });
 }
 
 console.log('\n  CLI');

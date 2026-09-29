@@ -27,7 +27,9 @@
 //   - Turns, wall time, files changed and diff size are bounded; past the limits the run is
 //     refused, never trimmed into a partial fix.
 //   - When the repository has a test script it runs at least once after the last edit; a failing
-//     suite is bounced to the model once, then reported as tests_failed with no bundle.
+//     suite is bounced to the model once, then reported as tests_failed with no bundle. The bounce,
+//     fix.json (tests.failing) and the notes name the failed tests the output reports (TAP
+//     `not ok`, jest/vitest `FAIL`). The names are for reading only: the gate is the exit code.
 //   - The commit is authored and committed as askalf; its message is one sanitised subject line
 //     and a body naming the review, checked for trailers before the bundle is written.
 //   - The model key is read from FIX_ENV_FILE and sent in a header; it is never printed and never
@@ -303,6 +305,28 @@ export function summariseTests(out) {
   return s.trim().split('\n').filter((l) => l.trim()).slice(-3).join(' | ').slice(-300);
 }
 
+/** How many failed test names a bounce, fix.json and the notes carry. */
+export const FAILING_NAMES_MAX = 20;
+
+/**
+ * The failed tests a run's output names: TAP `not ok` lines without a TODO or SKIP directive
+ * (nested ones included) and jest/vitest `FAIL <file>` lines, in order, unique, at most
+ * FAILING_NAMES_MAX. Empty when the output names none. Pure.
+ */
+export function failingTests(out) {
+  const ids = [];
+  for (const line of String(out ?? '').split('\n')) {
+    const tap = /^\s*not ok \d+(?:\s+-)?\s*(.*?)\s*$/.exec(line);
+    const jest = tap ? null : /^\s*FAIL\s+(\S.*?)\s*$/.exec(line);
+    let id = null;
+    if (tap && !/#\s*(TODO|SKIP)\b/i.test(tap[1])) id = tap[1].replace(/\s+#.*$/, '') || '(unnamed)';
+    else if (jest) id = jest[1];
+    if (id !== null && !ids.includes(id)) ids.push(id);
+    if (ids.length >= FAILING_NAMES_MAX) break;
+  }
+  return ids;
+}
+
 export function renderNotes({ outcome, summary = '', reason = '', files = [], tests = null, skipped = [] }) {
   const parts = [];
   if (outcome === 'refused') parts.push(reason || 'The fix was refused.');
@@ -311,8 +335,10 @@ export function renderNotes({ outcome, summary = '', reason = '', files = [], te
     if (outcome === 'no_change') parts.push('No file changed.');
     if (files.length) parts.push(`Files: ${files.map((f) => `\`${f}\``).join(', ')}`);
     if (skipped.length) parts.push(`Left out: ${skipped.map((s) => `\`${s.path}\` (${s.why})`).join(', ')}`);
-    if (tests) parts.push(`Tests: \`${tests.command}\` exited ${tests.exit_code}${tests.summary ? ` (${tests.summary})` : ''}`);
-    else if (outcome !== 'no_change') parts.push('Tests: no test script in the repository.');
+    if (tests) {
+      parts.push(`Tests: \`${tests.command}\` exited ${tests.exit_code}${tests.summary ? ` (${tests.summary})` : ''}`);
+      if (tests.failing?.length) parts.push(`Failed: ${tests.failing.map((t) => `\`${t}\``).join(', ')}`);
+    } else if (outcome !== 'no_change') parts.push('Tests: no test script in the repository.');
   }
   return cleanNotes(parts.join('\n\n'));
 }
@@ -662,7 +688,9 @@ export async function runFix(ctx) {
         tests = t;
         if (t.exit !== 0 && bounces < LIMITS.testBounces) {
           bounces++;
-          return { error: `The test script fails at your change (\`${t.command}\` exited ${t.exit}${t.timedOut ? ', timed out' : ''}):\n${capOutput(t.out, 6_000)}\n\nFix it and run the tests again, then call finish_fix.` };
+          const failed = failingTests(t.out);
+          const named = failed.length ? `\nFailed: ${failed.join(', ')}` : '';
+          return { error: `The test script fails at your change (\`${t.command}\` exited ${t.exit}${t.timedOut ? ', timed out' : ''}):${named}\n${capOutput(t.out, 6_000)}\n\nFix it and run the tests again, then call finish_fix.` };
         }
       }
       return { sub: checked.sub };
@@ -674,7 +702,10 @@ export async function runFix(ctx) {
       tool: async (name, input) => tool(name, input), finalize, now: ctx.now, log: ctx.log, canForce: !rejectsForcedToolChoice(ctx.model),
     }, brief);
     const turns = loop.turns;
-    const testsRecord = tests ? { command: tests.command, exit_code: tests.exit, summary: summariseTests(tests.out) } : null;
+    const testsRecord = tests ? {
+      command: tests.command, exit_code: tests.exit, summary: summariseTests(tests.out),
+      ...(tests.exit !== 0 ? { failing: failingTests(tests.out) } : {}),
+    } : null;
     if (loop.refused) return refuse(loop.refused, { turns, tests: testsRecord });
     const sub = loop.sub;
     if (sub.outcome === 'refused') return refuse(sub.reason, { turns, tests: testsRecord });

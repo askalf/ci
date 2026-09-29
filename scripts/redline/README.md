@@ -28,11 +28,12 @@ checks that the checkout is exactly the reviewed head, then `fix.mjs`:
 - reads the review (the `### N. Blocking:` findings, the `Minor:` list, the inline comments) and
   the PR with the workflow's read-only token;
 - installs the checkout's dependencies once (npm, pnpm, yarn or bun, as detected);
-- lets the model `list_files`, `read_file`, `search`, `write_file` (inside the checkout, never
-  under `.github/`) and `run` an allowlist only: the package.json `test`, `lint`, `typecheck` and
-  `build` scripts and `node <file>`, without a shell, in a scrubbed environment;
+- lets the model `fix_list`, `fix_read`, `fix_search`, `fix_write` (inside the checkout, never
+  under `.github/`) and `fix_run` an allowlist only: the package.json `test`, `lint`, `typecheck`
+  and `build` scripts and `node <file>`, without a shell, in a scrubbed environment;
 - runs the test script at least once after the last edit; a failing suite is bounced to the
-  model once, then reported;
+  model once, then reported. The bounce, `fix.json` (`tests.failing`) and the notes name the failed
+  tests the output reports (TAP `not ok`, jest/vitest `FAIL`); the gate is the exit code alone;
 - commits everything changed except `.github/**`, files over 1 MB and what the install dirtied, as
   askalf, with a sanitised `fix:` subject and a body naming the review;
 - writes `fix.json` (`outcome`: `fixed`, `no_change`, `tests_failed` or `refused`; the commits,
