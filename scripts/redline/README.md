@@ -35,7 +35,8 @@ checks that the checkout is exactly the reviewed head, then `fix.mjs`:
   failures it names (TAP `not ok`, jest/vitest `FAIL`): the script also runs once at the reviewed
   head, and a failure the head shares does not count against the fix. New failures are bounced
   to the model once with their names, then reported as `tests_failed`. A suite that names no
-  failure, or a head that passes, keeps the whole suite as the gate;
+  failure, a head that passes, or a run on either side that timed out or was killed keeps the
+  whole suite as the gate;
 - commits everything changed except `.github/**`, files over 1 MB and what the install dirtied, as
   askalf, with a sanitised `fix:` subject and a body naming the review;
 - writes `fix.json` (`outcome`: `fixed`, `no_change`, `tests_failed` or `refused`; the commits,
