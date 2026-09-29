@@ -309,31 +309,70 @@ export function summariseTests(out) {
 }
 
 /**
- * The failing tests a run names: TAP `not ok` lines without a TODO or SKIP directive, and
- * jest/vitest `FAIL <file>` lines. Sorted and unique; empty when the output names none. Pure.
+ * The failing tests a run names, each as a file-qualified identity where the output allows one:
+ * TAP `not ok` lines without a TODO or SKIP directive, a nested one qualified by the `# Subtest:`
+ * names enclosing it (`file > test`); vitest `FAIL <file> > <test>` lines; jest's `●` headings
+ * under a `FAIL <file>` line (`file > describe > test`). A `FAIL <file>` with no test named in
+ * that file is listed as the file alone and also in `coarse`: another failure in the same file
+ * reads the same, so it is never excused. Both sorted and unique; empty when nothing is named. Pure.
  */
-export function failingTests(out) {
+export function parseFailures(out) {
   const ids = new Set();
+  const files = new Set();
+  const named = new Set();
+  const subtests = [];
+  let jestFile = null;
   for (const line of String(out ?? '').split('\n')) {
-    const tap = /^\s*not ok \d+(?:\s+-)?\s*(.*?)\s*$/.exec(line);
-    if (tap) {
-      if (!/#\s*(TODO|SKIP)\b/i.test(tap[1])) ids.add(tap[1].replace(/\s+#.*$/, '') || '(unnamed)');
+    const sub = /^(\s*)# Subtest: (.*?)\s*$/.exec(line);
+    if (sub) {
+      const d = Math.floor(sub[1].length / 4);
+      subtests.length = d;
+      subtests[d] = sub[2];
       continue;
     }
-    const jest = /^\s*FAIL\s+(\S.*?)\s*$/.exec(line);
-    if (jest) ids.add(jest[1]);
+    const tap = /^(\s*)(not )?ok \d+(?:\s+-)?\s*(.*?)\s*$/.exec(line);
+    if (tap) {
+      // A test's result line follows its subtests: its own name and deeper ones no longer enclose.
+      const d = Math.floor(tap[1].length / 4);
+      if (tap[2] && !/#\s*(TODO|SKIP)\b/i.test(tap[3])) {
+        ids.add([...subtests.slice(0, d).filter((s) => s), tap[3].replace(/\s+#.*$/, '') || '(unnamed)'].join(' > '));
+      }
+      subtests.length = Math.min(subtests.length, d);
+      continue;
+    }
+    if (/^\s*PASS\s/.test(line)) { jestFile = null; continue; }
+    const fail = /^\s*FAIL\s+(\S.*?)\s*$/.exec(line);
+    if (fail) {
+      const [file, ...rest] = fail[1].replace(/\s+\[.*\]$/, '').split(/\s+[>›]\s+/);
+      jestFile = file;
+      if (rest.length) { ids.add([file, ...rest].join(' > ')); named.add(file); } else files.add(file);
+      continue;
+    }
+    const heading = /^\s*●\s+(.*?)\s*$/.exec(line);
+    if (heading && jestFile !== null && !/^(Console|Test suite failed to run)$/.test(heading[1])) {
+      ids.add([jestFile, ...heading[1].split(/\s+›\s+/)].join(' > '));
+      named.add(jestFile);
+    }
   }
-  return [...ids].sort();
+  const coarse = [...files].filter((f) => !named.has(f));
+  for (const f of coarse) ids.add(f);
+  return { names: [...ids].sort(), coarse: coarse.sort() };
+}
+
+/** The failing test identities a run names (parseFailures' `names`). Pure. */
+export function failingTests(out) {
+  return parseFailures(out).names;
 }
 
 /**
  * Split the failures at the change against the reviewed head. `base` is null when the head was not
  * run. Only a head that ran to the end, fails and names its failures can excuse one, and only for a
- * change run that also ran to the end: otherwise every failure at the change is new. Pure.
+ * change run that also ran to the end: otherwise every failure at the change is new. A `coarse`
+ * name (a file with no test named in it) is never excused. Pure.
  */
-export function judgeFailures(atChange, base, { complete = true } = {}) {
+export function judgeFailures(atChange, base, { complete = true, coarse = [] } = {}) {
   const comparable = complete && base !== null && base.complete === true && base.exit !== 0 && base.failing.length > 0;
-  const preexisting = comparable ? atChange.filter((x) => base.failing.includes(x)) : [];
+  const preexisting = comparable ? atChange.filter((x) => !coarse.includes(x) && base.failing.includes(x)) : [];
   return { failing: atChange.filter((x) => !preexisting.includes(x)), preexisting };
 }
 
@@ -690,31 +729,36 @@ export async function runFix(ctx) {
       return `error: unknown tool ${name}`;
     };
 
-    // The reviewed head's own test result, run at most once: the fix is stashed, the head is built
-    // (when there is a build script) and tested, then the checkout is put back to the head (what the
-    // head's build and tests wrote is dropped; ignored files stay), the fix is restored and built
-    // again. Without the reset a build output the fix's stash also holds blocks the pop.
+    // The reviewed head's own test result, run at most once, in a checkout of its own: a detached
+    // worktree at the head under the scratch home, installed and built (when there is a build
+    // script) from nothing, so no build output or dependency the fix left in the checkout is read,
+    // and the fix's checkout is never touched. A head whose install or build fails or does not
+    // finish gives no baseline, and so excuses nothing.
     const buildArgv = plan.pm && plan.scripts.includes('build') ? [plan.pm, 'run', 'build'] : null;
     let baseline;
     const runBaseline = () => {
       if (baseline !== undefined) return baseline;
       baseline = null;
-      const before = git(root, cenv, ['rev-parse', '-q', '--verify', 'refs/stash'], { allowFail: true });
-      git(root, cenv, ['stash', 'push', '--include-untracked', '--quiet', '-m', 'redline-fix-baseline']);
-      const after = git(root, cenv, ['rev-parse', '-q', '--verify', 'refs/stash'], { allowFail: true });
-      if (!after || after === before) return baseline;
+      const wt = join(home, 'reviewed-head');
+      if (git(root, cenv, ['worktree', 'add', '--detach', '--quiet', wt, headSha], { allowFail: true }) === null) return baseline;
       try {
-        if (!changedPaths(root, cenv).length && git(root, cenv, ['rev-parse', 'HEAD']) === headSha) {
-          if (buildArgv) run(root, cenv, buildArgv, LIMITS.runMaxS);
-          const r = run(root, cenv, testArgv, LIMITS.runMaxS);
-          baseline = { exit: r.exit, failing: failingTests(r.out), complete: r.complete };
-          ctx.log?.(`  reviewed head: \`${testArgv.join(' ')}\` exited ${r.exit}${r.complete ? '' : ' (did not finish)'}, ${baseline.failing.length} named failure(s)`);
+        if (git(wt, cenv, ['rev-parse', 'HEAD'], { allowFail: true }) !== headSha) return baseline;
+        for (const [argv, s] of [[plan.install, LIMITS.installS], [buildArgv, LIMITS.runMaxS]]) {
+          if (!argv) continue;
+          const r = run(wt, cenv, argv, s);
+          if (r.exit !== 0 || !r.complete) {
+            ctx.log?.(`  reviewed head: \`${argv.join(' ')}\` exited ${r.exit}${r.complete ? '' : ' (did not finish)'}; no failure is excused`);
+            return baseline;
+          }
         }
+        const r = run(wt, cenv, testArgv, LIMITS.runMaxS);
+        // Paths the head's run prints under its own checkout are read as the fix's checkout's.
+        baseline = { exit: r.exit, failing: failingTests(r.out.split(wt).join(root)), complete: r.complete };
+        ctx.log?.(`  reviewed head: \`${testArgv.join(' ')}\` exited ${r.exit}${r.complete ? '' : ' (did not finish)'}, ${baseline.failing.length} named failure(s)`);
       } finally {
-        git(root, cenv, ['reset', '--hard', '--quiet']);
-        git(root, cenv, ['clean', '-fdq']);
-        git(root, cenv, ['stash', 'pop', '--quiet']);
-        if (buildArgv) run(root, cenv, buildArgv, LIMITS.runMaxS);
+        git(root, cenv, ['worktree', 'remove', '--force', wt], { allowFail: true });
+        rmSync(wt, { recursive: true, force: true });
+        git(root, cenv, ['worktree', 'prune'], { allowFail: true });
       }
       return baseline;
     };
@@ -733,9 +777,11 @@ export async function runFix(ctx) {
         tests = t;
         gate = null;
         if (t.exit !== 0) {
-          const atChange = failingTests(t.out);
-          // A run that did not finish is never excused by the names it got to: the head is not run.
-          gate = { seq: t.seq, ...judgeFailures(atChange, atChange.length && t.complete ? runBaseline() : null, { complete: t.complete }) };
+          const { names: atChange, coarse } = parseFailures(t.out);
+          // A run that did not finish is never excused by the names it got to, and a file named
+          // without its tests never is: in either case the head is not run.
+          const excusable = t.complete && atChange.some((x) => !coarse.includes(x));
+          gate = { seq: t.seq, ...judgeFailures(atChange, excusable ? runBaseline() : null, { complete: t.complete, coarse }) };
           if (!gate.failing.length && gate.preexisting.length) return { sub: checked.sub };
           if (bounces < LIMITS.testBounces) {
             bounces++;
