@@ -27,10 +27,12 @@
 //   - Turns, wall time, files changed and diff size are bounded; past the limits the run is
 //     refused, never trimmed into a partial fix.
 //   - When the repository has a test script it runs at least once after the last edit. A failing
-//     suite is judged by the failures it names (TAP `not ok`, jest/vitest `FAIL`): the same script
-//     runs once at the reviewed head, and only a failure that is not failing there counts against
-//     the fix. A suite that names no failure, or a head that passes, keeps the whole suite as the
-//     gate, and so does a run at either side that timed out or was killed: its names are partial.
+//     suite is judged by the tests it names as failing, file-qualified (TAP `not ok` under its
+//     `# Subtest:` files, jest's `●` tests under `FAIL <file>`, vitest's `FAIL <file> > <test>`):
+//     the same script runs once at the reviewed head, in a worktree of its own with its own install
+//     and build, and only a failure that is not failing there counts against the fix. A suite that
+//     names no failure, a file named without its tests, a head that passes or whose install or
+//     build fails, and a run at either side that timed out or was killed excuse nothing.
 //     A fix with new failures is bounced to the model once, then reported as tests_failed
 //     with no bundle. fix.json's tests carries the names: `failing` (new) and `preexisting`.
 //   - The commit is authored and committed as askalf; its message is one sanitised subject line

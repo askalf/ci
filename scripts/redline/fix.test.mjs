@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 import {
   parseReviewUrl, parseReviewBody, inlineItems, formatFinding, detectRunner, allowedCommands, allowedArgv, safeWritePath, stageable,
   commitSubject, hasAttributionTrailer, neutraliseRefs, cleanNotes, summariseTests, renderNotes, fixRecord, fixProblem, saveFix,
-  failingTests, judgeFailures,
+  failingTests, parseFailures, judgeFailures,
   TOOLS, FINISH_REQUIRED, askForFinish, checkFinish, runLoop, buildBrief, childEnv, onlyOrigins, runFix,
   LIMITS, OUTCOMES, AUTHOR, FIX_VERSION, DEFAULT_MODEL, SUBJECT_BANNED,
 } from './fix.mjs';
@@ -573,6 +573,18 @@ console.log('\n  failingTests and judgeFailures');
   check('jest/vitest FAIL lines', failingTests(' PASS  a.test.js\n FAIL  src/b.test.js\nFAIL c.test.ts\n').join('|') === 'c.test.ts|src/b.test.js');
   check('a [FAIL] marker inside a test is not a file failure', failingTests('# [FAIL] source is detected\n  [FAIL] x\n').length === 0);
   check('an output that names nothing: empty', failingTests('Error: boom\n').length === 0 && failingTests(undefined).length === 0);
+  const nested = 'TAP version 13\n# Subtest: a.test.mjs\n    # Subtest: one\n    ok 1 - one\n    # Subtest: two\n    not ok 2 - two\nnot ok 1 - a.test.mjs\n# Subtest: b.test.mjs\n    not ok 1 - two\nnot ok 2 - b.test.mjs\n';
+  check('TAP: a nested failure is qualified by its file, so the same name in two files is two failures', failingTests(nested).join('|') === 'a.test.mjs|a.test.mjs > two|b.test.mjs|b.test.mjs > two');
+  const jestOut = (...names) => ` FAIL  src/a.test.js\n${names.map((x) => `  ● suite › ${x}\n\n    expect(received)\n`).join('')}\n PASS  src/b.test.js\n`;
+  check('jest: each ● test under a FAIL file is its own failure, file-qualified', failingTests(jestOut('one', 'two')).join('|') === 'src/a.test.js > suite > one|src/a.test.js > suite > two' && parseFailures(jestOut('one')).coarse.length === 0);
+  check('vitest: FAIL <file> > <test> lines are file-qualified tests', failingTests(' FAIL  src/v.test.ts > group > case\n').join() === 'src/v.test.ts > group > case');
+  check('a FAIL file with no test named in it is coarse', parseFailures(' FAIL  src/a.test.js\n  ● Test suite failed to run\n').coarse.join() === 'src/a.test.js');
+  const jestBase = { exit: 1, failing: failingTests(jestOut('one')), complete: true };
+  const sameFile = judgeFailures(failingTests(jestOut('one', 'two')), jestBase);
+  check('a second failing test in an already failing jest file is the fix\'s', sameFile.failing.join() === 'src/a.test.js > suite > two' && sameFile.preexisting.join() === 'src/a.test.js > suite > one');
+  const fileOnly = parseFailures(' FAIL  src/a.test.js\n');
+  const coarse = judgeFailures(fileOnly.names, { exit: 1, failing: ['src/a.test.js'], complete: true }, { coarse: fileOnly.coarse });
+  check('a file-level failure is never excused, even when the head fails the same file', coarse.failing.join() === 'src/a.test.js' && coarse.preexisting.length === 0);
   const base = { exit: 1, failing: ['oauth-detector.mjs'], complete: true };
   const same = judgeFailures(['oauth-detector.mjs'], base);
   check('a failure the reviewed head shares is preexisting, not the fix\'s', same.failing.length === 0 && same.preexisting.join() === 'oauth-detector.mjs');
@@ -633,8 +645,40 @@ if (gitOk && npmOk) {
     rmSync(repo.dir, { recursive: true, force: true });
   }
   {
-    // The build writes an untracked, non-ignored file: the fix's stash holds it and the head's build
-    // writes it again before the fix is restored.
+    // jest-style output: `old` fails at the head; the fix breaks `new` in the same file.
+    const jestTest = `import { readFileSync } from 'node:fs';\nconst fixed = readFileSync('src/b.js', 'utf8').includes('read()');\nconsole.log(' FAIL  a.test.js');\nconsole.log('  ● suite › old');\nif (fixed) console.log('  ● suite › new');\nprocess.exit(1);\n`;
+    const repo = makeRepo({ pkg, testBody: jestTest });
+    const w = world(repo, { turns: [tool('fix_write', { path: 'src/b.js', content: FIXED_B }), finish(), finish()] });
+    const { record: r } = await runFix(w.ctx);
+    const bounce = JSON.stringify(w.calls.model[2]?.messages.at(-1) ?? '');
+    check('a new failure in an already failing jest file: bounced, naming that test', w.calls.model.length === 3 && bounce.includes('Failing with your change: a.test.js > suite > new') && bounce.includes('a.test.js > suite > old'));
+    check('then tests_failed with the shared test preexisting and the new one failing', r.outcome === 'tests_failed' && r.tests.failing.join() === 'a.test.js > suite > new' && r.tests.preexisting.join() === 'a.test.js > suite > old' && fixProblem(r) === null);
+    rmSync(w.out, { recursive: true, force: true });
+    rmSync(repo.dir, { recursive: true, force: true });
+  }
+  {
+    // The test reads ignored dist/ output. The fix builds it with a regression; the head's own build
+    // fails before writing dist/, so a head run in the fix's checkout would read the fix's dist/.
+    const buildPkg = { name: 'r', private: true, scripts: { build: 'node build.mjs', test: 'node test.mjs' } };
+    const distTest = `import { readFileSync } from 'node:fs';\nlet out = '';\ntry { out = readFileSync('dist/out.js', 'utf8'); } catch {}\nconsole.log('TAP version 13');\nconsole.log('not ok 1 - old.mjs');\nif (out.includes('read()')) console.log('not ok 2 - new.mjs');\nprocess.exit(1);\n`;
+    const repo = makeRepo({ pkg: buildPkg, testBody: distTest });
+    writeFileSync(join(repo.dir, '.gitignore'), 'node_modules/\ndist/\n');
+    writeFileSync(join(repo.dir, 'build.mjs'), `import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';\nconst src = readFileSync('src/b.js', 'utf8');\nif (!src.includes('read()')) process.exit(1);\nmkdirSync('dist', { recursive: true });\nwriteFileSync('dist/out.js', src);\n`);
+    sh(repo.dir, ['add', '-A']);
+    sh(repo.dir, ['-c', 'user.name=t', '-c', 'user.email=t@x', 'commit', '-q', '-m', 'build: add build']);
+    repo.head = sh(repo.dir, ['rev-parse', 'HEAD']);
+    const w = world(repo, { turns: [tool('fix_write', { path: 'src/b.js', content: FIXED_B }), tool('fix_run', { command: 'npm run build' }), finish(), finish()] });
+    const { record: r } = await runFix(w.ctx);
+    const bounce = JSON.stringify(w.calls.model[3]?.messages.at(-1) ?? '');
+    check('a head whose build fails excuses nothing, even with the fix\'s ignored build output present', bounce.includes('Failing with your change: new.mjs, old.mjs') && !bounce.includes('Also failing at the reviewed head'));
+    check('then tests_failed with nothing preexisting', r.outcome === 'tests_failed' && r.tests.preexisting.length === 0 && r.tests.failing.join() === 'new.mjs,old.mjs' && fixProblem(r) === null);
+    check('the fix\'s checkout and build output are untouched by the head run, and no worktree is left', readFileSync(join(repo.dir, 'src', 'b.js'), 'utf8') === FIXED_B && readFileSync(join(repo.dir, 'dist', 'out.js'), 'utf8') === FIXED_B && sh(repo.dir, ['worktree', 'list']).split('\n').length === 1 && sh(repo.dir, ['stash', 'list']) === '');
+    rmSync(w.out, { recursive: true, force: true });
+    rmSync(repo.dir, { recursive: true, force: true });
+  }
+  {
+    // The build writes an untracked, non-ignored file: the head is built in its own checkout, so the
+    // fix's copy stays where it is.
     const buildPkg = { name: 'r', private: true, scripts: { build: 'node build.mjs', test: 'node test.mjs' } };
     const repo = makeRepo({ pkg: buildPkg, testBody: tapTest(false) });
     writeFileSync(join(repo.dir, 'build.mjs'), `import { readFileSync, writeFileSync } from 'node:fs';\nwriteFileSync('out.txt', readFileSync('src/b.js', 'utf8'));\n`);
@@ -643,7 +687,7 @@ if (gitOk && npmOk) {
     repo.head = sh(repo.dir, ['rev-parse', 'HEAD']);
     const w = world(repo, { turns: [tool('fix_write', { path: 'src/b.js', content: FIXED_B }), tool('fix_run', { command: 'npm run build' }), finish(), finish()] });
     const { record: r } = await runFix(w.ctx);
-    check('a build output the head build recreates does not block restoring the fix', r.outcome === 'fixed' && SHA.test(r.new_head ?? '') && r.tests.preexisting.join() === 'old.mjs' && fixProblem(r) === null);
+    check('a build output of the fix\'s own does not stop the head run excusing a shared failure', r.outcome === 'fixed' && SHA.test(r.new_head ?? '') && r.tests.preexisting.join() === 'old.mjs' && fixProblem(r) === null);
     check('the fix and its own build output are back, and no stash is left', readFileSync(join(repo.dir, 'src', 'b.js'), 'utf8') === FIXED_B && readFileSync(join(repo.dir, 'out.txt'), 'utf8') === FIXED_B && sh(repo.dir, ['stash', 'list']) === '');
     rmSync(w.out, { recursive: true, force: true });
     rmSync(repo.dir, { recursive: true, force: true });

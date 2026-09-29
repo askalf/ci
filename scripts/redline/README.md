@@ -32,11 +32,13 @@ checks that the checkout is exactly the reviewed head, then `fix.mjs`:
   under `.github/`) and `fix_run` an allowlist only: the package.json `test`, `lint`, `typecheck`
   and `build` scripts and `node <file>`, without a shell, in a scrubbed environment;
 - runs the test script at least once after the last edit. A failing suite is judged by the
-  failures it names (TAP `not ok`, jest/vitest `FAIL`): the script also runs once at the reviewed
-  head, and a failure the head shares does not count against the fix. New failures are bounced
-  to the model once with their names, then reported as `tests_failed`. A suite that names no
-  failure, a head that passes, or a run on either side that timed out or was killed keeps the
-  whole suite as the gate;
+  tests it names as failing, each qualified by its file (TAP `not ok`, jest `●` under `FAIL`,
+  vitest `FAIL <file> > <test>`): the script also runs once at the reviewed head, in a separate
+  worktree installed and built from nothing, and a failure the head shares does not count against
+  the fix. New failures are bounced to the model once with their names, then reported as
+  `tests_failed`. A suite that names no failure, a file failing with no test named, a head that
+  passes or whose install or build fails, or a run on either side that timed out or was killed
+  keeps the whole suite as the gate;
 - commits everything changed except `.github/**`, files over 1 MB and what the install dirtied, as
   askalf, with a sanitised `fix:` subject and a body naming the review;
 - writes `fix.json` (`outcome`: `fixed`, `no_change`, `tests_failed` or `refused`; the commits,
