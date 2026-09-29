@@ -26,8 +26,12 @@
 //     model key are never in a child's environment.
 //   - Turns, wall time, files changed and diff size are bounded; past the limits the run is
 //     refused, never trimmed into a partial fix.
-//   - When the repository has a test script it runs at least once after the last edit; a failing
-//     suite is bounced to the model once, then reported as tests_failed with no bundle.
+//   - When the repository has a test script it runs at least once after the last edit. A failing
+//     suite is judged by the failures it names (TAP `not ok`, jest/vitest `FAIL`): the same script
+//     runs once at the reviewed head, and only a failure that is not failing there counts against
+//     the fix. A suite that names no failure, or a head that passes, keeps the whole suite as the
+//     gate. A fix with new failures is bounced to the model once, then reported as tests_failed
+//     with no bundle. fix.json's tests carries the names: `failing` (new) and `preexisting`.
 //   - The commit is authored and committed as askalf; its message is one sanitised subject line
 //     and a body naming the review, checked for trailers before the bundle is written.
 //   - The model key is read from FIX_ENV_FILE and sent in a header; it is never printed and never
@@ -303,6 +307,37 @@ export function summariseTests(out) {
   return s.trim().split('\n').filter((l) => l.trim()).slice(-3).join(' | ').slice(-300);
 }
 
+/**
+ * The failing tests a run names: TAP `not ok` lines without a TODO or SKIP directive, and
+ * jest/vitest `FAIL <file>` lines. Sorted and unique; empty when the output names none. Pure.
+ */
+export function failingTests(out) {
+  const ids = new Set();
+  for (const line of String(out ?? '').split('\n')) {
+    const tap = /^\s*not ok \d+(?:\s+-)?\s*(.*?)\s*$/.exec(line);
+    if (tap) {
+      if (!/#\s*(TODO|SKIP)\b/i.test(tap[1])) ids.add(tap[1].replace(/\s+#.*$/, '') || '(unnamed)');
+      continue;
+    }
+    const jest = /^\s*FAIL\s+(\S.*?)\s*$/.exec(line);
+    if (jest) ids.add(jest[1]);
+  }
+  return [...ids].sort();
+}
+
+/**
+ * Split the failures at the change against the reviewed head. `base` is null when the head was not
+ * run. Only a head that fails and names its failures can excuse one: otherwise every failure at the
+ * change is new. Pure.
+ */
+export function judgeFailures(atChange, base) {
+  const comparable = base !== null && base.exit !== 0 && base.failing.length > 0;
+  const preexisting = comparable ? atChange.filter((x) => base.failing.includes(x)) : [];
+  return { failing: atChange.filter((x) => !preexisting.includes(x)), preexisting };
+}
+
+const nameList = (xs) => xs.map((x) => `\`${x}\``).join(', ');
+
 export function renderNotes({ outcome, summary = '', reason = '', files = [], tests = null, skipped = [] }) {
   const parts = [];
   if (outcome === 'refused') parts.push(reason || 'The fix was refused.');
@@ -312,6 +347,8 @@ export function renderNotes({ outcome, summary = '', reason = '', files = [], te
     if (files.length) parts.push(`Files: ${files.map((f) => `\`${f}\``).join(', ')}`);
     if (skipped.length) parts.push(`Left out: ${skipped.map((s) => `\`${s.path}\` (${s.why})`).join(', ')}`);
     if (tests) parts.push(`Tests: \`${tests.command}\` exited ${tests.exit_code}${tests.summary ? ` (${tests.summary})` : ''}`);
+    if (tests?.failing?.length) parts.push(`Failing with this fix: ${nameList(tests.failing)}`);
+    if (tests?.preexisting?.length) parts.push(`Also failing at the reviewed head, so not counted against this fix: ${nameList(tests.preexisting)}`);
     else if (outcome !== 'no_change') parts.push('Tests: no test script in the repository.');
   }
   return cleanNotes(parts.join('\n\n'));
@@ -649,8 +686,34 @@ export async function runFix(ctx) {
       return `error: unknown tool ${name}`;
     };
 
+    // The reviewed head's own test result, run at most once: the fix is stashed, the head is built
+    // (when there is a build script) and tested, then the fix is restored and built again.
+    const buildArgv = plan.pm && plan.scripts.includes('build') ? [plan.pm, 'run', 'build'] : null;
+    let baseline;
+    const runBaseline = () => {
+      if (baseline !== undefined) return baseline;
+      baseline = null;
+      const before = git(root, cenv, ['rev-parse', '-q', '--verify', 'refs/stash'], { allowFail: true });
+      git(root, cenv, ['stash', 'push', '--include-untracked', '--quiet', '-m', 'redline-fix-baseline']);
+      const after = git(root, cenv, ['rev-parse', '-q', '--verify', 'refs/stash'], { allowFail: true });
+      if (!after || after === before) return baseline;
+      try {
+        if (!changedPaths(root, cenv).length && git(root, cenv, ['rev-parse', 'HEAD']) === headSha) {
+          if (buildArgv) run(root, cenv, buildArgv, LIMITS.runMaxS);
+          const r = run(root, cenv, testArgv, LIMITS.runMaxS);
+          baseline = { exit: r.exit, failing: failingTests(r.out) };
+          ctx.log?.(`  reviewed head: \`${testArgv.join(' ')}\` exited ${r.exit}, ${baseline.failing.length} named failure(s)`);
+        }
+      } finally {
+        git(root, cenv, ['stash', 'pop', '--quiet']);
+        if (buildArgv) run(root, cenv, buildArgv, LIMITS.runMaxS);
+      }
+      return baseline;
+    };
+
     let bounces = 0;
     let tests = null;
+    let gate = null;
     const finalize = async (input) => {
       const checked = checkFinish(input);
       if (checked.error) return checked;
@@ -660,9 +723,17 @@ export async function runFix(ctx) {
         let t = [...runs].reverse().find((r) => r.isTest && r.seq > lastWrite);
         if (!t) { ctx.log?.('  no test run after the last edit: running the test script'); t = record(testArgv, run(root, cenv, testArgv, LIMITS.runMaxS)); }
         tests = t;
-        if (t.exit !== 0 && bounces < LIMITS.testBounces) {
-          bounces++;
-          return { error: `The test script fails at your change (\`${t.command}\` exited ${t.exit}${t.timedOut ? ', timed out' : ''}):\n${capOutput(t.out, 6_000)}\n\nFix it and run the tests again, then call finish_fix.` };
+        gate = null;
+        if (t.exit !== 0) {
+          const atChange = failingTests(t.out);
+          gate = { seq: t.seq, ...judgeFailures(atChange, atChange.length ? runBaseline() : null) };
+          if (!gate.failing.length && gate.preexisting.length) return { sub: checked.sub };
+          if (bounces < LIMITS.testBounces) {
+            bounces++;
+            const named = gate.failing.length ? `\nFailing with your change: ${gate.failing.join(', ')}` : '';
+            const old = gate.preexisting.length ? `\nAlso failing at the reviewed head (not yours to fix here): ${gate.preexisting.join(', ')}` : '';
+            return { error: `The test script fails at your change (\`${t.command}\` exited ${t.exit}${t.timedOut ? ', timed out' : ''}):${named}${old}\n${capOutput(t.out, 6_000)}\n\nFix it and run the tests again, then call finish_fix.` };
+          }
         }
       }
       return { sub: checked.sub };
@@ -674,7 +745,13 @@ export async function runFix(ctx) {
       tool: async (name, input) => tool(name, input), finalize, now: ctx.now, log: ctx.log, canForce: !rejectsForcedToolChoice(ctx.model),
     }, brief);
     const turns = loop.turns;
-    const testsRecord = tests ? { command: tests.command, exit_code: tests.exit, summary: summariseTests(tests.out) } : null;
+    const judged = gate && tests && gate.seq === tests.seq ? gate : null;
+    const testsRecord = tests ? {
+      command: tests.command, exit_code: tests.exit, summary: summariseTests(tests.out),
+      ...(judged ? { failing: judged.failing, preexisting: judged.preexisting } : {}),
+    } : null;
+    // Red only with failures of its own: the ones the reviewed head shares do not stop the fix.
+    const testsBlock = testsRecord !== null && testsRecord.exit_code !== 0 && !(judged && !judged.failing.length && judged.preexisting.length);
     if (loop.refused) return refuse(loop.refused, { turns, tests: testsRecord });
     const sub = loop.sub;
     if (sub.outcome === 'refused') return refuse(sub.reason, { turns, tests: testsRecord });
@@ -691,7 +768,7 @@ export async function runFix(ctx) {
     const common = { turns, tests: testsRecord, files: st.keep };
     const notes = (outcome) => renderNotes({ outcome, summary: sub.summary, files: st.keep, skipped: st.skipped, tests: testsRecord });
 
-    if (testsRecord && testsRecord.exit_code !== 0) {
+    if (testsBlock) {
       writeFileSync(join(out, 'diff.patch'), `${diff}\n`);
       return { record: fixRecord({ ...base, ...common, outcome: 'tests_failed', notes: notes('tests_failed') }) };
     }

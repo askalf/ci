@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url';
 import {
   parseReviewUrl, parseReviewBody, inlineItems, formatFinding, detectRunner, allowedCommands, allowedArgv, safeWritePath, stageable,
   commitSubject, hasAttributionTrailer, neutraliseRefs, cleanNotes, summariseTests, renderNotes, fixRecord, fixProblem, saveFix,
+  failingTests, judgeFailures,
   TOOLS, FINISH_REQUIRED, askForFinish, checkFinish, runLoop, buildBrief, childEnv, onlyOrigins, runFix,
   LIMITS, OUTCOMES, AUTHOR, FIX_VERSION, DEFAULT_MODEL, SUBJECT_BANNED,
 } from './fix.mjs';
@@ -324,13 +325,13 @@ function sh(cwd, args) {
   if (r.status !== 0) throw new Error(`git ${args.join(' ')}: ${r.stderr}`);
   return r.stdout.trim();
 }
-function makeRepo({ pkg = null, testExit = 0 } = {}) {
+function makeRepo({ pkg = null, testExit = 0, testBody = null } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'redline-fix-repo-'));
   sh(dir, ['init', '-q']);
   sh(dir, ['config', 'core.autocrlf', 'false']);
   mkdirSync(join(dir, 'src'));
   writeFileSync(join(dir, 'src', 'b.js'), 'export const token = process.env.X;\nconst y = 2;\n');
-  writeFileSync(join(dir, 'test.mjs'), `process.exit(${testExit});\n`);
+  writeFileSync(join(dir, 'test.mjs'), testBody ?? `process.exit(${testExit});\n`);
   writeFileSync(join(dir, '.gitignore'), 'node_modules/\n');
   if (pkg) writeFileSync(join(dir, 'package.json'), `${JSON.stringify(pkg, null, 2)}\n`);
   sh(dir, ['add', '-A']);
@@ -562,6 +563,53 @@ if (!gitOk) {
       rmSync(w.out, { recursive: true, force: true });
       rmSync(repo.dir, { recursive: true, force: true });
     }
+  }
+}
+
+console.log('\n  failingTests and judgeFailures');
+{
+  const tap = 'TAP version 13\n# Subtest: a.mjs\nok 1 - a.mjs\nnot ok 2 - oauth-detector.mjs\n  ---\n    not ok 1 - nested case\nnot ok 3 - later.mjs # TODO not yet\nnot ok 4 - skipped.mjs # SKIP no binary\n# pass 1\n# fail 2\n';
+  check('TAP: not ok names, nested included, TODO and SKIP left out, sorted', failingTests(tap).join('|') === 'nested case|oauth-detector.mjs');
+  check('jest/vitest FAIL lines', failingTests(' PASS  a.test.js\n FAIL  src/b.test.js\nFAIL c.test.ts\n').join('|') === 'c.test.ts|src/b.test.js');
+  check('a [FAIL] marker inside a test is not a file failure', failingTests('# [FAIL] source is detected\n  [FAIL] x\n').length === 0);
+  check('an output that names nothing: empty', failingTests('Error: boom\n').length === 0 && failingTests(undefined).length === 0);
+  const base = { exit: 1, failing: ['oauth-detector.mjs'] };
+  const same = judgeFailures(['oauth-detector.mjs'], base);
+  check('a failure the reviewed head shares is preexisting, not the fix\'s', same.failing.length === 0 && same.preexisting.join() === 'oauth-detector.mjs');
+  const extra = judgeFailures(['new.mjs', 'oauth-detector.mjs'], base);
+  check('a failure the head does not have is the fix\'s', extra.failing.join() === 'new.mjs' && extra.preexisting.join() === 'oauth-detector.mjs');
+  check('no baseline run: every failure is new', judgeFailures(['a'], null).failing.join() === 'a');
+  check('a passing head excuses nothing', judgeFailures(['a'], { exit: 0, failing: ['a'] }).preexisting.length === 0);
+  check('a head that fails without naming anything excuses nothing', judgeFailures(['a'], { exit: 1, failing: [] }).failing.join() === 'a');
+  const notes = renderNotes({ outcome: 'fixed', summary: 's', files: ['a'], tests: { command: 'npm test', exit_code: 1, summary: '1 pass, 1 fail', failing: [], preexisting: ['oauth-detector.mjs'] } });
+  check('notes name the preexisting failures', notes.includes('Also failing at the reviewed head, so not counted against this fix: `oauth-detector.mjs`'));
+  check('notes name the fix\'s own failures', renderNotes({ outcome: 'tests_failed', files: ['a'], tests: { command: 'npm test', exit_code: 1, summary: '', failing: ['new.mjs'], preexisting: [] } }).includes('Failing with this fix: `new.mjs`'));
+}
+
+if (gitOk && npmOk) {
+  // test.mjs reports TAP: `old.mjs` always fails; `new.mjs` fails once the fix is in src/b.js when NEW_FAIL is set in the file.
+  const tapTest = (newFail) => `import { readFileSync } from 'node:fs';\nconst fixed = readFileSync('src/b.js', 'utf8').includes('read()');\nconsole.log('TAP version 13');\nconsole.log('ok 1 - a.mjs');\nconsole.log('not ok 2 - old.mjs');\n${newFail ? "if (fixed) console.log('not ok 3 - new.mjs');\n" : ''}process.exit(1);\n`;
+  const pkg = { name: 'r', private: true, scripts: { test: 'node test.mjs' } };
+  console.log('\n  runFix: failures the reviewed head already has');
+  {
+    const repo = makeRepo({ pkg, testBody: tapTest(false) });
+    const w = world(repo, { turns: [tool('fix_write', { path: 'src/b.js', content: FIXED_B }), finish(), finish()] });
+    const { record: r } = await runFix(w.ctx);
+    check('only a failure the head shares: the fix lands, not bounced', r.outcome === 'fixed' && SHA.test(r.new_head ?? '') && w.calls.model.length === 2 && fixProblem(r) === null);
+    check('fix.json and notes name it as preexisting', r.tests.exit_code === 1 && r.tests.failing.length === 0 && r.tests.preexisting.join() === 'old.mjs' && r.notes.includes('not counted against this fix: `old.mjs`'));
+    check('the fix is restored after the head run: committed as written', readFileSync(join(repo.dir, 'src', 'b.js'), 'utf8') === FIXED_B && sh(repo.dir, ['stash', 'list']) === '');
+    rmSync(w.out, { recursive: true, force: true });
+    rmSync(repo.dir, { recursive: true, force: true });
+  }
+  {
+    const repo = makeRepo({ pkg, testBody: tapTest(true) });
+    const w = world(repo, { turns: [tool('fix_write', { path: 'src/b.js', content: FIXED_B }), finish(), finish()] });
+    const { record: r } = await runFix(w.ctx);
+    const bounce = JSON.stringify(w.calls.model[2]?.messages.at(-1) ?? '');
+    check('a new failure: bounced once, naming the new one and the old one', w.calls.model.length === 3 && bounce.includes('Failing with your change: new.mjs') && bounce.includes('Also failing at the reviewed head (not yours to fix here): old.mjs'));
+    check('then tests_failed, the new failure named in fix.json and notes', r.outcome === 'tests_failed' && r.new_head === null && r.tests.failing.join() === 'new.mjs' && r.tests.preexisting.join() === 'old.mjs' && r.notes.includes('Failing with this fix: `new.mjs`') && fixProblem(r) === null);
+    rmSync(w.out, { recursive: true, force: true });
+    rmSync(repo.dir, { recursive: true, force: true });
   }
 }
 
