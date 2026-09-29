@@ -31,19 +31,13 @@ checks that the checkout is exactly the reviewed head, then `fix.mjs`:
 - lets the model `fix_list`, `fix_read`, `fix_search`, `fix_write` (inside the checkout, never
   under `.github/`) and `fix_run` an allowlist only: the package.json `test`, `lint`, `typecheck`
   and `build` scripts and `node <file>`, without a shell, in a scrubbed environment;
-- runs the test script at least once after the last edit. A failing suite is judged by the
-  tests it names as failing, each qualified by its file (TAP `not ok`, jest `●` under `FAIL`,
-  vitest `FAIL <file> > <test>`): the script also runs once at the reviewed head, in a separate
-  worktree installed and built from nothing, and a failure the head shares does not count against
-  the fix. New failures are bounced to the model once with their names, then reported as
-  `tests_failed`. A suite that names no failure, a file failing with no test named, a head that
-  passes or whose install or build fails, or a run on either side that timed out or was killed
-  keeps the whole suite as the gate;
+- runs the test script at least once after the last edit; a failing suite is bounced to the
+  model once, then reported. The bounce, `fix.json` (`tests.failing`) and the notes name the failed
+  tests the output reports (TAP `not ok`, jest/vitest `FAIL`); the gate is the exit code alone;
 - commits everything changed except `.github/**`, files over 1 MB and what the install dirtied, as
   askalf, with a sanitised `fix:` subject and a body naming the review;
 - writes `fix.json` (`outcome`: `fixed`, `no_change`, `tests_failed` or `refused`; the commits,
-  files, tests (with the `failing` and `preexisting` test names when the suite named any), turns
-  and notes), `notes.md` and, for a fix, `fix.bundle` (`<head>..HEAD`). A dry
+  files, tests, turns and notes), `notes.md` and, for a fix, `fix.bundle` (`<head>..HEAD`). A dry
   run writes `diff.patch` instead of committing.
 
 Limits: 40 turns, 45 minutes, 30 files, 400 KB of diff; past any of them the outcome is `refused`.

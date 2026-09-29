@@ -26,15 +26,10 @@
 //     model key are never in a child's environment.
 //   - Turns, wall time, files changed and diff size are bounded; past the limits the run is
 //     refused, never trimmed into a partial fix.
-//   - When the repository has a test script it runs at least once after the last edit. A failing
-//     suite is judged by the tests it names as failing, file-qualified (TAP `not ok` under its
-//     `# Subtest:` files, jest's `●` tests under `FAIL <file>`, vitest's `FAIL <file> > <test>`):
-//     the same script runs once at the reviewed head, in a worktree of its own with its own install
-//     and build, and only a failure that is not failing there counts against the fix. A suite that
-//     names no failure, a file named without its tests, a head that passes or whose install or
-//     build fails, and a run at either side that timed out or was killed excuse nothing.
-//     A fix with new failures is bounced to the model once, then reported as tests_failed
-//     with no bundle. fix.json's tests carries the names: `failing` (new) and `preexisting`.
+//   - When the repository has a test script it runs at least once after the last edit; a failing
+//     suite is bounced to the model once, then reported as tests_failed with no bundle. The bounce,
+//     fix.json (tests.failing) and the notes name the failed tests the output reports (TAP
+//     `not ok`, jest/vitest `FAIL`). The names are for reading only: the gate is the exit code.
 //   - The commit is authored and committed as askalf; its message is one sanitised subject line
 //     and a body naming the review, checked for trailers before the bundle is written.
 //   - The model key is read from FIX_ENV_FILE and sent in a header; it is never printed and never
@@ -310,90 +305,27 @@ export function summariseTests(out) {
   return s.trim().split('\n').filter((l) => l.trim()).slice(-3).join(' | ').slice(-300);
 }
 
-/**
- * The failing tests a run names, each as a file-qualified identity where the output allows one:
- * TAP `not ok` lines without a TODO or SKIP directive, a nested one qualified by the `# Subtest:`
- * names enclosing it (`file > test`); vitest `FAIL <file> > <test>` lines; jest's `●` headings
- * under a `FAIL <file>` line (`file > describe > test`). A `FAIL <file>` with no test named in
- * that file is listed as the file alone and also in `coarse`: another failure in the same file
- * reads the same, so it is never excused. So is a TAP `not ok` whose diagnostics carry the
- * `exitCode` of a file's process (node --test's file result) with no failing test named under it:
- * an assertion at load and a syntax error read the same there. Both sorted and unique; empty when
- * nothing is named. Pure.
- */
-export function parseFailures(out) {
-  const ids = new Set();
-  const files = new Set();
-  const named = new Set();
-  const fileLevel = new Set();
-  const subtests = [];
-  const failedAt = [];
-  let pending = null;
-  let jestFile = null;
-  for (const line of String(out ?? '').split('\n')) {
-    if (pending !== null && /^\s*exitCode:/.test(line)) { fileLevel.add(pending); pending = null; continue; }
-    const sub = /^(\s*)# Subtest: (.*?)\s*$/.exec(line);
-    if (sub) {
-      const d = Math.floor(sub[1].length / 4);
-      subtests.length = d;
-      subtests[d] = sub[2];
-      pending = null;
-      continue;
-    }
-    const tap = /^(\s*)(not )?ok \d+(?:\s+-)?\s*(.*?)\s*$/.exec(line);
-    if (tap) {
-      // A test's result line follows its subtests: its own name and deeper ones no longer enclose.
-      const d = Math.floor(tap[1].length / 4);
-      const under = failedAt.slice(d + 1).some(Boolean);
-      failedAt.length = d + 1;
-      pending = null;
-      if (tap[2] && !/#\s*(TODO|SKIP)\b/i.test(tap[3])) {
-        const id = [...subtests.slice(0, d).filter((s) => s), tap[3].replace(/\s+#.*$/, '') || '(unnamed)'].join(' > ');
-        ids.add(id);
-        failedAt[d] = true;
-        if (!under) pending = id;
-      }
-      subtests.length = Math.min(subtests.length, d);
-      continue;
-    }
-    if (/^\s*\.\.\.\s*$/.test(line)) pending = null;
-    if (/^\s*PASS\s/.test(line)) { jestFile = null; continue; }
-    const fail = /^\s*FAIL\s+(\S.*?)\s*$/.exec(line);
-    if (fail) {
-      const [file, ...rest] = fail[1].replace(/\s+\[.*\]$/, '').split(/\s+[>›]\s+/);
-      jestFile = file;
-      if (rest.length) { ids.add([file, ...rest].join(' > ')); named.add(file); } else files.add(file);
-      continue;
-    }
-    const heading = /^\s*●\s+(.*?)\s*$/.exec(line);
-    if (heading && jestFile !== null && !/^(Console|Test suite failed to run)$/.test(heading[1])) {
-      ids.add([jestFile, ...heading[1].split(/\s+›\s+/)].join(' > '));
-      named.add(jestFile);
-    }
-  }
-  const coarse = [...new Set([...files].filter((f) => !named.has(f)).concat([...fileLevel]))];
-  for (const f of coarse) ids.add(f);
-  return { names: [...ids].sort(), coarse: coarse.sort() };
-}
+/** How many failed test names a bounce, fix.json and the notes carry. */
+export const FAILING_NAMES_MAX = 20;
 
-/** The failing test identities a run names (parseFailures' `names`). Pure. */
+/**
+ * The failed tests a run's output names: TAP `not ok` lines without a TODO or SKIP directive
+ * (nested ones included) and jest/vitest `FAIL <file>` lines, in order, unique, at most
+ * FAILING_NAMES_MAX. Empty when the output names none. Pure.
+ */
 export function failingTests(out) {
-  return parseFailures(out).names;
+  const ids = [];
+  for (const line of String(out ?? '').split('\n')) {
+    const tap = /^\s*not ok \d+(?:\s+-)?\s*(.*?)\s*$/.exec(line);
+    const jest = tap ? null : /^\s*FAIL\s+(\S.*?)\s*$/.exec(line);
+    let id = null;
+    if (tap && !/#\s*(TODO|SKIP)\b/i.test(tap[1])) id = tap[1].replace(/\s+#.*$/, '') || '(unnamed)';
+    else if (jest) id = jest[1];
+    if (id !== null && !ids.includes(id)) ids.push(id);
+    if (ids.length >= FAILING_NAMES_MAX) break;
+  }
+  return ids;
 }
-
-/**
- * Split the failures at the change against the reviewed head. `base` is null when the head was not
- * run. Only a head that ran to the end, fails and names its failures can excuse one, and only for a
- * change run that also ran to the end: otherwise every failure at the change is new. A `coarse`
- * name (a file with no test named in it) is never excused. Pure.
- */
-export function judgeFailures(atChange, base, { complete = true, coarse = [] } = {}) {
-  const comparable = complete && base !== null && base.complete === true && base.exit !== 0 && base.failing.length > 0;
-  const preexisting = comparable ? atChange.filter((x) => !coarse.includes(x) && base.failing.includes(x)) : [];
-  return { failing: atChange.filter((x) => !preexisting.includes(x)), preexisting };
-}
-
-const nameList = (xs) => xs.map((x) => `\`${x}\``).join(', ');
 
 export function renderNotes({ outcome, summary = '', reason = '', files = [], tests = null, skipped = [] }) {
   const parts = [];
@@ -405,8 +337,7 @@ export function renderNotes({ outcome, summary = '', reason = '', files = [], te
     if (skipped.length) parts.push(`Left out: ${skipped.map((s) => `\`${s.path}\` (${s.why})`).join(', ')}`);
     if (tests) {
       parts.push(`Tests: \`${tests.command}\` exited ${tests.exit_code}${tests.summary ? ` (${tests.summary})` : ''}`);
-      if (tests.failing?.length) parts.push(`Failing with this fix: ${nameList(tests.failing)}`);
-      if (tests.preexisting?.length) parts.push(`Also failing at the reviewed head, so not counted against this fix: ${nameList(tests.preexisting)}`);
+      if (tests.failing?.length) parts.push(`Failed: ${tests.failing.map((t) => `\`${t}\``).join(', ')}`);
     } else if (outcome !== 'no_change') parts.push('Tests: no test script in the repository.');
   }
   return cleanNotes(parts.join('\n\n'));
@@ -622,9 +553,7 @@ function run(cwd, env, argv, seconds) {
   const r = spawnSync(wrapped[0], wrapped.slice(1), { cwd, env, encoding: 'utf8', timeout: (seconds + 30) * 1000, killSignal: 'SIGKILL', maxBuffer: 64 * 1024 * 1024, shell: win && PACKAGE_MANAGERS.includes(argv[0]) });
   const timedOut = r.status === 124 || r.error?.code === 'ETIMEDOUT';
   const exit = r.status ?? (timedOut ? 124 : r.signal ? 128 : -1);
-  // Ran to the end: not timed out, not killed by a signal (137 is `timeout -k`'s SIGKILL).
-  const complete = !timedOut && r.status !== null && r.status !== 137 && !r.error;
-  return { exit, out: `${r.stdout ?? ''}${r.stderr ?? ''}${r.error && !timedOut ? `\n${r.error.message}` : ''}`, timedOut, complete };
+  return { exit, out: `${r.stdout ?? ''}${r.stderr ?? ''}${r.error && !timedOut ? `\n${r.error.message}` : ''}`, timedOut };
 }
 
 function git(cwd, env, args, { allowFail = false } = {}) {
@@ -715,7 +644,7 @@ export async function runFix(ctx) {
     let lastWrite = 0;
     const testArgv = plan.pm && plan.scripts.includes('test') ? [plan.pm, 'test'] : null;
     const isTest = (argv) => testArgv !== null && argv[0] === testArgv[0] && (argv[1] === 'test' || (argv[1] === 'run' && argv[2] === 'test'));
-    const record = (argv, r) => { const row = { command: argv.join(' '), exit: r.exit, out: r.out, timedOut: r.timedOut, complete: r.complete, seq: ++seq, isTest: isTest(argv) }; runs.push(row); return row; };
+    const record = (argv, r) => { const row = { command: argv.join(' '), exit: r.exit, out: r.out, timedOut: r.timedOut, seq: ++seq, isTest: isTest(argv) }; runs.push(row); return row; };
 
     const tool = (name, input) => {
       if (name === 'fix_list') return readTool(root, 'redline_list', input);
@@ -746,43 +675,8 @@ export async function runFix(ctx) {
       return `error: unknown tool ${name}`;
     };
 
-    // The reviewed head's own test result, run at most once, in a checkout of its own: a detached
-    // worktree at the head under the scratch home, installed and built (when there is a build
-    // script) from nothing, so no build output or dependency the fix left in the checkout is read,
-    // and the fix's checkout is never touched. A head whose install or build fails or does not
-    // finish gives no baseline, and so excuses nothing.
-    const buildArgv = plan.pm && plan.scripts.includes('build') ? [plan.pm, 'run', 'build'] : null;
-    let baseline;
-    const runBaseline = () => {
-      if (baseline !== undefined) return baseline;
-      baseline = null;
-      const wt = join(home, 'reviewed-head');
-      if (git(root, cenv, ['worktree', 'add', '--detach', '--quiet', wt, headSha], { allowFail: true }) === null) return baseline;
-      try {
-        if (git(wt, cenv, ['rev-parse', 'HEAD'], { allowFail: true }) !== headSha) return baseline;
-        for (const [argv, s] of [[plan.install, LIMITS.installS], [buildArgv, LIMITS.runMaxS]]) {
-          if (!argv) continue;
-          const r = run(wt, cenv, argv, s);
-          if (r.exit !== 0 || !r.complete) {
-            ctx.log?.(`  reviewed head: \`${argv.join(' ')}\` exited ${r.exit}${r.complete ? '' : ' (did not finish)'}; no failure is excused`);
-            return baseline;
-          }
-        }
-        const r = run(wt, cenv, testArgv, LIMITS.runMaxS);
-        // Paths the head's run prints under its own checkout are read as the fix's checkout's.
-        baseline = { exit: r.exit, failing: failingTests(r.out.split(wt).join(root)), complete: r.complete };
-        ctx.log?.(`  reviewed head: \`${testArgv.join(' ')}\` exited ${r.exit}${r.complete ? '' : ' (did not finish)'}, ${baseline.failing.length} named failure(s)`);
-      } finally {
-        git(root, cenv, ['worktree', 'remove', '--force', wt], { allowFail: true });
-        rmSync(wt, { recursive: true, force: true });
-        git(root, cenv, ['worktree', 'prune'], { allowFail: true });
-      }
-      return baseline;
-    };
-
     let bounces = 0;
     let tests = null;
-    let gate = null;
     const finalize = async (input) => {
       const checked = checkFinish(input);
       if (checked.error) return checked;
@@ -792,20 +686,11 @@ export async function runFix(ctx) {
         let t = [...runs].reverse().find((r) => r.isTest && r.seq > lastWrite);
         if (!t) { ctx.log?.('  no test run after the last edit: running the test script'); t = record(testArgv, run(root, cenv, testArgv, LIMITS.runMaxS)); }
         tests = t;
-        gate = null;
-        if (t.exit !== 0) {
-          const { names: atChange, coarse } = parseFailures(t.out);
-          // A run that did not finish is never excused by the names it got to, and a file named
-          // without its tests never is: in either case the head is not run.
-          const excusable = t.complete && atChange.some((x) => !coarse.includes(x));
-          gate = { seq: t.seq, ...judgeFailures(atChange, excusable ? runBaseline() : null, { complete: t.complete, coarse }) };
-          if (!gate.failing.length && gate.preexisting.length) return { sub: checked.sub };
-          if (bounces < LIMITS.testBounces) {
-            bounces++;
-            const named = gate.failing.length ? `\nFailing with your change: ${gate.failing.join(', ')}` : '';
-            const old = gate.preexisting.length ? `\nAlso failing at the reviewed head (not yours to fix here): ${gate.preexisting.join(', ')}` : '';
-            return { error: `The test script fails at your change (\`${t.command}\` exited ${t.exit}${t.timedOut ? ', timed out' : ''}):${named}${old}\n${capOutput(t.out, 6_000)}\n\nFix it and run the tests again, then call finish_fix.` };
-          }
+        if (t.exit !== 0 && bounces < LIMITS.testBounces) {
+          bounces++;
+          const failed = failingTests(t.out);
+          const named = failed.length ? `\nFailed: ${failed.join(', ')}` : '';
+          return { error: `The test script fails at your change (\`${t.command}\` exited ${t.exit}${t.timedOut ? ', timed out' : ''}):${named}\n${capOutput(t.out, 6_000)}\n\nFix it and run the tests again, then call finish_fix.` };
         }
       }
       return { sub: checked.sub };
@@ -817,13 +702,10 @@ export async function runFix(ctx) {
       tool: async (name, input) => tool(name, input), finalize, now: ctx.now, log: ctx.log, canForce: !rejectsForcedToolChoice(ctx.model),
     }, brief);
     const turns = loop.turns;
-    const judged = gate && tests && gate.seq === tests.seq ? gate : null;
     const testsRecord = tests ? {
       command: tests.command, exit_code: tests.exit, summary: summariseTests(tests.out),
-      ...(judged ? { failing: judged.failing, preexisting: judged.preexisting } : {}),
+      ...(tests.exit !== 0 ? { failing: failingTests(tests.out) } : {}),
     } : null;
-    // Red only with failures of its own: the ones the reviewed head shares do not stop the fix.
-    const testsBlock = testsRecord !== null && testsRecord.exit_code !== 0 && !(judged && !judged.failing.length && judged.preexisting.length);
     if (loop.refused) return refuse(loop.refused, { turns, tests: testsRecord });
     const sub = loop.sub;
     if (sub.outcome === 'refused') return refuse(sub.reason, { turns, tests: testsRecord });
@@ -840,7 +722,7 @@ export async function runFix(ctx) {
     const common = { turns, tests: testsRecord, files: st.keep };
     const notes = (outcome) => renderNotes({ outcome, summary: sub.summary, files: st.keep, skipped: st.skipped, tests: testsRecord });
 
-    if (testsBlock) {
+    if (testsRecord && testsRecord.exit_code !== 0) {
       writeFileSync(join(out, 'diff.patch'), `${diff}\n`);
       return { record: fixRecord({ ...base, ...common, outcome: 'tests_failed', notes: notes('tests_failed') }) };
     }
