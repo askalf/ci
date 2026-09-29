@@ -585,6 +585,16 @@ console.log('\n  failingTests and judgeFailures');
   const fileOnly = parseFailures(' FAIL  src/a.test.js\n');
   const coarse = judgeFailures(fileOnly.names, { exit: 1, failing: ['src/a.test.js'], complete: true }, { coarse: fileOnly.coarse });
   check('a file-level failure is never excused, even when the head fails the same file', coarse.failing.join() === 'src/a.test.js' && coarse.preexisting.length === 0);
+  // node --test: a file that fails outside any test reports its process exit; a failing test does not.
+  const nodeFile = (file, error) => `# Subtest: ${file}\nnot ok 1 - ${file}\n  ---\n  type: 'test'\n  failureType: 'testCodeFailure'\n  exitCode: 1\n  signal: ~\n  error: '${error}'\n  ...\n`;
+  const nodeTest = '# Subtest: one\nnot ok 2 - one\n  ---\n  type: \'test\'\n  failureType: \'testCodeFailure\'\n  error: \'1 == 2\'\n  ...\n';
+  const loadFail = parseFailures(`TAP version 13\n${nodeFile('test/oauth-detector.mjs', 'test failed')}${nodeTest}`);
+  check('TAP: a file failing outside any test is coarse; a failing test is not', loadFail.coarse.join() === 'test/oauth-detector.mjs' && loadFail.names.join('|') === 'one|test/oauth-detector.mjs');
+  const nestedFile = parseFailures(`TAP version 13\n# Subtest: a.test.mjs\n    # Subtest: one\n    not ok 1 - one\n      ---\n      error: 'x'\n      ...\nnot ok 1 - a.test.mjs\n  ---\n  exitCode: 1\n  signal: ~\n  error: '1 subtest failed'\n  ...\n`);
+  check('TAP: a file result enclosing a failing test is not coarse', nestedFile.coarse.length === 0 && nestedFile.names.join('|') === 'a.test.mjs|a.test.mjs > one');
+  const tapBase = { exit: 1, failing: loadFail.names, complete: true };
+  const syntax = judgeFailures(loadFail.names, tapBase, { coarse: loadFail.coarse });
+  check('TAP: the same file failing at load at the head and at the change is never excused', syntax.failing.join() === 'test/oauth-detector.mjs' && syntax.preexisting.join() === 'one');
   const base = { exit: 1, failing: ['oauth-detector.mjs'], complete: true };
   const same = judgeFailures(['oauth-detector.mjs'], base);
   check('a failure the reviewed head shares is preexisting, not the fix\'s', same.failing.length === 0 && same.preexisting.join() === 'oauth-detector.mjs');
@@ -653,6 +663,20 @@ if (gitOk && npmOk) {
     const bounce = JSON.stringify(w.calls.model[2]?.messages.at(-1) ?? '');
     check('a new failure in an already failing jest file: bounced, naming that test', w.calls.model.length === 3 && bounce.includes('Failing with your change: a.test.js > suite > new') && bounce.includes('a.test.js > suite > old'));
     check('then tests_failed with the shared test preexisting and the new one failing', r.outcome === 'tests_failed' && r.tests.failing.join() === 'a.test.js > suite > new' && r.tests.preexisting.join() === 'a.test.js > suite > old' && fixProblem(r) === null);
+    rmSync(w.out, { recursive: true, force: true });
+    rmSync(repo.dir, { recursive: true, force: true });
+  }
+  {
+    // node --test: the head's test file fails an assertion at load; the fix makes it fail to parse.
+    const loadTest = `import { mkdirSync, writeFileSync } from 'node:fs';\nimport { readFileSync } from 'node:fs';\nimport { spawnSync } from 'node:child_process';\nconst fixed = readFileSync('src/b.js', 'utf8').includes('read()');\nmkdirSync('t', { recursive: true });\nwriteFileSync('t/load.mjs', fixed ? "import test from 'node:test';\\ntest('x', () => {\\n" : "import assert from 'node:assert';\\nassert.equal(1, 2);\\n");\nconst r = spawnSync(process.execPath, ['--test', '--test-reporter=tap', 't/load.mjs'], { encoding: 'utf8' });\nprocess.stdout.write(r.stdout);\nprocess.exit(r.status ?? 1);\n`;
+    const repo = makeRepo({ pkg, testBody: loadTest });
+    writeFileSync(join(repo.dir, '.gitignore'), 'node_modules/\nt/\n');
+    sh(repo.dir, ['add', '-A']);
+    sh(repo.dir, ['-c', 'user.name=t', '-c', 'user.email=t@x', 'commit', '-q', '-m', 'test: ignore t/']);
+    repo.head = sh(repo.dir, ['rev-parse', 'HEAD']);
+    const w = world(repo, { turns: [tool('fix_write', { path: 'src/b.js', content: FIXED_B }), finish(), finish()] });
+    const { record: r } = await runFix(w.ctx);
+    check('a TAP file failing at load at the head and failing to parse with the fix: tests_failed, nothing excused', r.outcome === 'tests_failed' && r.new_head === null && r.tests.failing.join() === 't/load.mjs' && r.tests.preexisting.length === 0 && w.calls.model.length === 3 && fixProblem(r) === null);
     rmSync(w.out, { recursive: true, force: true });
     rmSync(repo.dir, { recursive: true, force: true });
   }

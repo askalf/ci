@@ -316,32 +316,47 @@ export function summariseTests(out) {
  * names enclosing it (`file > test`); vitest `FAIL <file> > <test>` lines; jest's `●` headings
  * under a `FAIL <file>` line (`file > describe > test`). A `FAIL <file>` with no test named in
  * that file is listed as the file alone and also in `coarse`: another failure in the same file
- * reads the same, so it is never excused. Both sorted and unique; empty when nothing is named. Pure.
+ * reads the same, so it is never excused. So is a TAP `not ok` whose diagnostics carry the
+ * `exitCode` of a file's process (node --test's file result) with no failing test named under it:
+ * an assertion at load and a syntax error read the same there. Both sorted and unique; empty when
+ * nothing is named. Pure.
  */
 export function parseFailures(out) {
   const ids = new Set();
   const files = new Set();
   const named = new Set();
+  const fileLevel = new Set();
   const subtests = [];
+  const failedAt = [];
+  let pending = null;
   let jestFile = null;
   for (const line of String(out ?? '').split('\n')) {
+    if (pending !== null && /^\s*exitCode:/.test(line)) { fileLevel.add(pending); pending = null; continue; }
     const sub = /^(\s*)# Subtest: (.*?)\s*$/.exec(line);
     if (sub) {
       const d = Math.floor(sub[1].length / 4);
       subtests.length = d;
       subtests[d] = sub[2];
+      pending = null;
       continue;
     }
     const tap = /^(\s*)(not )?ok \d+(?:\s+-)?\s*(.*?)\s*$/.exec(line);
     if (tap) {
       // A test's result line follows its subtests: its own name and deeper ones no longer enclose.
       const d = Math.floor(tap[1].length / 4);
+      const under = failedAt.slice(d + 1).some(Boolean);
+      failedAt.length = d + 1;
+      pending = null;
       if (tap[2] && !/#\s*(TODO|SKIP)\b/i.test(tap[3])) {
-        ids.add([...subtests.slice(0, d).filter((s) => s), tap[3].replace(/\s+#.*$/, '') || '(unnamed)'].join(' > '));
+        const id = [...subtests.slice(0, d).filter((s) => s), tap[3].replace(/\s+#.*$/, '') || '(unnamed)'].join(' > ');
+        ids.add(id);
+        failedAt[d] = true;
+        if (!under) pending = id;
       }
       subtests.length = Math.min(subtests.length, d);
       continue;
     }
+    if (/^\s*\.\.\.\s*$/.test(line)) pending = null;
     if (/^\s*PASS\s/.test(line)) { jestFile = null; continue; }
     const fail = /^\s*FAIL\s+(\S.*?)\s*$/.exec(line);
     if (fail) {
@@ -356,7 +371,7 @@ export function parseFailures(out) {
       named.add(jestFile);
     }
   }
-  const coarse = [...files].filter((f) => !named.has(f));
+  const coarse = [...new Set([...files].filter((f) => !named.has(f)).concat([...fileLevel]))];
   for (const f of coarse) ids.add(f);
   return { names: [...ids].sort(), coarse: coarse.sort() };
 }
