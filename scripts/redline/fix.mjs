@@ -30,7 +30,8 @@
 //     suite is judged by the failures it names (TAP `not ok`, jest/vitest `FAIL`): the same script
 //     runs once at the reviewed head, and only a failure that is not failing there counts against
 //     the fix. A suite that names no failure, or a head that passes, keeps the whole suite as the
-//     gate. A fix with new failures is bounced to the model once, then reported as tests_failed
+//     gate, and so does a run at either side that timed out or was killed: its names are partial.
+//     A fix with new failures is bounced to the model once, then reported as tests_failed
 //     with no bundle. fix.json's tests carries the names: `failing` (new) and `preexisting`.
 //   - The commit is authored and committed as askalf; its message is one sanitised subject line
 //     and a body naming the review, checked for trailers before the bundle is written.
@@ -327,11 +328,11 @@ export function failingTests(out) {
 
 /**
  * Split the failures at the change against the reviewed head. `base` is null when the head was not
- * run. Only a head that fails and names its failures can excuse one: otherwise every failure at the
- * change is new. Pure.
+ * run. Only a head that ran to the end, fails and names its failures can excuse one, and only for a
+ * change run that also ran to the end: otherwise every failure at the change is new. Pure.
  */
-export function judgeFailures(atChange, base) {
-  const comparable = base !== null && base.exit !== 0 && base.failing.length > 0;
+export function judgeFailures(atChange, base, { complete = true } = {}) {
+  const comparable = complete && base !== null && base.complete === true && base.exit !== 0 && base.failing.length > 0;
   const preexisting = comparable ? atChange.filter((x) => base.failing.includes(x)) : [];
   return { failing: atChange.filter((x) => !preexisting.includes(x)), preexisting };
 }
@@ -346,10 +347,11 @@ export function renderNotes({ outcome, summary = '', reason = '', files = [], te
     if (outcome === 'no_change') parts.push('No file changed.');
     if (files.length) parts.push(`Files: ${files.map((f) => `\`${f}\``).join(', ')}`);
     if (skipped.length) parts.push(`Left out: ${skipped.map((s) => `\`${s.path}\` (${s.why})`).join(', ')}`);
-    if (tests) parts.push(`Tests: \`${tests.command}\` exited ${tests.exit_code}${tests.summary ? ` (${tests.summary})` : ''}`);
-    if (tests?.failing?.length) parts.push(`Failing with this fix: ${nameList(tests.failing)}`);
-    if (tests?.preexisting?.length) parts.push(`Also failing at the reviewed head, so not counted against this fix: ${nameList(tests.preexisting)}`);
-    else if (outcome !== 'no_change') parts.push('Tests: no test script in the repository.');
+    if (tests) {
+      parts.push(`Tests: \`${tests.command}\` exited ${tests.exit_code}${tests.summary ? ` (${tests.summary})` : ''}`);
+      if (tests.failing?.length) parts.push(`Failing with this fix: ${nameList(tests.failing)}`);
+      if (tests.preexisting?.length) parts.push(`Also failing at the reviewed head, so not counted against this fix: ${nameList(tests.preexisting)}`);
+    } else if (outcome !== 'no_change') parts.push('Tests: no test script in the repository.');
   }
   return cleanNotes(parts.join('\n\n'));
 }
@@ -564,7 +566,9 @@ function run(cwd, env, argv, seconds) {
   const r = spawnSync(wrapped[0], wrapped.slice(1), { cwd, env, encoding: 'utf8', timeout: (seconds + 30) * 1000, killSignal: 'SIGKILL', maxBuffer: 64 * 1024 * 1024, shell: win && PACKAGE_MANAGERS.includes(argv[0]) });
   const timedOut = r.status === 124 || r.error?.code === 'ETIMEDOUT';
   const exit = r.status ?? (timedOut ? 124 : r.signal ? 128 : -1);
-  return { exit, out: `${r.stdout ?? ''}${r.stderr ?? ''}${r.error && !timedOut ? `\n${r.error.message}` : ''}`, timedOut };
+  // Ran to the end: not timed out, not killed by a signal (137 is `timeout -k`'s SIGKILL).
+  const complete = !timedOut && r.status !== null && r.status !== 137 && !r.error;
+  return { exit, out: `${r.stdout ?? ''}${r.stderr ?? ''}${r.error && !timedOut ? `\n${r.error.message}` : ''}`, timedOut, complete };
 }
 
 function git(cwd, env, args, { allowFail = false } = {}) {
@@ -655,7 +659,7 @@ export async function runFix(ctx) {
     let lastWrite = 0;
     const testArgv = plan.pm && plan.scripts.includes('test') ? [plan.pm, 'test'] : null;
     const isTest = (argv) => testArgv !== null && argv[0] === testArgv[0] && (argv[1] === 'test' || (argv[1] === 'run' && argv[2] === 'test'));
-    const record = (argv, r) => { const row = { command: argv.join(' '), exit: r.exit, out: r.out, timedOut: r.timedOut, seq: ++seq, isTest: isTest(argv) }; runs.push(row); return row; };
+    const record = (argv, r) => { const row = { command: argv.join(' '), exit: r.exit, out: r.out, timedOut: r.timedOut, complete: r.complete, seq: ++seq, isTest: isTest(argv) }; runs.push(row); return row; };
 
     const tool = (name, input) => {
       if (name === 'fix_list') return readTool(root, 'redline_list', input);
@@ -687,7 +691,9 @@ export async function runFix(ctx) {
     };
 
     // The reviewed head's own test result, run at most once: the fix is stashed, the head is built
-    // (when there is a build script) and tested, then the fix is restored and built again.
+    // (when there is a build script) and tested, then the checkout is put back to the head (what the
+    // head's build and tests wrote is dropped; ignored files stay), the fix is restored and built
+    // again. Without the reset a build output the fix's stash also holds blocks the pop.
     const buildArgv = plan.pm && plan.scripts.includes('build') ? [plan.pm, 'run', 'build'] : null;
     let baseline;
     const runBaseline = () => {
@@ -701,10 +707,12 @@ export async function runFix(ctx) {
         if (!changedPaths(root, cenv).length && git(root, cenv, ['rev-parse', 'HEAD']) === headSha) {
           if (buildArgv) run(root, cenv, buildArgv, LIMITS.runMaxS);
           const r = run(root, cenv, testArgv, LIMITS.runMaxS);
-          baseline = { exit: r.exit, failing: failingTests(r.out) };
-          ctx.log?.(`  reviewed head: \`${testArgv.join(' ')}\` exited ${r.exit}, ${baseline.failing.length} named failure(s)`);
+          baseline = { exit: r.exit, failing: failingTests(r.out), complete: r.complete };
+          ctx.log?.(`  reviewed head: \`${testArgv.join(' ')}\` exited ${r.exit}${r.complete ? '' : ' (did not finish)'}, ${baseline.failing.length} named failure(s)`);
         }
       } finally {
+        git(root, cenv, ['reset', '--hard', '--quiet']);
+        git(root, cenv, ['clean', '-fdq']);
         git(root, cenv, ['stash', 'pop', '--quiet']);
         if (buildArgv) run(root, cenv, buildArgv, LIMITS.runMaxS);
       }
@@ -726,7 +734,8 @@ export async function runFix(ctx) {
         gate = null;
         if (t.exit !== 0) {
           const atChange = failingTests(t.out);
-          gate = { seq: t.seq, ...judgeFailures(atChange, atChange.length ? runBaseline() : null) };
+          // A run that did not finish is never excused by the names it got to: the head is not run.
+          gate = { seq: t.seq, ...judgeFailures(atChange, atChange.length && t.complete ? runBaseline() : null, { complete: t.complete }) };
           if (!gate.failing.length && gate.preexisting.length) return { sub: checked.sub };
           if (bounces < LIMITS.testBounces) {
             bounces++;
