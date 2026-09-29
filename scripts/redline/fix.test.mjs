@@ -573,17 +573,25 @@ console.log('\n  failingTests and judgeFailures');
   check('jest/vitest FAIL lines', failingTests(' PASS  a.test.js\n FAIL  src/b.test.js\nFAIL c.test.ts\n').join('|') === 'c.test.ts|src/b.test.js');
   check('a [FAIL] marker inside a test is not a file failure', failingTests('# [FAIL] source is detected\n  [FAIL] x\n').length === 0);
   check('an output that names nothing: empty', failingTests('Error: boom\n').length === 0 && failingTests(undefined).length === 0);
-  const base = { exit: 1, failing: ['oauth-detector.mjs'] };
+  const base = { exit: 1, failing: ['oauth-detector.mjs'], complete: true };
   const same = judgeFailures(['oauth-detector.mjs'], base);
   check('a failure the reviewed head shares is preexisting, not the fix\'s', same.failing.length === 0 && same.preexisting.join() === 'oauth-detector.mjs');
   const extra = judgeFailures(['new.mjs', 'oauth-detector.mjs'], base);
   check('a failure the head does not have is the fix\'s', extra.failing.join() === 'new.mjs' && extra.preexisting.join() === 'oauth-detector.mjs');
   check('no baseline run: every failure is new', judgeFailures(['a'], null).failing.join() === 'a');
-  check('a passing head excuses nothing', judgeFailures(['a'], { exit: 0, failing: ['a'] }).preexisting.length === 0);
-  check('a head that fails without naming anything excuses nothing', judgeFailures(['a'], { exit: 1, failing: [] }).failing.join() === 'a');
+  check('a passing head excuses nothing', judgeFailures(['a'], { exit: 0, failing: ['a'], complete: true }).preexisting.length === 0);
+  check('a head that fails without naming anything excuses nothing', judgeFailures(['a'], { exit: 1, failing: [], complete: true }).failing.join() === 'a');
+  const hung = judgeFailures(['oauth-detector.mjs'], base, { complete: false });
+  check('a change run that did not finish excuses nothing, even a shared name', hung.failing.join() === 'oauth-detector.mjs' && hung.preexisting.length === 0);
+  check('a head run that did not finish excuses nothing', judgeFailures(['a'], { exit: 124, failing: ['a'], complete: false }).preexisting.length === 0);
   const notes = renderNotes({ outcome: 'fixed', summary: 's', files: ['a'], tests: { command: 'npm test', exit_code: 1, summary: '1 pass, 1 fail', failing: [], preexisting: ['oauth-detector.mjs'] } });
   check('notes name the preexisting failures', notes.includes('Also failing at the reviewed head, so not counted against this fix: `oauth-detector.mjs`'));
-  check('notes name the fix\'s own failures', renderNotes({ outcome: 'tests_failed', files: ['a'], tests: { command: 'npm test', exit_code: 1, summary: '', failing: ['new.mjs'], preexisting: [] } }).includes('Failing with this fix: `new.mjs`'));
+  const own = renderNotes({ outcome: 'tests_failed', files: ['a'], tests: { command: 'npm test', exit_code: 1, summary: '', failing: ['new.mjs'], preexisting: [] } });
+  check('notes name the fix\'s own failures', own.includes('Failing with this fix: `new.mjs`'));
+  check('new failures with nothing preexisting: no missing-script line', !/no test script/.test(own));
+  const green = renderNotes({ outcome: 'fixed', summary: 's', files: ['a'], tests: { command: 'npm test', exit_code: 0, summary: '2 pass, 0 fail' } });
+  check('a passing test record: the command, and no missing-script line', green.includes('Tests: `npm test` exited 0') && !/no test script/.test(green));
+  check('a record with preexisting names: no missing-script line', !/no test script/.test(notes));
 }
 
 if (gitOk && npmOk) {
@@ -608,6 +616,35 @@ if (gitOk && npmOk) {
     const bounce = JSON.stringify(w.calls.model[2]?.messages.at(-1) ?? '');
     check('a new failure: bounced once, naming the new one and the old one', w.calls.model.length === 3 && bounce.includes('Failing with your change: new.mjs') && bounce.includes('Also failing at the reviewed head (not yours to fix here): old.mjs'));
     check('then tests_failed, the new failure named in fix.json and notes', r.outcome === 'tests_failed' && r.new_head === null && r.tests.failing.join() === 'new.mjs' && r.tests.preexisting.join() === 'old.mjs' && r.notes.includes('Failing with this fix: `new.mjs`') && fixProblem(r) === null);
+    rmSync(w.out, { recursive: true, force: true });
+    rmSync(repo.dir, { recursive: true, force: true });
+  }
+  {
+    // The change reports the shared failure, then hangs: the model's own run times out.
+    const hangTest = `import { readFileSync } from 'node:fs';\nconst fixed = readFileSync('src/b.js', 'utf8').includes('read()');\nconsole.log('TAP version 13');\nconsole.log('not ok 1 - old.mjs');\nif (fixed) setInterval(() => {}, 1000);\nelse process.exit(1);\n`;
+    const repo = makeRepo({ pkg, testBody: hangTest });
+    const w = world(repo, { turns: [tool('fix_write', { path: 'src/b.js', content: FIXED_B }), tool('fix_run', { command: 'npm test', timeout_seconds: 2 }), finish(), finish()] });
+    const { record: r } = await runFix(w.ctx);
+    const bounce = JSON.stringify(w.calls.model[3]?.messages.at(-1) ?? '');
+    // GNU timeout exits 124; busybox's ends the child by SIGTERM. Either way the run did not finish.
+    check('a timed-out run that names only a shared failure is bounced, not excused', bounce.includes('test script fails') && bounce.includes('Failing with your change: old.mjs') && !bounce.includes('Also failing at the reviewed head'));
+    check('then tests_failed with nothing counted as preexisting, and the head never run', r.outcome === 'tests_failed' && r.new_head === null && r.tests.preexisting.length === 0 && r.tests.failing.join() === 'old.mjs' && sh(repo.dir, ['stash', 'list']) === '' && fixProblem(r) === null);
+    rmSync(w.out, { recursive: true, force: true });
+    rmSync(repo.dir, { recursive: true, force: true });
+  }
+  {
+    // The build writes an untracked, non-ignored file: the fix's stash holds it and the head's build
+    // writes it again before the fix is restored.
+    const buildPkg = { name: 'r', private: true, scripts: { build: 'node build.mjs', test: 'node test.mjs' } };
+    const repo = makeRepo({ pkg: buildPkg, testBody: tapTest(false) });
+    writeFileSync(join(repo.dir, 'build.mjs'), `import { readFileSync, writeFileSync } from 'node:fs';\nwriteFileSync('out.txt', readFileSync('src/b.js', 'utf8'));\n`);
+    sh(repo.dir, ['add', '-A']);
+    sh(repo.dir, ['-c', 'user.name=t', '-c', 'user.email=t@x', 'commit', '-q', '-m', 'build: add build']);
+    repo.head = sh(repo.dir, ['rev-parse', 'HEAD']);
+    const w = world(repo, { turns: [tool('fix_write', { path: 'src/b.js', content: FIXED_B }), tool('fix_run', { command: 'npm run build' }), finish(), finish()] });
+    const { record: r } = await runFix(w.ctx);
+    check('a build output the head build recreates does not block restoring the fix', r.outcome === 'fixed' && SHA.test(r.new_head ?? '') && r.tests.preexisting.join() === 'old.mjs' && fixProblem(r) === null);
+    check('the fix and its own build output are back, and no stash is left', readFileSync(join(repo.dir, 'src', 'b.js'), 'utf8') === FIXED_B && readFileSync(join(repo.dir, 'out.txt'), 'utf8') === FIXED_B && sh(repo.dir, ['stash', 'list']) === '');
     rmSync(w.out, { recursive: true, force: true });
     rmSync(repo.dir, { recursive: true, force: true });
   }
