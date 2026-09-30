@@ -6,8 +6,10 @@
 # reviews and merges them.
 #
 # Writing to other repos needs a token GITHUB_TOKEN cannot be: REDLINE_PIN_BUMP_TOKEN, a
-# fine-grained token owned by askalf with Contents and Pull requests read/write on the repos in
-# CALLERS. A PR opened with GITHUB_TOKEN would also start no CI, so no required check would report.
+# fine-grained token owned by askalf with Contents, Pull requests and Workflows read/write on the
+# repos in CALLERS. Workflows is needed because the pin lives in .github/workflows/, and GitHub
+# refuses a change to a workflow file from a token without it. A PR opened with GITHUB_TOKEN would
+# also start no CI, so no required check would report.
 # Without the secret the job says so and stops, green.
 name: Redline pin bump
 
