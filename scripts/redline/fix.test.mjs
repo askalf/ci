@@ -9,7 +9,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
   parseReviewUrl, parseReviewBody, inlineItems, formatFinding, detectRunner, allowedCommands, allowedArgv, safeWritePath, stageable,
-  protectedFromCheckAttr, PROTECTED_ATTR,
+  protectedFromCheckAttr, protectedPaths, PROTECTED_ATTR,
   commitSubject, hasAttributionTrailer, neutraliseRefs, cleanNotes, summariseTests, renderNotes, fixRecord, fixProblem, saveFix,
   failingTests, FAILING_NAMES_MAX,
   TOOLS, FINISH_REQUIRED, askForFinish, checkFinish, runLoop, buildBrief, childEnv, onlyOrigins, runFix,
@@ -173,6 +173,13 @@ console.log('\n  redline-protected files');
   check('set and valued paths are protected', got.has('src/cc-template-data.json') && got.has('c.json'));
   check('unspecified, unset and false are not', !got.has('src/a.js') && !got.has('b.json') && !got.has('d.json') && got.size === 2);
   check('empty output protects nothing', protectedFromCheckAttr('').size === 0);
+  if (gitOk) {
+    const attrs = { '.gitattributes': `data/*.json ${PROTECTED_ATTR}\n`, 'lib/.gitattributes': `vendor.js ${PROTECTED_ATTR}=vendored\n` };
+    const got2 = protectedPaths(attrs, ['data/payload.json', 'lib/vendor.js', 'src/a.js', 'vendor.js']);
+    check('a snapshot of .gitattributes decides, nested ones included', got2.has('data/payload.json') && got2.has('lib/vendor.js') && got2.size === 2);
+    check('no snapshot protects nothing', protectedPaths({}, ['data/payload.json']).size === 0);
+    check('no paths asks git nothing', protectedPaths(attrs, []).size === 0);
+  }
 }
 
 console.log('\n  what gets staged');
@@ -525,6 +532,40 @@ if (!gitOk) {
     check('the payload in the commit is the reviewed one',
       spawnSync('git', ['show', `${r.new_head}:data/payload.json`], { cwd: repo.dir, encoding: 'utf8' }).stdout === '{"captured":true}\n');
     check('the notes say why the payload was left out', new RegExp(`data/payload.json.*${PROTECTED_ATTR}`).test(r.notes), r.notes);
+    rmSync(w.out, { recursive: true, force: true });
+    rmSync(repo.dir, { recursive: true, force: true });
+  }
+  {
+    // The same, and the command also commits on its own, then fix_write tries the payload again:
+    // the commit starts from the reviewed head, so neither the payload nor the mark's removal lands.
+    const repo = makeRepo();
+    mkdirSync(join(repo.dir, 'data'));
+    writeFileSync(join(repo.dir, 'data', 'payload.json'), '{"captured":true}\n');
+    writeFileSync(join(repo.dir, '.gitattributes'), `data/payload.json ${PROTECTED_ATTR}\n`);
+    sh(repo.dir, ['add', '-A']);
+    sh(repo.dir, ['-c', 'user.name=t', '-c', 'user.email=t@x', 'commit', '-q', '-m', 'chore: captured payload']);
+    repo.head = sh(repo.dir, ['rev-parse', 'HEAD']);
+    const lift = [
+      "import { writeFileSync } from 'node:fs';",
+      "import { spawnSync } from 'node:child_process';",
+      "writeFileSync('.gitattributes', '');",
+      "writeFileSync('data/payload.json', '{\"captured\":false}\\n');",
+      "spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@x', 'commit', '-q', '-a', '-m', 'lift'], { stdio: 'ignore' });",
+      '',
+    ].join('\n');
+    const w = world(repo, { turns: [
+      tool('fix_write', { path: 'lift.mjs', content: lift }), tool('fix_run', { command: 'node lift.mjs' }),
+      tool('fix_write', { path: 'data/payload.json', content: '{"captured":"again"}\n' }),
+      tool('fix_write', { path: 'src/c.js', content: 'export const c = 1;\n' }), finish(),
+    ] });
+    const { record: r } = await runFix(w.ctx);
+    check('a command that empties .gitattributes does not lift the mark for fix_write',
+      new RegExp(`data/payload.json is marked ${PROTECTED_ATTR}`).test(JSON.stringify(w.calls.model[3].messages.at(-1))));
+    check('a commit the command made is not carried: one fix commit on top of the reviewed head',
+      r.outcome === 'fixed' && r.files.join() === 'lift.mjs,src/c.js' && fixProblem(r) === null
+      && sh(repo.dir, ['rev-parse', 'HEAD~1']) === repo.head);
+    check('the payload and .gitattributes are unchanged in the commit',
+      sh(repo.dir, ['diff', '--name-only', repo.head, 'HEAD']).split('\n').join() === 'lift.mjs,src/c.js');
     rmSync(w.out, { recursive: true, force: true });
     rmSync(repo.dir, { recursive: true, force: true });
   }

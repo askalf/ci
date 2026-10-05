@@ -38,7 +38,9 @@ checks that the checkout is exactly the reviewed head, then `fix.mjs`:
   tests the output reports (TAP `not ok`, jest/vitest `FAIL`); the gate is the exit code alone;
 - commits everything changed except `.github/**`, `.gitattributes`, `redline-protected` files,
   files over 1 MB and what the install dirtied, as
-  askalf, with a sanitised `fix:` subject and a body naming the review;
+  askalf, with a sanitised `fix:` subject and a body naming the review. A command can still change
+  a protected file on disk; the commit starts again from the reviewed head, leaves that change out,
+  and is checked for a protected path before the bundle is written;
 - writes `fix.json` (`outcome`: `fixed`, `no_change`, `tests_failed` or `refused`; the commits,
   files, tests, turns and notes), `notes.md` and, for a fix, `fix.bundle` (`<head>..HEAD`). A dry
   run writes `diff.patch` instead of committing.
