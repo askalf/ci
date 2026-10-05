@@ -20,6 +20,13 @@
 //     review on another PR, a moved head or a fork PR is refused before the model is called.
 //   - fix_write stays inside the checkout (symlinks resolved) and never touches .github/: a
 //     workflow change from this lane would run with the PR's own permissions on the next push.
+//   - A file the repository marks `redline-protected` in .gitattributes (captured payloads,
+//     vendored code, recorded fixtures) is never written by fix_write and never enters the commit.
+//     The marks are read from the reviewed head's tree before the install runs and judged in a
+//     scratch repository, never in the checkout, so a command that empties a .gitattributes, or
+//     stages or commits on its own, cannot lift one. A command may still change a protected file
+//     on disk; the commit starts again from the reviewed head and leaves that change out. No
+//     .gitattributes is written or committed.
 //   - run takes an allowlist only, without a shell: the package.json test, lint, typecheck and
 //     build scripts through the detected package manager, and node <file> inside the checkout.
 //     Commands run as the runner's account with a scrubbed environment: the GitHub token and the
@@ -46,7 +53,7 @@
 // file ends the run.
 
 import { readFileSync, writeFileSync, mkdirSync, rmSync, existsSync, lstatSync, realpathSync, statSync, readdirSync, appendFileSync, mkdtempSync } from 'node:fs';
-import { join, resolve, relative, dirname, sep, posix } from 'node:path';
+import { join, resolve, relative, dirname, basename, sep, posix } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
@@ -197,15 +204,58 @@ export function allowedArgv(command, plan, root) {
 // ---------- the filesystem ----------
 
 /**
+ * The attribute a repository sets on files that are data, not code: a payload captured from a
+ * live system and rebuilt by a script, vendored code, a recorded fixture. Their text is what was
+ * captured, so a review finding about it is answered by declining that finding, never by an edit
+ * (dario's src/cc-template-data.json is Claude Code's own request as captured; a hand edit would
+ * change the wire dario sends). A repository opts a path in with `<pattern> redline-protected`.
+ */
+export const PROTECTED_ATTR = 'redline-protected';
+
+/** The paths `git check-attr -z redline-protected -- <paths>` reports as set or valued. Pure. */
+export function protectedFromCheckAttr(raw) {
+  const f = String(raw ?? '').split('\0');
+  const out = new Set();
+  for (let i = 0; i + 2 < f.length; i += 3) {
+    if (f[i] && !['unspecified', 'unset', 'false'].includes(f[i + 2])) out.add(f[i]);
+  }
+  return out;
+}
+
+/** Why a checkout-relative path may not be written, or '' when it may. Pure. */
+function writeRule(rel) {
+  if (/(^|\/)(?:\.git|node_modules)(?:\/|$)/.test(rel)) return 'path is under .git or node_modules';
+  if (/^\.github(?:\/|$)/.test(rel)) return 'nothing under .github/ is written by the fix lane';
+  if (/(?:^|\/)\.gitattributes$/.test(rel)) return '.gitattributes is never written by the fix lane';
+  return '';
+}
+
+/**
+ * Where a write to `abs` lands, relative to the real checkout: the existing part of the path
+ * resolved through its symlinks, the rest as given. A directory symlink inside the checkout
+ * (`alias -> data`) makes `alias/payload.json` land on `data/payload.json`, so every rule about
+ * where a write may go is checked on this path as well as on the one the model named.
+ */
+export function landingPath(root, abs) {
+  const rootReal = realpathSync(root);
+  let dir = abs;
+  const tail = [];
+  while (!existsSync(dir)) { tail.unshift(basename(dir)); dir = dirname(dir); }
+  return relative(rootReal, join(realpathSync(dir), ...tail)).split(sep).join('/');
+}
+
+/**
  * Resolve a path the model wants to write. Inside the checkout, symlinks included; never under
- * .git or node_modules, and never under .github: a workflow or action definition changed by this
- * lane would run with the PR's own permissions on the next push. Returns the absolute path or throws.
+ * .git or node_modules, never under .github (a workflow or action definition changed by this lane
+ * would run with the PR's own permissions on the next push) and never a .gitattributes, checked
+ * on the path as named and on where it lands through any directory symlink. Returns the absolute
+ * path or throws.
  */
 export function safeWritePath(root, p) {
   const rel = posix.normalize(String(p ?? '').replace(/\\/g, '/').replace(/^\/+/, ''));
   if (!rel || rel === '.' || rel === '..' || rel.startsWith('../')) throw new Error('path is outside the checkout');
-  if (/(^|\/)(?:\.git|node_modules)(?:\/|$)/.test(rel)) throw new Error('path is under .git or node_modules');
-  if (/^\.github(?:\/|$)/.test(rel)) throw new Error('nothing under .github/ is written by the fix lane');
+  const named = writeRule(rel);
+  if (named) throw new Error(named);
   const rootReal = realpathSync(root);
   const abs = resolve(rootReal, rel);
   const inside = (x) => x === rootReal || x.startsWith(rootReal + sep);
@@ -217,20 +267,25 @@ export function safeWritePath(root, p) {
   try { st = lstatSync(abs); } catch { /* a new file */ }
   if (st?.isSymbolicLink()) throw new Error('path is a symlink');
   if (st?.isDirectory()) throw new Error('path is a directory');
+  const landed = writeRule(landingPath(root, abs));
+  if (landed) throw new Error(`${landed} (through a directory symlink)`);
   return abs;
 }
 
 /**
  * Which changed paths become the commit. Everything the checkout shows as changed is staged
- * (`git add -A`) except: paths under .github/, files over LIMITS.fileBytes, and paths the install
- * step dirtied that the model did not write (a lockfile rewritten by npm is not the fix). Pure:
- * `sizeOf(path)` supplies sizes. Returns { keep, skipped: [{ path, why }] }.
+ * (`git add -A`) except: paths under .github/, a .gitattributes, paths marked redline-protected
+ * (`protectedSet`), files over LIMITS.fileBytes, and paths the install step dirtied that the model
+ * did not write (a lockfile rewritten by npm is not the fix). Pure: `sizeOf(path)` supplies sizes.
+ * Returns { keep, skipped: [{ path, why }] }.
  */
-export function stageable(paths, { installDirty = [], written = new Set(), sizeOf = () => 0 } = {}) {
+export function stageable(paths, { installDirty = [], written = new Set(), sizeOf = () => 0, protectedSet = new Set() } = {}) {
   const keep = [];
   const skipped = [];
   for (const p of paths) {
     if (/^\.github(?:\/|$)/.test(p)) skipped.push({ path: p, why: 'under .github/' });
+    else if (/(?:^|\/)\.gitattributes$/.test(p)) skipped.push({ path: p, why: 'a .gitattributes' });
+    else if (protectedSet.has(p)) skipped.push({ path: p, why: `marked ${PROTECTED_ATTR}` });
     else if (installDirty.includes(p) && !written.has(p)) skipped.push({ path: p, why: 'changed by the install, not by the fix' });
     else if (sizeOf(p) > LIMITS.fileBytes) skipped.push({ path: p, why: `larger than ${LIMITS.fileBytes} bytes` });
     else keep.push(p);
@@ -507,7 +562,7 @@ export async function runLoop(ctx, brief) {
   return { refused: `no fix submitted within ${LIMITS.turns} turns`, turns };
 }
 
-export function buildBrief({ pr, files, headSha, review, items, plan, installNote, diff }) {
+export function buildBrief({ pr, files, headSha, review, items, plan, installNote, diff, protectedFiles = [] }) {
   const findings = review.findings;
   return [
     `Repository: ${pr.base.repo.full_name}`,
@@ -515,6 +570,9 @@ export function buildBrief({ pr, files, headSha, review, items, plan, installNot
     `${pr.head.ref} -> ${pr.base.ref}; head ${headSha}`,
     '', 'PR description:', String(pr.body ?? '').slice(0, LIMITS.bodyChars) || '(empty)',
     '', `Files the PR changes (${files.length}):`, ...files.map((f) => `- ${f.status} +${f.additions} -${f.deletions} ${f.filename}`),
+    ...(protectedFiles.length
+      ? ['', `Captured data, marked ${PROTECTED_ATTR} (never written by fix_write): ${protectedFiles.join(', ')}. A finding about the text inside one of these is answered in the summary, not by an edit.`]
+      : []),
     '', `Review summary: ${review.summary || '(none)'}`,
     '', `Findings (${findings.length}):`, ...findings.map(formatFinding),
     '', `Inline comments (${items.length}):`, ...items.map((c, i) => `[${i + 1}] ${c.path}${c.line ? `:${c.line}` : ''}\n${c.body}`),
@@ -560,6 +618,43 @@ function git(cwd, env, args, { allowFail = false } = {}) {
   const r = spawnSync('git', args, { cwd, env, encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 });
   if (r.status !== 0 && !allowFail) throw new Error(`git ${args[0]} failed: ${(r.stderr || r.stdout || r.error?.message || '').trim().slice(0, 300)}`);
   return r.status === 0 ? String(r.stdout ?? '').replace(/\n$/, '') : null;
+}
+
+/**
+ * The reviewed head's .gitattributes files as { path: text }, read from its tree, not from the
+ * checkout. Taken before the install runs; every redline-protected decision after that is made
+ * against this snapshot. A symlinked .gitattributes is skipped, as git skips it.
+ */
+function headAttributes(root, env, headSha) {
+  const out = {};
+  for (const row of (git(root, env, ['ls-tree', '-r', '-z', headSha]) ?? '').split('\0')) {
+    const tab = row.indexOf('\t');
+    const [mode, type] = row.slice(0, tab).split(' ');
+    const p = row.slice(tab + 1);
+    if (tab < 0 || type !== 'blob' || !['100644', '100755'].includes(mode) || !/(?:^|\/)\.gitattributes$/.test(p)) continue;
+    out[p] = git(root, env, ['cat-file', 'blob', `${headSha}:${p}`]) ?? '';
+  }
+  return out;
+}
+
+/**
+ * The given paths that `attrs` (headAttributes) marks redline-protected. git decides, in a fresh
+ * scratch repository holding only those files, with no global or system config, so nothing a
+ * command did to the checkout or its .git reaches the answer. Throws when git cannot say.
+ */
+export function protectedPaths(attrs, paths) {
+  if (!paths.length) return new Set();
+  const dir = mkdtempSync(join(tmpdir(), 'redline-attrs-'));
+  try {
+    const env = { ...childEnv(process.env, dir), XDG_CONFIG_HOME: dir, GIT_CONFIG_NOSYSTEM: '1' };
+    git(dir, env, ['init', '-q']);
+    for (const [p, text] of Object.entries(attrs)) { mkdirSync(dirname(join(dir, p)), { recursive: true }); writeFileSync(join(dir, p), text); }
+    const r = spawnSync('git', ['check-attr', '-z', PROTECTED_ATTR, '--', ...paths], { cwd: dir, env, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 });
+    if (r.status !== 0) throw new Error(`git check-attr failed: ${(r.stderr || r.error?.message || '').trim().slice(0, 200)}`);
+    return protectedFromCheckAttr(r.stdout);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 }
 
 /** Paths git sees as changed (tracked or untracked, ignored files excluded), forward slashes. */
@@ -621,6 +716,8 @@ export async function runFix(ctx) {
   try {
     if (git(root, cenv, ['rev-parse', 'HEAD'], { allowFail: true }) !== headSha) return refuse('the checkout is not at the reviewed head');
     if (changedPaths(root, cenv).length) return refuse('the checkout is not clean');
+    // The marks as the reviewed head has them, before any command can touch the checkout.
+    const attrs = headAttributes(root, cenv, headSha);
 
     // Toolchain: detected once, installed once, before the model sees anything.
     const rootFiles = readdirSync(root);
@@ -637,8 +734,15 @@ export async function runFix(ctx) {
 
     const written = new Set();
     // The fix as it would be staged now: everything changed minus what the contract leaves out.
+    // A command may have staged or committed on its own, so HEAD and the index go back to the
+    // reviewed head first (the working tree is kept): every check, the test gate in finalize
+    // included, sees all of the change against the reviewed head, and the commit is the whole of it.
     const sizeOf = (p) => { try { return statSync(join(root, p)).size; } catch { return 0; } };
-    const staged = () => stageable(changedPaths(root, cenv), { installDirty, written, sizeOf });
+    const staged = () => {
+      git(root, cenv, ['reset', '-q', headSha]);
+      const changed = changedPaths(root, cenv);
+      return stageable(changed, { installDirty, written, sizeOf, protectedSet: protectedPaths(attrs, changed) });
+    };
     const runs = [];
     let seq = 0;
     let lastWrite = 0;
@@ -656,6 +760,9 @@ export async function runFix(ctx) {
           const content = String(input.content ?? '');
           if (Buffer.byteLength(content) > LIMITS.writeBytes) return `error: content is larger than ${LIMITS.writeBytes} bytes`;
           const rel = relative(realpathSync(root), abs).split(sep).join('/');
+          const landing = landingPath(root, abs);
+          const marked = protectedPaths(attrs, [...new Set([rel, landing])]);
+          if (marked.has(rel) || marked.has(landing)) return `error: ${landing} is marked ${PROTECTED_ATTR} in .gitattributes: it is captured data and is never edited here. Leave it as it is and say in the summary that this finding is about data the fix lane does not change`;
           const now = staged().keep;
           if (!now.includes(rel) && now.length >= LIMITS.files) return `error: the fix already changes ${now.length} files, the limit; no further file is written`;
           mkdirSync(dirname(abs), { recursive: true });
@@ -696,7 +803,8 @@ export async function runFix(ctx) {
       return { sub: checked.sub };
     };
 
-    const brief = buildBrief({ pr, files, headSha, review, items, plan, installNote, diff: buildDiff(files, LIMITS.diffChars) });
+    const protectedFiles = [...protectedPaths(attrs, files.map((f) => f.filename))];
+    const brief = buildBrief({ pr, files, headSha, review, items, plan, installNote, diff: buildDiff(files, LIMITS.diffChars), protectedFiles });
     const loop = await runLoop({
       call: (messages, toolChoice) => callModelWith(ctx, { system: ctx.system, messages, tools: TOOLS, toolChoice, maxTokens: LIMITS.maxTokens, timeoutMs: LIMITS.modelTimeoutMs }),
       tool: async (name, input) => tool(name, input), finalize, now: ctx.now, log: ctx.log, canForce: !rejectsForcedToolChoice(ctx.model),
@@ -739,6 +847,11 @@ export async function runFix(ctx) {
     const message = git(root, cenv, ['log', '-1', '--format=%B']) ?? '';
     if (hasAttributionTrailer(message)) throw new Error('the commit message carries an attribution trailer');
     const newHead = git(root, cenv, ['rev-parse', 'HEAD']);
+    // The commit holds the kept paths and nothing protected, checked on the commit itself.
+    const landed = (git(root, cenv, ['diff', '--name-only', '-z', '--no-renames', headSha, 'HEAD']) ?? '').split('\0').filter(Boolean);
+    const stray = landed.filter((p) => !st.keep.includes(p) || /(?:^|\/)\.gitattributes$/.test(p) || /^\.github(?:\/|$)/.test(p));
+    const marked = protectedPaths(attrs, landed);
+    if (stray.length || marked.size) throw new Error(`the commit carries a path the fix lane leaves out: ${[...new Set([...stray, ...marked])].join(', ').slice(0, 300)}`);
     const commits = (git(root, cenv, ['log', '--format=%H%x00%s', `${headSha}..HEAD`]) ?? '').split('\n').filter(Boolean)
       .map((l) => { const [sha, subject] = l.split('\0'); return { sha, subject }; }).reverse();
     const bundle = join(out, 'fix.bundle');
