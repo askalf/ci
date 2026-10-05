@@ -117,10 +117,14 @@ try { symlinkSync(join(outside, 'secret.txt'), join(root, 'leak.txt')); } catch 
   check('npm with a lockfile: npm ci, and only the four scripts that exist and are not empty', npm.pm === 'npm' && npm.install.join(' ') === 'npm ci --no-audit --no-fund --ignore-scripts' && npm.scripts.join() === 'test,build');
   check('npm without a lockfile installs', detectRunner(['package.json'], { scripts: {} }).install.join(' ') === 'npm install --no-audit --no-fund --ignore-scripts');
   check('no install runs dependencies\' lifecycle scripts', [['pnpm-lock.yaml'], ['yarn.lock'], ['bun.lock']].every((f) => detectRunner(f, {}).install.includes('--ignore-scripts')));
-  check('yarn 2+ installs immutable and skips builds, by .yarnrc.yml or packageManager',
-    detectRunner(['yarn.lock', '.yarnrc.yml'], {}).install.join(' ') === 'yarn install --immutable --mode=skip-build'
-      && detectRunner(['yarn.lock'], { packageManager: 'yarn@4.5.0' }).install.join(' ') === 'yarn install --immutable --mode=skip-build'
-      && detectRunner(['yarn.lock'], { packageManager: 'yarn@1.22.22' }).install.join(' ') === 'yarn install --frozen-lockfile --ignore-scripts');
+  // Yarn 2 rejects --mode=skip-build and Yarn 3+ dropped --skip-builds; both read YARN_ENABLE_SCRIPTS.
+  const berry = (files, pkg) => { const r = detectRunner(files, pkg); return r.install.join(' ') === 'yarn install --immutable' && r.installEnv.YARN_ENABLE_SCRIPTS === 'false'; };
+  check('yarn 2+ installs immutable with scripts off by variable, by .yarnrc.yml or packageManager, any Berry version',
+    berry(['yarn.lock', '.yarnrc.yml'], {}) && berry(['yarn.lock'], { packageManager: 'yarn@2.4.2' }) && berry(['yarn.lock'], { packageManager: 'yarn@4.5.0' })
+      && detectRunner(['yarn.lock'], { packageManager: 'yarn@4.5.0' }).install.every((a) => !/skip-build/.test(a)));
+  check('yarn 1 keeps its flags and sets no variable',
+    detectRunner(['yarn.lock'], { packageManager: 'yarn@1.22.22' }).install.join(' ') === 'yarn install --frozen-lockfile --ignore-scripts'
+      && Object.keys(detectRunner(['yarn.lock'], { packageManager: 'yarn@1.22.22' }).installEnv).length === 0);
   check('pnpm, yarn and bun are read from their lockfiles', detectRunner(['pnpm-lock.yaml'], {}).pm === 'pnpm' && detectRunner(['yarn.lock'], {}).pm === 'yarn' && detectRunner(['bun.lockb'], {}).pm === 'bun' && detectRunner(['bun.lock'], {}).pm === 'bun');
   check('packageManager wins over a lockfile', detectRunner(['package-lock.json'], { packageManager: 'pnpm@9.1.0' }).pm === 'pnpm');
   check('no package.json: nothing to install, no scripts', detectRunner(['README.md'], null).pm === null && detectRunner(['README.md'], null).install === null);

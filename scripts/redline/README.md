@@ -30,7 +30,8 @@ checks that the checkout is exactly the reviewed head, then `fix.mjs`:
 - reads the review (the `### N. Blocking:` findings, the `Minor:` list, the inline comments) and
   the PR with the workflow's read-only token;
 - installs the checkout's dependencies once (npm, pnpm, yarn or bun, as detected), with
-  dependencies' lifecycle scripts skipped (`--ignore-scripts`, or yarn 2+'s `--mode=skip-build`);
+  dependencies' lifecycle scripts skipped (`--ignore-scripts`, or `YARN_ENABLE_SCRIPTS=false` for yarn 2 and later, which
+  every Berry version reads where its flags differ);
 - lets the model `fix_list`, `fix_read`, `fix_search`, `fix_write` (inside the checkout, never
   under `.github/`, never a `.gitattributes`, never a file the reviewed head marks `redline-protected`
   in `.gitattributes`, such as captured payloads and vendored code; the marks are read from that

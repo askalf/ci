@@ -31,9 +31,10 @@
 //     build scripts through the detected package manager, and node <file> inside the checkout.
 //     Commands run as the runner's account with a scrubbed environment: the GitHub token and the
 //     model key are never in a child's environment.
-//   - The install skips dependencies' lifecycle scripts (--ignore-scripts, or yarn's
-//     --mode=skip-build): a package's postinstall would otherwise run on the exec runner, as the
-//     account that can read the model key, before anything is checked.
+//   - The install skips dependencies' lifecycle scripts (--ignore-scripts, or for yarn 2 and
+//     later YARN_ENABLE_SCRIPTS=false, which every Berry version reads where its flags differ): a
+//     package's postinstall would otherwise run on the exec runner, as the account that can read
+//     the model key, before anything is checked.
 //   - Turns, files changed and diff size are bounded; past those the run is refused, never trimmed
 //     into a partial fix. Wall time is counted from the start, install included: at timeMs the
 //     model must finish, and no command or test runs past hardMs, inside the job's timeout.
@@ -158,7 +159,8 @@ export function formatFinding(f) {
 
 /**
  * From the checkout's root listing and its package.json: which package manager, which of the
- * SCRIPTS exist, and the install command. No package.json: { pm: null, scripts: [], install: null },
+ * SCRIPTS exist, the install command and the variables it runs with (installEnv). No package.json:
+ * { pm: null, scripts: [], install: null },
  * and run then takes node <file> only. A `packageManager` field wins over lockfiles.
  */
 export function detectRunner(rootFiles, pkg) {
@@ -168,16 +170,18 @@ export function detectRunner(rootFiles, pkg) {
   const declared = declaredAt?.[1];
   const pm = declared ?? (files.has('pnpm-lock.yaml') ? 'pnpm' : files.has('yarn.lock') ? 'yarn' : (files.has('bun.lockb') || files.has('bun.lock')) ? 'bun' : 'npm');
   const scripts = SCRIPTS.filter((s) => typeof pkg.scripts?.[s] === 'string' && pkg.scripts[s].trim());
-  // Yarn 2 and later (Berry) take neither --frozen-lockfile nor --ignore-scripts.
+  // Yarn 2 and later (Berry) take neither --frozen-lockfile nor --ignore-scripts, and the flag that
+  // skips builds is --skip-builds in 2 and --mode=skip-build from 3. Every Berry version reads
+  // enableScripts from YARN_ENABLE_SCRIPTS, so the variable needs no version.
   const berry = pm === 'yarn' && (files.has('.yarnrc.yml') || (declared === 'yarn' && Number(declaredAt[2]) >= 2));
   // Dependencies' lifecycle scripts never run: see the hardening note at the top.
   const install = {
     npm: files.has('package-lock.json') ? ['npm', 'ci', '--no-audit', '--no-fund', '--ignore-scripts'] : ['npm', 'install', '--no-audit', '--no-fund', '--ignore-scripts'],
     pnpm: ['pnpm', 'install', '--frozen-lockfile', '--ignore-scripts'],
-    yarn: berry ? ['yarn', 'install', '--immutable', '--mode=skip-build'] : ['yarn', 'install', '--frozen-lockfile', '--ignore-scripts'],
+    yarn: berry ? ['yarn', 'install', '--immutable'] : ['yarn', 'install', '--frozen-lockfile', '--ignore-scripts'],
     bun: ['bun', 'install', '--frozen-lockfile', '--ignore-scripts'],
   }[pm];
-  return { pm, scripts, install };
+  return { pm, scripts, install, installEnv: berry ? { YARN_ENABLE_SCRIPTS: 'false' } : {} };
 }
 
 /** The allowlist as the model sees it. */
@@ -795,7 +799,7 @@ async function answerReview(ctx) {
     const plan = detectRunner(rootFiles, pkg);
     let installNote = 'no package.json, nothing installed';
     if (plan.install) {
-      const r = run(root, cenv, plan.install, LIMITS.installS);
+      const r = run(root, { ...cenv, ...plan.installEnv }, plan.install, LIMITS.installS);
       installNote = `\`${plan.install.join(' ')}\` exited ${r.exit}${r.exit ? ` (tail: ${r.out.slice(-600).replace(/\s+/g, ' ')})` : ''}`
         + '; dependency install scripts were skipped, so run the build script first if the tests need its output';
       ctx.log?.(`install: ${installNote.slice(0, 200)}`);
