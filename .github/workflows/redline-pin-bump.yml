@@ -88,29 +88,30 @@ jobs:
           note="main ${day}"
           if [ -n "$pr" ]; then note="${note}, ${SOURCE}#${pr}"; fi
           pattern="uses: ${SOURCE}/.github/workflows/redline-(review|fix-run).yml@[0-9a-f]{40}"
-          failed=0
-          for repo in $CALLERS; do
-            echo "== ${repo}"
-            if ! base="$(gh api "repos/${repo}" --jq .default_branch)"; then
-              echo "::error::${repo}: cannot read the repo"; failed=1; continue
-            fi
+          title="ci: bump Redline to ${SOURCE}@${short}"
+          body="Moves the pinned ${SOURCE} calls and their redline-ref inputs to ${SOURCE}@${SHA}, the main commit that last changed the review or the fix (${note}). The scripts are fetched at that same commit. The pins are the only change."
+
+          # One caller repository. Any command that fails ends this repository's bump (set -e
+          # holds inside the subshell it runs in), never the loop: the next repository is still bumped.
+          bump() {
+            local repo="$1" base tip path current updated blob todo="" bad=0 bumped=0 open
+            base="$(gh api "repos/${repo}" --jq .default_branch)"
             tip="$(gh api "repos/${repo}/git/ref/heads/${base}" --jq .object.sha)"
             # Which caller files need the new pin. The review caller must exist; the fix caller may not.
-            todo=""
             for path in $CALLER_PATHS; do
               if ! current="$(gh api "repos/${repo}/contents/${path}?ref=${tip}" --jq .content 2>/dev/null | base64 -d)"; then
-                if [ "$path" = ".github/workflows/redline.yml" ]; then echo "::error::${repo}: no ${path}"; failed=1; else echo "no ${path}"; fi
+                if [ "$path" = ".github/workflows/redline.yml" ]; then echo "::error::${repo}: no ${path}"; bad=1; else echo "no ${path}"; fi
                 continue
               fi
               if ! printf '%s\n' "$current" | grep -Eq "$pattern"; then
-                echo "::error::${repo}: ${path} has no pinned ${SOURCE} call"; failed=1; continue
+                echo "::error::${repo}: ${path} has no pinned ${SOURCE} call"; bad=1; continue
               fi
               if printf '%s\n' "$current" | grep -Eq "redline-(review|fix-run).yml@${SHA}" && printf '%s\n' "$current" | grep -q "redline-ref: ${SHA}"; then
                 echo "${path} already at ${short}"; continue
               fi
               todo="${todo:+$todo }${path}"
             done
-            [ -n "$todo" ] || continue
+            [ -n "$todo" ] || return "$bad"
             # The bump branch is this job's alone: reset it to the default branch tip each time,
             # so an open bump PR carries exactly the newest pin, one commit per caller file.
             if gh api "repos/${repo}/git/ref/heads/${BRANCH}" >/dev/null 2>&1; then
@@ -121,7 +122,7 @@ jobs:
             for path in $todo; do
               current="$(gh api "repos/${repo}/contents/${path}?ref=${BRANCH}" --jq .content | base64 -d)"
               if ! updated="$(printf '%s\n' "$current" | node scripts/redline/pin.mjs "$SHA" "$note")"; then
-                echo "::error::${repo}: could not rewrite ${path}"; failed=1; continue
+                echo "::error::${repo}: could not rewrite ${path}"; bad=1; continue
               fi
               blob="$(gh api "repos/${repo}/contents/${path}?ref=${BRANCH}" --jq .sha)"
               printf '%s\n' "$updated" > caller.yml
@@ -130,15 +131,28 @@ jobs:
                 -f content="$(base64 -w0 caller.yml)" \
                 -f branch="$BRANCH" -f sha="$blob" >/dev/null
               echo "${path} bumped"
+              bumped=$((bumped + 1))
             done
+            # A branch with no new commit has nothing to propose.
+            if [ "$bumped" -eq 0 ]; then return 1; fi
             open="$(gh pr list --repo "$repo" --head "$BRANCH" --state open --json number --jq '.[0].number // empty')"
             if [ -n "$open" ]; then
-              gh pr edit "$open" --repo "$repo" --title "ci: bump Redline to ${SOURCE}@${short}" >/dev/null
+              # The body names the commit, so it moves with the title.
+              gh pr edit "$open" --repo "$repo" --title "$title" --body "$body" >/dev/null
               echo "updated #${open}"
             else
-              body="Moves the pinned ${SOURCE} calls and their redline-ref inputs to ${SOURCE}@${SHA}, the main commit that last changed the review or the fix (${note}). The scripts are fetched at that same commit. The pins are the only change."
-              gh pr create --repo "$repo" --base "$base" --head "$BRANCH" \
-                --title "ci: bump Redline to ${SOURCE}@${short}" --body "$body"
+              gh pr create --repo "$repo" --base "$base" --head "$BRANCH" --title "$title" --body "$body"
             fi
+            return "$bad"
+          }
+
+          failed=0
+          for repo in $CALLERS; do
+            echo "== ${repo}"
+            set +e
+            ( set -e; bump "$repo" )
+            rc=$?
+            set -e
+            if [ "$rc" -ne 0 ]; then echo "::error::${repo}: the bump did not complete (exit ${rc})"; failed=1; fi
           done
           exit "$failed"

@@ -24,8 +24,18 @@
 //     build scripts through the detected package manager, and node <file> inside the checkout.
 //     Commands run as the runner's account with a scrubbed environment: the GitHub token and the
 //     model key are never in a child's environment.
-//   - Turns, wall time, files changed and diff size are bounded; past the limits the run is
-//     refused, never trimmed into a partial fix.
+//   - The install skips dependencies' lifecycle scripts (--ignore-scripts, or yarn's
+//     --mode=skip-build): a package's postinstall would otherwise run on the exec runner, as the
+//     account that can read the model key, before anything is checked.
+//   - Turns, files changed and diff size are bounded; past those the run is refused, never trimmed
+//     into a partial fix. Wall time is counted from the start, install included: at timeMs the
+//     model must finish, and no command or test runs past hardMs, inside the job's timeout.
+//   - The PR's tests and the model's node <file> run as the same account that reads FIX_ENV_FILE,
+//     so they could read the key. Whatever would leave the runner (the diff, the bundle, fix.json,
+//     notes.md and the job log) is checked for the key and the read token: a diff or record that
+//     carries one is refused with nothing kept, and the log masks them. Keeping the key out of
+//     the children's reach entirely is the host's part: a separate account for the children, or
+//     an egress rule.
 //   - When the repository has a test script it runs at least once after the last edit; a failing
 //     suite is bounced to the model once, then reported as tests_failed with no bundle. The bounce,
 //     fix.json (tests.failing) and the notes name the failed tests the output reports (TAP
@@ -59,7 +69,7 @@ export const OUTCOMES = ['fixed', 'no_change', 'tests_failed', 'refused'];
 export const SCRIPTS = ['test', 'lint', 'typecheck', 'build'];
 export const PACKAGE_MANAGERS = ['npm', 'pnpm', 'yarn', 'bun'];
 export const LIMITS = {
-  turns: 40, forceFinishAt: 36, timeMs: 45 * 60_000, files: 30, diffBytes: 400_000, fileBytes: 1_000_000,
+  turns: 40, forceFinishAt: 36, timeMs: 45 * 60_000, hardMs: 52 * 60_000, files: 30, diffBytes: 400_000, fileBytes: 1_000_000,
   writeBytes: 400_000, runDefaultS: 600, runMaxS: 900, installS: 600, runOutChars: 16_000,
   maxTokens: 16_000, modelTimeoutMs: 240_000, textOnlyTurns: 3, testBounces: 1,
   notesChars: 6_000, bodyChars: 8_000, diffChars: 120_000, subjectChars: 72,
@@ -146,14 +156,18 @@ export function formatFinding(f) {
 export function detectRunner(rootFiles, pkg) {
   const files = new Set(rootFiles ?? []);
   if (!pkg || typeof pkg !== 'object') return { pm: null, scripts: [], install: null };
-  const declared = /^(npm|pnpm|yarn|bun)@/.exec(String(pkg.packageManager ?? ''))?.[1];
+  const declaredAt = /^(npm|pnpm|yarn|bun)@(\d+)?/.exec(String(pkg.packageManager ?? ''));
+  const declared = declaredAt?.[1];
   const pm = declared ?? (files.has('pnpm-lock.yaml') ? 'pnpm' : files.has('yarn.lock') ? 'yarn' : (files.has('bun.lockb') || files.has('bun.lock')) ? 'bun' : 'npm');
   const scripts = SCRIPTS.filter((s) => typeof pkg.scripts?.[s] === 'string' && pkg.scripts[s].trim());
+  // Yarn 2 and later (Berry) take neither --frozen-lockfile nor --ignore-scripts.
+  const berry = pm === 'yarn' && (files.has('.yarnrc.yml') || (declared === 'yarn' && Number(declaredAt[2]) >= 2));
+  // Dependencies' lifecycle scripts never run: see the hardening note at the top.
   const install = {
-    npm: files.has('package-lock.json') ? ['npm', 'ci', '--no-audit', '--no-fund'] : ['npm', 'install', '--no-audit', '--no-fund'],
-    pnpm: ['pnpm', 'install', '--frozen-lockfile'],
-    yarn: ['yarn', 'install', '--frozen-lockfile'],
-    bun: ['bun', 'install', '--frozen-lockfile'],
+    npm: files.has('package-lock.json') ? ['npm', 'ci', '--no-audit', '--no-fund', '--ignore-scripts'] : ['npm', 'install', '--no-audit', '--no-fund', '--ignore-scripts'],
+    pnpm: ['pnpm', 'install', '--frozen-lockfile', '--ignore-scripts'],
+    yarn: berry ? ['yarn', 'install', '--immutable', '--mode=skip-build'] : ['yarn', 'install', '--frozen-lockfile', '--ignore-scripts'],
+    bun: ['bun', 'install', '--frozen-lockfile', '--ignore-scripts'],
   }[pm];
   return { pm, scripts, install };
 }
@@ -343,6 +357,26 @@ export function renderNotes({ outcome, summary = '', reason = '', files = [], te
   return cleanNotes(parts.join('\n\n'));
 }
 
+// ---------- credentials ----------
+
+/** The credentials of this run that must never leave the runner: the model key and the read token. */
+export function runSecrets(ctx) {
+  return [ctx.darioKey, ctx.readToken].filter((v) => typeof v === 'string' && v.length >= 8);
+}
+
+/** Whether text carries any of the secrets. */
+export function leaksSecret(text, secrets) {
+  const t = String(text ?? '');
+  return secrets.some((v) => t.includes(v));
+}
+
+/** text with every secret replaced by ***, for the job log. */
+export function maskSecrets(text, secrets) {
+  let t = String(text ?? '');
+  for (const v of secrets) t = t.split(v).join('***');
+  return t;
+}
+
 // ---------- fix.json ----------
 
 /** fix.json exactly as forge reads it. */
@@ -465,7 +499,8 @@ export function capOutput(text, max = LIMITS.runOutChars) {
  */
 export async function runLoop(ctx, brief) {
   const messages = [{ role: 'user', content: `${brief}\n\nAnswer the review and finish with finish_fix.` }];
-  const started = ctx.now();
+  // The run's own start when given, so the install counts against the budget.
+  const started = ctx.started ?? ctx.now();
   const canForce = ctx.canForce !== false;
   let textOnly = 0;
   let turns = 0;
@@ -595,7 +630,22 @@ export function onlyOrigins(fetchFn, urls) {
  * response or a git failure; the CLI turns that into a refused record.
  */
 export async function runFix(ctx) {
+  const result = await answerReview(ctx);
+  // Last gate before anything is uploaded: fix.json and notes.md are public through forge.
+  if (leaksSecret(JSON.stringify(result.record), runSecrets(ctx))) {
+    for (const f of ['fix.bundle', 'diff.patch']) rmSync(join(ctx.out, f), { force: true });
+    return { record: fixRecord({ repo: ctx.repo, pr: ctx.pr, headSha: ctx.headSha, model: ctx.model, outcome: 'refused', turns: result.record.turns,
+      notes: renderNotes({ outcome: 'refused', reason: 'The result carried a credential of this run, so nothing from it is kept.' }) }) };
+  }
+  return result;
+}
+
+async function answerReview(ctx) {
   const { repo, pr: n, headSha, checkout: root, out } = ctx;
+  const started = ctx.now();
+  const deadline = started + LIMITS.hardMs;
+  // Seconds a command may still run, inside hardMs; 0 when the budget is spent.
+  const secondsLeft = (want) => { const left = Math.floor((deadline - ctx.now()) / 1000); return left < 30 ? 0 : Math.min(want, left); };
   mkdirSync(out, { recursive: true });
   const base = { repo, pr: n, headSha, model: ctx.model };
   const refuse = (why, extra = {}) => ({ record: fixRecord({ ...base, outcome: 'refused', ...extra, notes: renderNotes({ outcome: 'refused', reason: why }) }) });
@@ -630,7 +680,8 @@ export async function runFix(ctx) {
     let installNote = 'no package.json, nothing installed';
     if (plan.install) {
       const r = run(root, cenv, plan.install, LIMITS.installS);
-      installNote = `\`${plan.install.join(' ')}\` exited ${r.exit}${r.exit ? ` (tail: ${r.out.slice(-600).replace(/\s+/g, ' ')})` : ''}`;
+      installNote = `\`${plan.install.join(' ')}\` exited ${r.exit}${r.exit ? ` (tail: ${r.out.slice(-600).replace(/\s+/g, ' ')})` : ''}`
+        + '; dependency install scripts were skipped, so run the build script first if the tests need its output';
       ctx.log?.(`install: ${installNote.slice(0, 200)}`);
     }
     const installDirty = changedPaths(root, cenv);
@@ -668,7 +719,8 @@ export async function runFix(ctx) {
       if (name === 'fix_run') {
         const a = allowedArgv(input.command, plan, root);
         if (a.error) return `error: ${a.error}`;
-        const s = Math.min(LIMITS.runMaxS, Math.max(1, Number(input.timeout_seconds) || LIMITS.runDefaultS));
+        const s = secondsLeft(Math.min(LIMITS.runMaxS, Math.max(1, Number(input.timeout_seconds) || LIMITS.runDefaultS)));
+        if (!s) return 'error: the time budget is spent; call finish_fix now';
         const r = record(a.argv, run(root, cenv, a.argv, s));
         return `exit ${r.exit}${r.timedOut ? ' (timed out)' : ''}\n${capOutput(r.out)}`;
       }
@@ -684,7 +736,12 @@ export async function runFix(ctx) {
       if (testArgv && staged().keep.length) {
         // The suite runs after the last edit, by the model or, failing that, here.
         let t = [...runs].reverse().find((r) => r.isTest && r.seq > lastWrite);
-        if (!t) { ctx.log?.('  no test run after the last edit: running the test script'); t = record(testArgv, run(root, cenv, testArgv, LIMITS.runMaxS)); }
+        if (!t) {
+          const s = secondsLeft(LIMITS.runMaxS);
+          ctx.log?.(s ? '  no test run after the last edit: running the test script' : '  no test run after the last edit, and no time left to run one');
+          // No time to run the suite is a failed suite: a fix is never reported without its tests.
+          t = record(testArgv, s ? run(root, cenv, testArgv, s) : { exit: 124, out: 'not run: the time budget was spent', timedOut: true });
+        }
         tests = t;
         if (t.exit !== 0 && bounces < LIMITS.testBounces) {
           bounces++;
@@ -698,8 +755,9 @@ export async function runFix(ctx) {
 
     const brief = buildBrief({ pr, files, headSha, review, items, plan, installNote, diff: buildDiff(files, LIMITS.diffChars) });
     const loop = await runLoop({
-      call: (messages, toolChoice) => callModelWith(ctx, { system: ctx.system, messages, tools: TOOLS, toolChoice, maxTokens: LIMITS.maxTokens, timeoutMs: LIMITS.modelTimeoutMs }),
-      tool: async (name, input) => tool(name, input), finalize, now: ctx.now, log: ctx.log, canForce: !rejectsForcedToolChoice(ctx.model),
+      call: (messages, toolChoice) => callModelWith(ctx, { system: ctx.system, messages, tools: TOOLS, toolChoice, maxTokens: LIMITS.maxTokens,
+        timeoutMs: Math.max(30_000, Math.min(LIMITS.modelTimeoutMs, deadline - ctx.now())) }),
+      tool: async (name, input) => tool(name, input), finalize, now: ctx.now, started, log: ctx.log, canForce: !rejectsForcedToolChoice(ctx.model),
     }, brief);
     const turns = loop.turns;
     const testsRecord = tests ? {
@@ -719,6 +777,7 @@ export async function runFix(ctx) {
     const diff = git(root, cenv, ['diff', '--cached', '--binary', headSha]) ?? '';
     const diffBytes = Buffer.byteLength(diff);
     if (diffBytes > LIMITS.diffBytes) return refuse(`the diff is ${diffBytes} bytes; the limit is ${LIMITS.diffBytes}`, { turns, tests: testsRecord });
+    if (leaksSecret(diff, runSecrets(ctx))) return refuse('The change carried a credential of this run, so nothing is committed.', { turns });
     const common = { turns, tests: testsRecord, files: st.keep };
     const notes = (outcome) => renderNotes({ outcome, summary: sub.summary, files: st.keep, skipped: st.skipped, tests: testsRecord });
 
@@ -755,7 +814,10 @@ export async function runFix(ctx) {
 async function main() {
   const env = process.env;
   const need = (k, src = env) => { if (!src[k]) { console.error(`::error::${k} is not set`); process.exit(2); } return src[k]; };
-  const secrets = parseEnvFile(readFileSync(need('FIX_ENV_FILE'), 'utf8'));
+  let secrets;
+  try { secrets = parseEnvFile(readFileSync(need('FIX_ENV_FILE'), 'utf8')); } catch (e) {
+    console.error(`::error::FIX_ENV_FILE: cannot read ${env.FIX_ENV_FILE} (${e.code ?? e.message})`); process.exit(2);
+  }
   let system;
   try { system = readPrompt(env, 'FIX_PROMPT_FILE'); } catch (e) { console.error(`::error::${e.message}`); process.exit(2); }
   // The runner's workspace outlives the job, so an earlier run's output is removed before this
@@ -771,12 +833,16 @@ async function main() {
     fetch: onlyOrigins(globalThis.fetch, ['https://api.github.com', darioUrl]),
     sleep: (ms) => new Promise((r) => setTimeout(r, ms)), now: () => Date.now(),
     dryRun: env.DRY_RUN === '1' || env.DRY_RUN === 'true',
-    log: (line) => console.log(line),
   };
+  // The job log of a public repository is public: no line in it carries the key or the token.
+  const hidden = runSecrets(ctx);
+  ctx.log = (line) => console.log(maskSecrets(line, hidden));
+  // A job killed at its timeout or cancelled still leaves forge a fix.json that says so.
+  saveFix(out, fixRecord({ ...ctx, outcome: 'refused', notes: renderNotes({ outcome: 'refused', reason: 'The fix run ended before it finished: the job timed out or was cancelled.' }) }));
   let record;
   try { ({ record } = await runFix(ctx)); } catch (e) {
-    console.error(`::error::the fix run could not finish: ${e.message}`);
-    record = fixRecord({ ...ctx, outcome: 'refused', notes: renderNotes({ outcome: 'refused', reason: `The fix run could not finish: ${e.message}` }) });
+    console.error(`::error::the fix run could not finish: ${maskSecrets(e.message, hidden)}`);
+    record = fixRecord({ ...ctx, outcome: 'refused', notes: renderNotes({ outcome: 'refused', reason: `The fix run could not finish: ${maskSecrets(e.message, hidden)}` }) });
   }
   saveFix(out, record);
   const line = `Redline fix: ${record.outcome}${record.new_head ? ` at ${record.new_head}` : ''}${record.files.length ? ` (${record.files.length} file${record.files.length === 1 ? '' : 's'})` : ''}`;
@@ -785,4 +851,6 @@ async function main() {
   process.exit(record.outcome === 'fixed' ? 0 : 1);
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) main();
+if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
+  main().catch((e) => { console.error(`::error::the fix run failed: ${e.message}`); process.exit(2); });
+}

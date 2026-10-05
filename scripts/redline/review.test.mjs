@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
-  parseEnvFile, readPrompt, safePath, buildDiff, quoteIsGrounded, corpusOf, checkSubmission, finalVerdict,
+  parseEnvFile, readPrompt, safePath, buildDiff, planDiff, unshownFiles, checkoutCorpus, quoteIsGrounded, corpusOf, checkSubmission, finalVerdict,
   renderBody, verdictAtHead, runTool, runReview, buildBrief, REVIEWER_LOGIN, LIMITS, metaPhrase,
   verdictRecord, verdictProblem, saveVerdict, VERDICT_VERSION,
 } from './review.mjs';
@@ -81,6 +81,21 @@ check('grep skips binaries and reports no matches', runTool(root, 'redline_searc
 check('grep reports a bad pattern', /bad pattern/.test(runTool(root, 'redline_search', { pattern: '(' })));
 check('grep caps its matches', runTool(root, 'redline_search', { pattern: 'line' }).endsWith('(match cap reached)'));
 check('an unknown tool is an error, not a throw', /unknown tool/.test(runTool(root, 'exec', {})));
+{
+  // A pattern that backtracks without end, over a file the PR controls: the child is killed at
+  // searchMs and the run goes on.
+  const slow = mkdtempSync(join(tmpdir(), 'redline-redos-'));
+  writeFileSync(join(slow, 'x.txt'), `${'a'.repeat(40)}b\n`);
+  const saved = LIMITS.searchMs;
+  LIMITS.searchMs = 1_500;
+  const t0 = Date.now();
+  const r = runTool(slow, 'redline_search', { pattern: '(a+)+$' });
+  const took = Date.now() - t0;
+  LIMITS.searchMs = saved;
+  check('a search that runs away is stopped at the cap and says so', /was stopped/.test(r) && took < 10_000);
+  check('a quick search in the same tree still answers', runTool(slow, 'redline_search', { pattern: '^a{3}' }) === `x.txt:1: ${'a'.repeat(40)}b`);
+  rmSync(slow, { recursive: true, force: true });
+}
 
 console.log('\n  diff, brief and grounding');
 {
@@ -91,6 +106,17 @@ console.log('\n  diff, brief and grounding');
   const diff = buildDiff(files);
   check('a patch is included and a binary is named', diff.includes('+export const token') && diff.includes('diff --git a/img.png b/img.png\n(no patch'));
   check('the cap names what it left out', buildDiff(files, 60).includes('not shown, read them with redline_read: src/b.js'));
+  check('planDiff returns the files the cap left out', planDiff(files, 60).omitted.join() === 'src/b.js,img.png' && planDiff(files).omitted.length === 0);
+  const changed = [
+    { filename: 'src/a.js', status: 'modified' },
+    { filename: 'src/b.js', status: 'modified', patch: '+x' },
+    { filename: 'gone.js', status: 'removed' },
+  ];
+  check('unshown files: no patch, or left out by the cap; never a removed file',
+    unshownFiles(changed, []).join() === 'src/a.js' && unshownFiles(changed, ['src/b.js']).join() === 'src/a.js,src/b.js');
+  const fromCheckout = checkoutCorpus(root, ['src/a.js', '../outside', 'img.png', 'missing.js']);
+  check('a quote from a changed file the diff could not show is grounded by the checkout', quoteIsGrounded('line 899', fromCheckout) && quoteIsGrounded('line 899', corpusOf(buildDiff(changed))) === false);
+  check('the checkout corpus skips paths outside, binaries and missing files', !fromCheckout.some((l) => /PNG/.test(l)) && fromCheckout.length === 900);
   const pr = { number: 7, title: 'feat: add token', body: '- adds the token\n\nGenerated with a tool', user: { login: 'askalf' },
     head: { ref: 'feat/x', sha: HEAD }, base: { ref: 'main', repo: { full_name: 'askalf/r' } } };
   const brief = buildBrief(pr, files, [{ sha: HEAD, commit: { message: 'feat: add token\n\nCo-Authored-By: Someone' } }], diff);

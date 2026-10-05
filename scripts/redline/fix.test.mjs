@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 import {
   parseReviewUrl, parseReviewBody, inlineItems, formatFinding, detectRunner, allowedCommands, allowedArgv, safeWritePath, stageable,
   commitSubject, hasAttributionTrailer, neutraliseRefs, cleanNotes, summariseTests, renderNotes, fixRecord, fixProblem, saveFix,
-  failingTests, FAILING_NAMES_MAX,
+  failingTests, FAILING_NAMES_MAX, runSecrets, leaksSecret, maskSecrets,
   TOOLS, FINISH_REQUIRED, askForFinish, checkFinish, runLoop, buildBrief, childEnv, onlyOrigins, runFix,
   LIMITS, OUTCOMES, AUTHOR, FIX_VERSION, DEFAULT_MODEL, SUBJECT_BANNED,
 } from './fix.mjs';
@@ -113,8 +113,13 @@ let symlinked = true;
 try { symlinkSync(join(outside, 'secret.txt'), join(root, 'leak.txt')); } catch { symlinked = false; }
 {
   const npm = detectRunner(['package.json', 'package-lock.json'], { scripts: { test: 'node --test', build: 'tsc', lint: '', release: 'x' } });
-  check('npm with a lockfile: npm ci, and only the four scripts that exist and are not empty', npm.pm === 'npm' && npm.install.join(' ') === 'npm ci --no-audit --no-fund' && npm.scripts.join() === 'test,build');
-  check('npm without a lockfile installs', detectRunner(['package.json'], { scripts: {} }).install.join(' ') === 'npm install --no-audit --no-fund');
+  check('npm with a lockfile: npm ci, and only the four scripts that exist and are not empty', npm.pm === 'npm' && npm.install.join(' ') === 'npm ci --no-audit --no-fund --ignore-scripts' && npm.scripts.join() === 'test,build');
+  check('npm without a lockfile installs', detectRunner(['package.json'], { scripts: {} }).install.join(' ') === 'npm install --no-audit --no-fund --ignore-scripts');
+  check('no install runs dependencies\' lifecycle scripts', [['pnpm-lock.yaml'], ['yarn.lock'], ['bun.lock']].every((f) => detectRunner(f, {}).install.includes('--ignore-scripts')));
+  check('yarn 2+ installs immutable and skips builds, by .yarnrc.yml or packageManager',
+    detectRunner(['yarn.lock', '.yarnrc.yml'], {}).install.join(' ') === 'yarn install --immutable --mode=skip-build'
+      && detectRunner(['yarn.lock'], { packageManager: 'yarn@4.5.0' }).install.join(' ') === 'yarn install --immutable --mode=skip-build'
+      && detectRunner(['yarn.lock'], { packageManager: 'yarn@1.22.22' }).install.join(' ') === 'yarn install --frozen-lockfile --ignore-scripts');
   check('pnpm, yarn and bun are read from their lockfiles', detectRunner(['pnpm-lock.yaml'], {}).pm === 'pnpm' && detectRunner(['yarn.lock'], {}).pm === 'yarn' && detectRunner(['bun.lockb'], {}).pm === 'bun' && detectRunner(['bun.lock'], {}).pm === 'bun');
   check('packageManager wins over a lockfile', detectRunner(['package-lock.json'], { packageManager: 'pnpm@9.1.0' }).pm === 'pnpm');
   check('no package.json: nothing to install, no scripts', detectRunner(['README.md'], null).pm === null && detectRunner(['README.md'], null).install === null);
@@ -318,6 +323,14 @@ function loopWorld(turns, { canForce = true } = {}) {
   check('the brief carries the PR, the findings, the inline comments, the allowlist and the test script', /PR #7: t/.test(brief) && /\[1\] blocking `src\/b\.js:1`/.test(brief) && /\[1\] src\/b\.js:1\nc/.test(brief) && /run accepts: npm test, node <file>/.test(brief) && /Test script: `npm test`/.test(brief) && /PR diff:\n\+x/.test(brief));
 }
 
+console.log('\n  credentials');
+{
+  const secrets = runSecrets({ darioKey: 'dk_live_0123456789', readToken: 'ghs_abcdefghij', other: 'x' });
+  check('the run\'s secrets are the key and the read token; short stand-ins are not secrets', secrets.join() === 'dk_live_0123456789,ghs_abcdefghij' && runSecrets({ darioKey: 'k', readToken: 'read' }).length === 0);
+  check('a secret anywhere in the text is found', leaksSecret('+const k = "dk_live_0123456789";', secrets) && !leaksSecret('nothing here', secrets));
+  check('the log masks every occurrence', maskSecrets('a dk_live_0123456789 b dk_live_0123456789 ghs_abcdefghij', secrets) === 'a *** b *** ***');
+}
+
 // ---------- end to end: a fake GitHub, a fake model, a real repository ----------
 
 function sh(cwd, args) {
@@ -439,6 +452,27 @@ if (!gitOk) {
     rmSync(repo.dir, { recursive: true, force: true });
   }
 
+  console.log('\n  runFix: a credential never leaves');
+  {
+    const KEY = 'dk_live_0123456789';
+    const repo = makeRepo();
+    const w = world(repo, { turns: [tool('fix_write', { path: 'src/b.js', content: `export const token = '${KEY}';\n` }), finish()] });
+    const { record: r } = await runFix({ ...w.ctx, darioKey: KEY });
+    check('a change that carries the model key is refused with no bundle and no patch', r.outcome === 'refused' && /credential/.test(r.notes) && !existsSync(join(w.out, 'fix.bundle')) && !existsSync(join(w.out, 'diff.patch')) && !JSON.stringify(r).includes(KEY) && fixProblem(r) === null);
+    check('the repository head did not move', sh(repo.dir, ['rev-parse', 'HEAD']) === repo.head);
+    rmSync(w.out, { recursive: true, force: true });
+    rmSync(repo.dir, { recursive: true, force: true });
+  }
+  {
+    const KEY = 'dk_live_0123456789';
+    const repo = makeRepo();
+    const w = world(repo, { turns: [tool('fix_write', { path: 'src/b.js', content: FIXED_B }), finish({ summary: `Used ${KEY} to check it.` })] });
+    const { record: r } = await runFix({ ...w.ctx, darioKey: KEY });
+    check('notes that carry the key: refused, and the bundle already written is removed', r.outcome === 'refused' && !JSON.stringify(r).includes(KEY) && !existsSync(join(w.out, 'fix.bundle')) && fixProblem(r) === null);
+    rmSync(w.out, { recursive: true, force: true });
+    rmSync(repo.dir, { recursive: true, force: true });
+  }
+
   console.log('\n  runFix: limits');
   {
     const repo = makeRepo();
@@ -552,6 +586,28 @@ if (!gitOk) {
       const { record: r } = await runFix(w.ctx);
       check('a failing suite is bounced to the model once, then reported as tests_failed', r.outcome === 'tests_failed' && r.tests.exit_code === 1 && JSON.stringify(w.calls.model[2].messages.at(-1)).includes('test script fails') && w.calls.model.length === 3);
       check('tests_failed: diff.patch, no bundle, no commit, schema ok', existsSync(join(w.out, 'diff.patch')) && !existsSync(join(w.out, 'fix.bundle')) && r.new_head === null && sh(repo.dir, ['rev-parse', 'HEAD']) === repo.head && fixProblem(r) === null);
+      rmSync(w.out, { recursive: true, force: true });
+      rmSync(repo.dir, { recursive: true, force: true });
+    }
+    {
+      // The root package's own postinstall stands in for a dependency's: --ignore-scripts skips both.
+      const postinstall = 'node -e "require(\'fs\').writeFileSync(\'ran.txt\', \'x\')"';
+      const repo = makeRepo({ pkg: { name: 'r', private: true, scripts: { test: 'node test.mjs', postinstall } } });
+      const w = world(repo, { turns: [tool('fix_write', { path: 'src/b.js', content: FIXED_B }), finish()] });
+      const { record: r } = await runFix(w.ctx);
+      check('the install runs no lifecycle script, and the brief says so', r.outcome === 'fixed' && !existsSync(join(repo.dir, 'ran.txt')) && w.calls.model[0].messages[0].content.includes('install scripts were skipped'));
+      rmSync(w.out, { recursive: true, force: true });
+      rmSync(repo.dir, { recursive: true, force: true });
+    }
+    {
+      // The clock jumps past hardMs after the edit: the suite is not started, and a fix is never
+      // reported without one.
+      let late = false;
+      let t = 0;
+      const repo = makeRepo({ pkg: { name: 'r', private: true, scripts: { test: 'node test.mjs' } } });
+      const w = world(repo, { turns: [tool('fix_write', { path: 'src/b.js', content: FIXED_B }), () => { late = true; return finish(); }] });
+      const { record: r } = await runFix({ ...w.ctx, now: () => (late ? LIMITS.hardMs + 60_000 : 0) + (t += 1) });
+      check('no time left for the suite after the last edit: tests_failed, never fixed', r.outcome === 'tests_failed' && r.tests.exit_code === 124 && /time budget/.test(JSON.stringify(w.calls.model.at(-1).messages)) && !existsSync(join(w.out, 'fix.bundle')) && fixProblem(r) === null);
       rmSync(w.out, { recursive: true, force: true });
       rmSync(repo.dir, { recursive: true, force: true });
     }
@@ -697,6 +753,7 @@ console.log('\n  the reusable workflow');
   check('the upload action is the version redline-review.yml uses', /uses: actions\/upload-artifact@([0-9a-f]{40})/.exec(upload)?.[1] === /uses: actions\/upload-artifact@([0-9a-f]{40})/.exec(review)?.[1]);
   check('the cleanup removes the PR, the script and the output', /run: rm -rf pr \.redline fix-out\s*$/.test(steps[cleanAt] ?? '') && (steps[cleanAt] ?? '').includes('if: always()'));
   check('the job has a timeout past the fix\'s wall limit', Number(/timeout-minutes: (\d+)/.exec(wf)?.[1]) * 60_000 > LIMITS.timeMs);
+  check('the hard deadline leaves the job five minutes for its other steps and the upload', LIMITS.timeMs < LIMITS.hardMs && Number(/timeout-minutes: (\d+)/.exec(wf)?.[1]) * 60_000 >= LIMITS.hardMs + 5 * 60_000);
   check('the env file comment names the account boundary', /root:gha-exec 640/.test(wf) && /never (?:by )?gha-oss/i.test(wf));
 }
 

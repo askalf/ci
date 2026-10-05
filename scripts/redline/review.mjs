@@ -19,9 +19,12 @@
 //   - A draft is not reviewed.
 //   - The head is re-read before posting; a head that moved gets no review (the newer run owns it).
 //   - Every path a tool touches must resolve inside the checkout, symlinks included.
-//   - Findings must quote text that is in the diff, the PR text or a commit message. One repair
-//     round is offered; findings still ungrounded are dropped, and a REQUEST_CHANGES left with no
-//     grounded finding fails closed with a note rather than approving.
+//   - Findings must quote text that is in the diff, the PR text or a commit message, or, for a
+//     changed file the diff could not show (past the diff cap, or no patch from GitHub), in that
+//     file in the checkout. One repair round is offered; findings still ungrounded are dropped, and
+//     a REQUEST_CHANGES left with no grounded finding fails closed with a note rather than approving.
+//   - redline_search runs in a child process with a time cap: the pattern is the model's and the
+//     files are the PR's, so a pattern that backtracks without end must not stall the run.
 //   - Blocking findings force REQUEST_CHANGES whatever verdict the model named.
 //   - Turns, wall time, tool output and diff size are all bounded; near the end the model is
 //     forced to submit. A model that rejects a forced tool_choice (rejectsForcedToolChoice) is
@@ -49,7 +52,8 @@
 
 import { readFileSync, readdirSync, lstatSync, realpathSync, appendFileSync, openSync, readSync, closeSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
 import { join, resolve, relative, isAbsolute, sep, dirname } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { pathToFileURL, fileURLToPath } from 'node:url';
+import { spawnSync } from 'node:child_process';
 
 export const REVIEWER_LOGIN = 'sprayberry-redline';
 
@@ -96,8 +100,11 @@ export const SUBMIT_REQUIRED = 'The read budget is spent. Your next response mus
 export const LIMITS = {
   diffChars: 180_000, bodyChars: 8_000, commitChars: 600, commits: 100,
   readLines: 400, readBytes: 64_000, listEntries: 400,
-  grepResults: 80, grepFiles: 5_000, grepFileBytes: 1_000_000, grepPattern: 200,
-  turns: 30, forceSubmitAt: 24, timeMs: 12 * 60_000, maxTokens: 8_000, modelTimeoutMs: 240_000,
+  grepResults: 80, grepFiles: 5_000, grepFileBytes: 1_000_000, grepPattern: 200, searchMs: 10_000,
+  corpusBytes: 8_000_000,
+  // timeMs forces the submit; hardMs bounds each model call so the run ends inside the job's
+  // 20-minute timeout.
+  turns: 30, forceSubmitAt: 24, timeMs: 12 * 60_000, hardMs: 18 * 60_000, maxTokens: 8_000, modelTimeoutMs: 240_000,
   textOnlyTurns: 3,
 };
 const SKIP_DIRS = new Set(['.git', 'node_modules', 'dist', 'build', 'coverage', 'vendor', '.next']);
@@ -154,8 +161,11 @@ function isBinary(file) {
   } finally { closeSync(fd); }
 }
 
-/** The PR's per-file patches as one unified diff, capped; files without a patch are named. */
-export function buildDiff(files, cap = LIMITS.diffChars) {
+/**
+ * The PR's per-file patches as one unified diff, capped; files without a patch are named.
+ * Returns { text, omitted }: omitted lists the files the cap left out.
+ */
+export function planDiff(files, cap = LIMITS.diffChars) {
   let out = '';
   const omitted = [];
   for (const f of files) {
@@ -165,6 +175,39 @@ export function buildDiff(files, cap = LIMITS.diffChars) {
     out += part;
   }
   if (omitted.length) out += `\n(diff cap reached; not shown, read them with redline_read: ${omitted.join(', ')})\n`;
+  return { text: out, omitted };
+}
+
+/** The PR's per-file patches as one unified diff, capped. */
+export function buildDiff(files, cap = LIMITS.diffChars) {
+  return planDiff(files, cap).text;
+}
+
+/**
+ * Changed files whose text the diff does not carry: left out by the cap, or sent by GitHub with
+ * no patch (too large). Removed files are not in the checkout, so they are not named.
+ */
+export function unshownFiles(files, omitted) {
+  return files.filter((f) => f.status !== 'removed' && (!f.patch || omitted.includes(f.filename))).map((f) => f.filename);
+}
+
+/**
+ * Grounding lines from files in the checkout, as corpusOf makes them. A finding on a changed file
+ * the diff could not show quotes what the model read with redline_read, so those files ground
+ * quotes too. Binary files, files over grepFileBytes and anything past corpusBytes in all are skipped.
+ */
+export function checkoutCorpus(root, paths) {
+  const out = [];
+  let bytes = 0;
+  for (const p of paths) {
+    try {
+      const file = safePath(root, p);
+      const st = lstatSync(file);
+      if (!st.isFile() || st.size > LIMITS.grepFileBytes || bytes + st.size > LIMITS.corpusBytes || isBinary(file)) continue;
+      bytes += st.size;
+      out.push(...corpusOf(readFileSync(file, 'utf8')));
+    } catch { /* gone or outside the checkout: grounds nothing */ }
+  }
   return out;
 }
 
@@ -341,34 +384,56 @@ export function runTool(root, name, input = {}) {
     if (name === 'redline_search') {
       const pat = String(input.pattern ?? '');
       if (!pat || pat.length > LIMITS.grepPattern) return `error: pattern must be 1-${LIMITS.grepPattern} characters`;
-      let re;
-      try { re = new RegExp(pat); } catch (e) { return `error: bad pattern: ${e.message}`; }
+      try { new RegExp(pat); } catch (e) { return `error: bad pattern: ${e.message}`; }
       const start = safePath(root, input.path);
       const rootReal = realpathSync(root);
-      const hits = [];
-      let files = 0;
-      const walk = (p) => {
-        if (hits.length >= LIMITS.grepResults || files >= LIMITS.grepFiles) return;
-        const st = lstatSync(p);
-        if (st.isSymbolicLink()) return;
-        if (st.isDirectory()) {
-          for (const e of readdirSync(p).sort()) if (!SKIP_DIRS.has(e)) walk(join(p, e));
-          return;
-        }
-        files++;
-        if (st.size > LIMITS.grepFileBytes || isBinary(p)) return;
-        const lines = readFileSync(p, 'utf8').split('\n');
-        for (let i = 0; i < lines.length && hits.length < LIMITS.grepResults; i++) {
-          if (re.test(lines[i])) hits.push(`${relative(rootReal, p).split(sep).join('/')}:${i + 1}: ${lines[i].slice(0, 300)}`);
-        }
-      };
-      walk(start);
-      return hits.length ? hits.join('\n') + (hits.length >= LIMITS.grepResults ? '\n(match cap reached)' : '') : '(no matches)';
+      // The match runs in a child that is killed at searchMs: a regular expression cannot be
+      // interrupted in this process, and the files it runs over are the PR's.
+      const r = spawnSync(process.execPath, [fileURLToPath(import.meta.url), SEARCH_WORKER], {
+        input: JSON.stringify({ rootReal, start, pattern: pat }), encoding: 'utf8', timeout: LIMITS.searchMs,
+        killSignal: 'SIGKILL', maxBuffer: 16 * 1024 * 1024,
+        env: process.platform === 'win32' ? { SYSTEMROOT: process.env.SYSTEMROOT ?? '' } : {},
+      });
+      if (r.error?.code === 'ETIMEDOUT' || r.signal) return `error: the search ran past ${LIMITS.searchMs / 1000}s and was stopped; use a simpler pattern or a narrower path`;
+      if (r.status !== 0) return `error: the search failed: ${String(r.stderr || r.error?.message || '').trim().slice(0, 200)}`;
+      return r.stdout;
     }
     return `error: unknown tool ${name}`;
   } catch (e) {
     return `error: ${e.message}`;
   }
+}
+
+const SEARCH_WORKER = '--search-worker';
+
+/** The search itself: matches of pattern under start, as redline_search reports them. Pure but for reads. */
+export function searchFiles(rootReal, start, pattern) {
+  const re = new RegExp(pattern);
+  const hits = [];
+  let files = 0;
+  const walk = (p) => {
+    if (hits.length >= LIMITS.grepResults || files >= LIMITS.grepFiles) return;
+    const st = lstatSync(p);
+    if (st.isSymbolicLink()) return;
+    if (st.isDirectory()) {
+      for (const e of readdirSync(p).sort()) if (!SKIP_DIRS.has(e)) walk(join(p, e));
+      return;
+    }
+    files++;
+    if (st.size > LIMITS.grepFileBytes || isBinary(p)) return;
+    const lines = readFileSync(p, 'utf8').split('\n');
+    for (let i = 0; i < lines.length && hits.length < LIMITS.grepResults; i++) {
+      if (re.test(lines[i])) hits.push(`${relative(rootReal, p).split(sep).join('/')}:${i + 1}: ${lines[i].slice(0, 300)}`);
+    }
+  };
+  walk(start);
+  return hits.length ? hits.join('\n') + (hits.length >= LIMITS.grepResults ? '\n(match cap reached)' : '') : '(no matches)';
+}
+
+/** The child redline_search starts: the request on stdin, the result on stdout. */
+function searchWorker() {
+  const { rootReal, start, pattern } = JSON.parse(readFileSync(0, 'utf8'));
+  process.stdout.write(searchFiles(rootReal, start, pattern));
 }
 
 // ---------- GitHub and the model ----------
@@ -438,10 +503,6 @@ export async function callModelWith(ctx, { system, messages, tools, toolChoice, 
   return res.json();
 }
 
-function callModel(ctx, system, messages, toolChoice) {
-  return callModelWith(ctx, { system, messages, tools: TOOLS, toolChoice });
-}
-
 /**
  * Put SUBMIT_REQUIRED in the last user turn, once. That turn is the one about to be sent (the
  * brief, a nudge or tool results), so no turn the model has already answered is edited: an empty
@@ -481,6 +542,7 @@ export function buildBrief(pr, files, commits, diff) {
  */
 export async function runReview(ctx) {
   const { repo, pr: n, headSha } = ctx;
+  const deadline = ctx.now() + LIMITS.hardMs;
   const pr = await gh(ctx, `/repos/${repo}/pulls/${n}`);
   if (pr.state !== 'open') return { outcome: 'skipped', reason: `PR is ${pr.state}` };
   if (pr.head.sha !== headSha) return { outcome: 'skipped', reason: `head moved to ${pr.head.sha.slice(0, 7)}` };
@@ -493,8 +555,9 @@ export async function runReview(ctx) {
 
   const files = await ghAll(ctx, `/repos/${repo}/pulls/${n}/files`);
   const commits = await ghAll(ctx, `/repos/${repo}/pulls/${n}/commits`, 3);
-  const brief = buildBrief(pr, files, commits, buildDiff(files));
-  const corpus = corpusOf(brief);
+  const diff = planDiff(files);
+  const brief = buildBrief(pr, files, commits, diff.text);
+  const corpus = [...corpusOf(brief), ...checkoutCorpus(ctx.checkout, unshownFiles(files, diff.omitted))];
 
   const messages = [{ role: 'user', content: `${brief}\n\nReview this change and finish with redline_submit.` }];
   const started = ctx.now();
@@ -514,7 +577,11 @@ export async function runReview(ctx) {
     if (force && !canForce) askForSubmit(messages);
     let res;
     try {
-      res = await callModel(ctx, ctx.system, messages, !force ? null : canForce ? { type: 'tool', name: 'redline_submit' } : { type: 'auto' });
+      res = await callModelWith(ctx, {
+        system: ctx.system, messages, tools: TOOLS,
+        toolChoice: !force ? null : canForce ? { type: 'tool', name: 'redline_submit' } : { type: 'auto' },
+        timeoutMs: Math.max(30_000, Math.min(LIMITS.modelTimeoutMs, deadline - ctx.now())),
+      });
     } catch (e) {
       if (!(e instanceof ModelParked) || !ctx.fallbackModel || ctx.fallbackModel === ctx.model) throw e;
       ctx.log?.(`${ctx.model} is parked in dario for ${Math.ceil(e.retryAfterMs / 1000)}s; the review continues on ${ctx.fallbackModel}`);
@@ -562,7 +629,7 @@ export async function runReview(ctx) {
         repaired = true;
         ctx.log?.(`  ${bad.length} ungrounded finding(s): one repair round offered`);
         results.push({ type: 'tool_result', tool_use_id: u.id, is_error: true, content:
-          `These findings quote text that is not in the diff, the PR text or a commit message: ${bad.map((f) => `${f.file} ("${norm(f.quote).slice(0, 80)}")`).join('; ')}. Copy the quote exactly from the diff, or drop the finding, then call redline_submit again.` });
+          `These findings quote text that is not in the diff, the changed files the diff could not show, the PR text or a commit message: ${bad.map((f) => `${f.file} ("${norm(f.quote).slice(0, 80)}")`).join('; ')}. Copy the quote exactly from the diff, or drop the finding, then call redline_submit again.` });
         continue;
       }
       if (bad.length) {
@@ -598,7 +665,10 @@ export async function runReview(ctx) {
 async function main() {
   const env = process.env;
   const need = (k, src = env) => { if (!src[k]) { console.error(`::error::${k} is not set`); process.exit(2); } return src[k]; };
-  const secrets = parseEnvFile(readFileSync(need('REDLINE_ENV_FILE'), 'utf8'));
+  let secrets;
+  try { secrets = parseEnvFile(readFileSync(need('REDLINE_ENV_FILE'), 'utf8')); } catch (e) {
+    console.error(`::error::REDLINE_ENV_FILE: cannot read ${env.REDLINE_ENV_FILE} (${e.code ?? e.message})`); process.exit(2);
+  }
   let system;
   try { system = readPrompt(env, 'REDLINE_PROMPT_FILE'); } catch (e) { console.error(`::error::${e.message}`); process.exit(2); }
   // The runner's workspace outlives the job, so a file from an earlier run is removed before this
@@ -623,7 +693,9 @@ async function main() {
     console.error(`::error::Redline could not finish the review: ${e.message}`);
     process.exit(2);
   }
-  if (result.record && verdictFile) saveVerdict(verdictFile, result.record);
+  try { if (result.record && verdictFile) saveVerdict(verdictFile, result.record); } catch (e) {
+    console.error(`::error::Redline could not write ${verdictFile}: ${e.message}`); process.exit(2);
+  }
   const line = result.outcome === 'skipped' ? `Redline skipped: ${result.reason}`
     : result.outcome === 'dry-run' ? `Redline dry run (nothing posted): ${result.verdict}`
       : result.outcome === 'unposted' ? `Redline verdict, left to the forge to post: ${result.verdict}`
@@ -634,4 +706,8 @@ async function main() {
   process.exit(result.verdict === 'REQUEST_CHANGES' ? 1 : 0);
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) main();
+if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
+  if (process.argv[2] === SEARCH_WORKER) searchWorker();
+  // Anything main does not catch is still an error exit (2), never the 1 of REQUEST_CHANGES.
+  else main().catch((e) => { console.error(`::error::Redline failed: ${e.message}`); process.exit(2); });
+}
