@@ -687,6 +687,21 @@ if (!gitOk) {
       rmSync(repo.dir, { recursive: true, force: true });
     }
     {
+      // A command commits every change on its own: the test gate still sees the change and runs the
+      // suite, and a failing suite keeps it from being a fix.
+      const repo = makeRepo({ pkg: { name: 'r', private: true, scripts: { test: 'node test.mjs' } }, testExit: 1 });
+      const commitAll = "import { writeFileSync } from 'node:fs';\nimport { spawnSync } from 'node:child_process';\n"
+        + `writeFileSync('src/b.js', ${JSON.stringify(FIXED_B)});\n`
+        + "spawnSync('git', ['add', '-A'], { stdio: 'ignore' });\nspawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@x', 'commit', '-q', '-m', 'all'], { stdio: 'ignore' });\n";
+      const w = world(repo, { turns: [tool('fix_write', { path: 'commit-all.mjs', content: commitAll }), tool('fix_run', { command: 'node commit-all.mjs' }), finish(), finish()] });
+      const { record: r } = await runFix(w.ctx);
+      check('a change a command committed on its own still goes through the test gate',
+        r.outcome === 'tests_failed' && r.tests?.command === 'npm test' && r.tests.exit_code === 1 && fixProblem(r) === null, JSON.stringify({ outcome: r.outcome, tests: r.tests }));
+      check('and no bundle is written for it', !existsSync(join(w.out, 'fix.bundle')) && r.new_head === null);
+      rmSync(w.out, { recursive: true, force: true });
+      rmSync(repo.dir, { recursive: true, force: true });
+    }
+    {
       const repo = makeRepo({ pkg: { name: 'r', private: true, scripts: { test: 'node test.mjs' } } });
       const w = world(repo, { turns: [tool('fix_write', { path: 'src/b.js', content: FIXED_B }), tool('fix_run', { command: 'npm test' }), finish()] });
       const { record: r } = await runFix(w.ctx);

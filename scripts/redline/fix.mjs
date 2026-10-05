@@ -734,8 +734,12 @@ export async function runFix(ctx) {
 
     const written = new Set();
     // The fix as it would be staged now: everything changed minus what the contract leaves out.
+    // A command may have staged or committed on its own, so HEAD and the index go back to the
+    // reviewed head first (the working tree is kept): every check, the test gate in finalize
+    // included, sees all of the change against the reviewed head, and the commit is the whole of it.
     const sizeOf = (p) => { try { return statSync(join(root, p)).size; } catch { return 0; } };
     const staged = () => {
+      git(root, cenv, ['reset', '-q', headSha]);
       const changed = changedPaths(root, cenv);
       return stageable(changed, { installDirty, written, sizeOf, protectedSet: protectedPaths(attrs, changed) });
     };
@@ -814,9 +818,6 @@ export async function runFix(ctx) {
     const sub = loop.sub;
     if (sub.outcome === 'refused') return refuse(sub.reason, { turns, tests: testsRecord });
 
-    // A command may have staged or committed on its own. The commit starts again from the reviewed
-    // head's index, so what is staged below is the whole of it.
-    git(root, cenv, ['reset', '-q', headSha]);
     const st = staged();
     if (!st.keep.length) {
       return { record: fixRecord({ ...base, outcome: 'no_change', turns, tests: testsRecord, notes: renderNotes({ outcome: 'no_change', summary: sub.summary, skipped: st.skipped, tests: testsRecord }) }) };
