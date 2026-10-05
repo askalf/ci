@@ -32,14 +32,19 @@ checks that the checkout is exactly the reviewed head, then `fix.mjs`:
 - installs the checkout's dependencies once (npm, pnpm, yarn or bun, as detected), with
   dependencies' lifecycle scripts skipped (`--ignore-scripts`, or yarn 2+'s `--mode=skip-build`);
 - lets the model `fix_list`, `fix_read`, `fix_search`, `fix_write` (inside the checkout, never
-  under `.github/`) and `fix_run` an allowlist only: the package.json `test`, `lint`, `typecheck`
+  under `.github/`, never a `.gitattributes`, never a file the reviewed head marks `redline-protected`
+  in `.gitattributes`, such as captured payloads and vendored code; the marks are read from that
+  commit, so nothing the run does to `.gitattributes` lifts them) and `fix_run` an allowlist only: the package.json `test`, `lint`, `typecheck`
   and `build` scripts and `node <file>`, without a shell, in a scrubbed environment;
 - runs the test script on the files as they finally are, however they were changed (a test run
   goes stale when a file changes after it, by `fix_write` or by a `node <file>`); a failing suite is bounced to the
   model once, then reported. The bounce, `fix.json` (`tests.failing`) and the notes name the failed
   tests the output reports (TAP `not ok`, jest/vitest `FAIL`); the gate is the exit code alone;
-- commits everything changed except `.github/**`, files over 1 MB and what the install dirtied, as
-  askalf, with a sanitised `fix:` subject and a body naming the review;
+- commits everything changed except `.github/**`, `.gitattributes`, `redline-protected` files,
+  files over 1 MB and what the install dirtied, as
+  askalf, with a sanitised `fix:` subject and a body naming the review. A command can still change
+  a protected file on disk; the commit starts again from the reviewed head, leaves that change out,
+  and is checked for a protected path before the bundle is written;
 - writes `fix.json` (`outcome`: `fixed`, `no_change`, `tests_failed` or `refused`; the commits,
   files, tests, turns and notes), `notes.md` and, for a fix, `fix.bundle` (`<head>..HEAD`). A dry
   run writes `diff.patch` instead of committing.

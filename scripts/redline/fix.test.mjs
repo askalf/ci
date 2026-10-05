@@ -9,6 +9,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
   parseReviewUrl, parseReviewBody, inlineItems, formatFinding, detectRunner, allowedCommands, allowedArgv, safeWritePath, stageable,
+  protectedFromCheckAttr, protectedPaths, PROTECTED_ATTR,
   commitSubject, hasAttributionTrailer, neutraliseRefs, cleanNotes, summariseTests, renderNotes, fixRecord, fixProblem, saveFix,
   failingTests, FAILING_NAMES_MAX, runSecrets, leaksSecret, maskSecrets,
   TOOLS, FINISH_REQUIRED, askForFinish, checkFinish, runLoop, buildBrief, childEnv, onlyOrigins, runFix,
@@ -160,6 +161,30 @@ console.log('\n  the write sandbox');
   check('a directory is refused', /directory/.test(err('src')));
   check('the checkout root itself is refused', /outside/.test(err('')) && /outside/.test(err('.')));
   if (symlinked) check('a symlink is refused', /symlink/.test(err('leak.txt')));
+  check('a .gitattributes is refused, at any depth', /gitattributes/.test(err('.gitattributes')) && /gitattributes/.test(err('src/.gitattributes')));
+  let dirLinked = true;
+  try { mkdirSync(join(root, '.github', 'workflows'), { recursive: true }); symlinkSync(join(root, '.github'), join(root, 'ghalias'), 'dir'); } catch { dirLinked = false; }
+  if (dirLinked) {
+    check('.github reached through a directory symlink is refused', /\.github.*directory symlink/.test(err('ghalias/workflows/ci.yml')));
+    check('a .gitattributes reached through a directory symlink is refused', /gitattributes/.test(err('ghalias/../.gitattributes')) || /gitattributes/.test(err('ghalias/.gitattributes')));
+  }
+}
+
+console.log('\n  redline-protected files');
+{
+  const raw = ['src/cc-template-data.json', PROTECTED_ATTR, 'set', 'src/a.js', PROTECTED_ATTR, 'unspecified',
+    'b.json', PROTECTED_ATTR, 'unset', 'c.json', PROTECTED_ATTR, 'captured', 'd.json', PROTECTED_ATTR, 'false', ''].join('\0');
+  const got = protectedFromCheckAttr(raw);
+  check('set and valued paths are protected', got.has('src/cc-template-data.json') && got.has('c.json'));
+  check('unspecified, unset and false are not', !got.has('src/a.js') && !got.has('b.json') && !got.has('d.json') && got.size === 2);
+  check('empty output protects nothing', protectedFromCheckAttr('').size === 0);
+  if (gitOk) {
+    const attrs = { '.gitattributes': `data/*.json ${PROTECTED_ATTR}\n`, 'lib/.gitattributes': `vendor.js ${PROTECTED_ATTR}=vendored\n` };
+    const got2 = protectedPaths(attrs, ['data/payload.json', 'lib/vendor.js', 'src/a.js', 'vendor.js']);
+    check('a snapshot of .gitattributes decides, nested ones included', got2.has('data/payload.json') && got2.has('lib/vendor.js') && got2.size === 2);
+    check('no snapshot protects nothing', protectedPaths({}, ['data/payload.json']).size === 0);
+    check('no paths asks git nothing', protectedPaths(attrs, []).size === 0);
+  }
 }
 
 console.log('\n  what gets staged');
@@ -171,6 +196,9 @@ console.log('\n  what gets staged');
     r.skipped.map((s) => s.path).join() === '.github/workflows/ci.yml,package-lock.json,big.bin'
     && /\.github/.test(r.skipped[0].why) && /install/.test(r.skipped[1].why) && /larger/.test(r.skipped[2].why));
   check('a path the install dirtied that the model then wrote is the fix', r.keep.includes('src/new.js'));
+  const q = stageable(['src/a.js', 'src/data.json', '.gitattributes', 'lib/.gitattributes'], { protectedSet: new Set(['src/data.json']) });
+  check('a protected path and any .gitattributes are left out, each with its reason',
+    q.keep.join() === 'src/a.js' && q.skipped.map((x) => `${x.path}:${x.why}`).join('|') === `src/data.json:marked ${PROTECTED_ATTR}|.gitattributes:a .gitattributes|lib/.gitattributes:a .gitattributes`);
 }
 
 console.log('\n  the commit subject');
@@ -463,6 +491,28 @@ if (!gitOk) {
     rmSync(w.out, { recursive: true, force: true });
     rmSync(repo.dir, { recursive: true, force: true });
   }
+
+  console.log('\n  runFix: a file the repository marks redline-protected');
+  {
+    const repo = makeRepo();
+    writeFileSync(join(repo.dir, '.gitattributes'), `src/b.js ${PROTECTED_ATTR}\n`);
+    sh(repo.dir, ['add', '-A']);
+    sh(repo.dir, ['-c', 'user.name=t', '-c', 'user.email=t@x', 'commit', '-q', '-m', 'chore: mark the captured file']);
+    repo.head = sh(repo.dir, ['rev-parse', 'HEAD']);
+    const w = world(repo, { turns: [
+      tool('fix_write', { path: 'src/b.js', content: FIXED_B }), tool('fix_write', { path: '.gitattributes', content: '' }),
+      tool('fix_write', { path: 'src/c.js', content: 'export const c = 1;\n' }), finish({ summary: 'Adds `src/c.js`; the finding about `src/b.js` is about captured data, left as it is.' }),
+    ] });
+    const { record: r } = await runFix(w.ctx);
+    const result = (i) => JSON.stringify(w.calls.model[i].messages.at(-1));
+    check('the brief names the protected file', w.calls.model[0].messages[0].content.includes(`marked ${PROTECTED_ATTR}`) && w.calls.model[0].messages[0].content.includes('src/b.js'));
+    check('a write to the protected file is refused at the tool', new RegExp(`src/b.js is marked ${PROTECTED_ATTR}`).test(result(1)));
+    check('a write to .gitattributes is refused, so the mark cannot be lifted first', /gitattributes is never written/.test(result(2)));
+    check('the protected file is unchanged on disk', readFileSync(join(repo.dir, 'src', 'b.js'), 'utf8') === 'export const token = process.env.X;\nconst y = 2;\n');
+    check('the fix commits the other file only', r.outcome === 'fixed' && r.files.join() === 'src/c.js' && fixProblem(r) === null);
+    rmSync(w.out, { recursive: true, force: true });
+    rmSync(repo.dir, { recursive: true, force: true });
+  }
   {
     // A NUL makes the file binary, so the diff carries it base85-encoded; the file's own bytes are checked.
     const KEY = 'dk_live_0123456789';
@@ -474,11 +524,92 @@ if (!gitOk) {
     rmSync(repo.dir, { recursive: true, force: true });
   }
   {
+    // The protected file reached through an unmarked directory symlink lands on the same file.
+    const repo = makeRepo();
+    mkdirSync(join(repo.dir, 'data'));
+    writeFileSync(join(repo.dir, 'data', 'payload.json'), '{"captured":true}\n');
+    writeFileSync(join(repo.dir, '.gitattributes'), `data/payload.json ${PROTECTED_ATTR}\n`);
+    let aliased = true;
+    try { symlinkSync('data', join(repo.dir, 'alias'), 'dir'); } catch { aliased = false; }
+    if (aliased) {
+      sh(repo.dir, ['add', '-A']);
+      sh(repo.dir, ['-c', 'user.name=t', '-c', 'user.email=t@x', 'commit', '-q', '-m', 'chore: captured payload and an alias']);
+      repo.head = sh(repo.dir, ['rev-parse', 'HEAD']);
+      const w = world(repo, { turns: [tool('fix_write', { path: 'alias/payload.json', content: '{"captured":false}\n' }), finish()] });
+      const { record: r } = await runFix(w.ctx);
+      check('a write through a directory symlink onto a protected file is refused',
+        new RegExp(`data/payload.json is marked ${PROTECTED_ATTR}`).test(JSON.stringify(w.calls.model[1].messages.at(-1))));
+      check('the protected file is unchanged on disk', readFileSync(join(repo.dir, 'data', 'payload.json'), 'utf8') === '{"captured":true}\n');
+      check('nothing was written, so no_change', r.outcome === 'no_change' && fixProblem(r) === null);
+      rmSync(w.out, { recursive: true, force: true });
+    } else {
+      console.log('  skip: no directory symlinks here');
+    }
+    rmSync(repo.dir, { recursive: true, force: true });
+  }
+  {
+    // An allowed command clears the mark in the checkout and edits the payload: the marks come
+    // from the reviewed head, so the payload stays out of the commit.
+    const repo = makeRepo();
+    mkdirSync(join(repo.dir, 'data'));
+    writeFileSync(join(repo.dir, 'data', 'payload.json'), '{"captured":true}\n');
+    writeFileSync(join(repo.dir, '.gitattributes'), `data/payload.json ${PROTECTED_ATTR}\n`);
+    sh(repo.dir, ['add', '-A']);
+    sh(repo.dir, ['-c', 'user.name=t', '-c', 'user.email=t@x', 'commit', '-q', '-m', 'chore: captured payload']);
+    repo.head = sh(repo.dir, ['rev-parse', 'HEAD']);
+    const helper = "import { writeFileSync } from 'node:fs';\nwriteFileSync('.gitattributes', '');\nwriteFileSync('data/payload.json', '{\"captured\":false}\\n');\n";
+    const w = world(repo, { turns: [tool('fix_write', { path: 'clear.mjs', content: helper }), tool('fix_run', { command: 'node clear.mjs' }), finish()] });
+    const { record: r } = await runFix(w.ctx);
+    check('the command did clear the mark and edit the payload in the checkout',
+      readFileSync(join(repo.dir, '.gitattributes'), 'utf8') === '' && readFileSync(join(repo.dir, 'data', 'payload.json'), 'utf8') === '{"captured":false}\n');
+    check('the commit leaves out the payload and .gitattributes, still marked at the reviewed head',
+      r.outcome === 'fixed' && r.files.join() === 'clear.mjs' && fixProblem(r) === null, JSON.stringify(r.files));
+    check('the payload in the commit is the reviewed one',
+      spawnSync('git', ['show', `${r.new_head}:data/payload.json`], { cwd: repo.dir, encoding: 'utf8' }).stdout === '{"captured":true}\n');
+    check('the notes say why the payload was left out', new RegExp(`data/payload.json.*${PROTECTED_ATTR}`).test(r.notes), r.notes);
+    rmSync(w.out, { recursive: true, force: true });
+    rmSync(repo.dir, { recursive: true, force: true });
+  }
+  {
     const KEY = 'dk_live_0123456789';
     const repo = makeRepo();
     const w = world(repo, { turns: [tool('fix_write', { path: 'src/b.js', content: FIXED_B }), finish({ summary: `Used ${KEY} to check it.` })] });
     const { record: r } = await runFix({ ...w.ctx, darioKey: KEY });
     check('notes that carry the key: refused, and the bundle already written is removed', r.outcome === 'refused' && !JSON.stringify(r).includes(KEY) && !existsSync(join(w.out, 'fix.bundle')) && fixProblem(r) === null);
+    rmSync(w.out, { recursive: true, force: true });
+    rmSync(repo.dir, { recursive: true, force: true });
+  }
+  {
+    // The same, and the command also commits on its own, then fix_write tries the payload again:
+    // the commit starts from the reviewed head, so neither the payload nor the mark's removal lands.
+    const repo = makeRepo();
+    mkdirSync(join(repo.dir, 'data'));
+    writeFileSync(join(repo.dir, 'data', 'payload.json'), '{"captured":true}\n');
+    writeFileSync(join(repo.dir, '.gitattributes'), `data/payload.json ${PROTECTED_ATTR}\n`);
+    sh(repo.dir, ['add', '-A']);
+    sh(repo.dir, ['-c', 'user.name=t', '-c', 'user.email=t@x', 'commit', '-q', '-m', 'chore: captured payload']);
+    repo.head = sh(repo.dir, ['rev-parse', 'HEAD']);
+    const lift = [
+      "import { writeFileSync } from 'node:fs';",
+      "import { spawnSync } from 'node:child_process';",
+      "writeFileSync('.gitattributes', '');",
+      "writeFileSync('data/payload.json', '{\"captured\":false}\\n');",
+      "spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@x', 'commit', '-q', '-a', '-m', 'lift'], { stdio: 'ignore' });",
+      '',
+    ].join('\n');
+    const w = world(repo, { turns: [
+      tool('fix_write', { path: 'lift.mjs', content: lift }), tool('fix_run', { command: 'node lift.mjs' }),
+      tool('fix_write', { path: 'data/payload.json', content: '{"captured":"again"}\n' }),
+      tool('fix_write', { path: 'src/c.js', content: 'export const c = 1;\n' }), finish(),
+    ] });
+    const { record: r } = await runFix(w.ctx);
+    check('a command that empties .gitattributes does not lift the mark for fix_write',
+      new RegExp(`data/payload.json is marked ${PROTECTED_ATTR}`).test(JSON.stringify(w.calls.model[3].messages.at(-1))));
+    check('a commit the command made is not carried: one fix commit on top of the reviewed head',
+      r.outcome === 'fixed' && r.files.join() === 'lift.mjs,src/c.js' && fixProblem(r) === null
+      && sh(repo.dir, ['rev-parse', 'HEAD~1']) === repo.head);
+    check('the payload and .gitattributes are unchanged in the commit',
+      sh(repo.dir, ['diff', '--name-only', repo.head, 'HEAD']).split('\n').join() === 'lift.mjs,src/c.js');
     rmSync(w.out, { recursive: true, force: true });
     rmSync(repo.dir, { recursive: true, force: true });
   }
@@ -632,6 +763,21 @@ if (!gitOk) {
       ] });
       const { record: r } = await runFix(w.ctx);
       check('a change made by node <file> after the tests is tested again, never passed on the old run', r.outcome === 'tests_failed' && r.tests.exit_code === 1 && !existsSync(join(w.out, 'fix.bundle')) && fixProblem(r) === null);
+      rmSync(w.out, { recursive: true, force: true });
+      rmSync(repo.dir, { recursive: true, force: true });
+    }
+    {
+      // A command commits every change on its own: the test gate still sees the change and runs the
+      // suite, and a failing suite keeps it from being a fix.
+      const repo = makeRepo({ pkg: { name: 'r', private: true, scripts: { test: 'node test.mjs' } }, testExit: 1 });
+      const commitAll = "import { writeFileSync } from 'node:fs';\nimport { spawnSync } from 'node:child_process';\n"
+        + `writeFileSync('src/b.js', ${JSON.stringify(FIXED_B)});\n`
+        + "spawnSync('git', ['add', '-A'], { stdio: 'ignore' });\nspawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@x', 'commit', '-q', '-m', 'all'], { stdio: 'ignore' });\n";
+      const w = world(repo, { turns: [tool('fix_write', { path: 'commit-all.mjs', content: commitAll }), tool('fix_run', { command: 'node commit-all.mjs' }), finish(), finish()] });
+      const { record: r } = await runFix(w.ctx);
+      check('a change a command committed on its own still goes through the test gate',
+        r.outcome === 'tests_failed' && r.tests?.command === 'npm test' && r.tests.exit_code === 1 && fixProblem(r) === null, JSON.stringify({ outcome: r.outcome, tests: r.tests }));
+      check('and no bundle is written for it', !existsSync(join(w.out, 'fix.bundle')) && r.new_head === null);
       rmSync(w.out, { recursive: true, force: true });
       rmSync(repo.dir, { recursive: true, force: true });
     }
