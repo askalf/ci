@@ -49,7 +49,7 @@
 // file ends the run.
 
 import { readFileSync, writeFileSync, mkdirSync, rmSync, existsSync, lstatSync, realpathSync, statSync, readdirSync, appendFileSync, mkdtempSync } from 'node:fs';
-import { join, resolve, relative, dirname, sep, posix } from 'node:path';
+import { join, resolve, relative, dirname, basename, sep, posix } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
@@ -218,17 +218,40 @@ export function protectedFromCheckAttr(raw) {
   return out;
 }
 
+/** Why a checkout-relative path may not be written, or '' when it may. Pure. */
+function writeRule(rel) {
+  if (/(^|\/)(?:\.git|node_modules)(?:\/|$)/.test(rel)) return 'path is under .git or node_modules';
+  if (/^\.github(?:\/|$)/.test(rel)) return 'nothing under .github/ is written by the fix lane';
+  if (/(?:^|\/)\.gitattributes$/.test(rel)) return '.gitattributes is never written by the fix lane';
+  return '';
+}
+
+/**
+ * Where a write to `abs` lands, relative to the real checkout: the existing part of the path
+ * resolved through its symlinks, the rest as given. A directory symlink inside the checkout
+ * (`alias -> data`) makes `alias/payload.json` land on `data/payload.json`, so every rule about
+ * where a write may go is checked on this path as well as on the one the model named.
+ */
+export function landingPath(root, abs) {
+  const rootReal = realpathSync(root);
+  let dir = abs;
+  const tail = [];
+  while (!existsSync(dir)) { tail.unshift(basename(dir)); dir = dirname(dir); }
+  return relative(rootReal, join(realpathSync(dir), ...tail)).split(sep).join('/');
+}
+
 /**
  * Resolve a path the model wants to write. Inside the checkout, symlinks included; never under
- * .git or node_modules, and never under .github: a workflow or action definition changed by this
- * lane would run with the PR's own permissions on the next push. Returns the absolute path or throws.
+ * .git or node_modules, never under .github (a workflow or action definition changed by this lane
+ * would run with the PR's own permissions on the next push) and never a .gitattributes, checked
+ * on the path as named and on where it lands through any directory symlink. Returns the absolute
+ * path or throws.
  */
 export function safeWritePath(root, p) {
   const rel = posix.normalize(String(p ?? '').replace(/\\/g, '/').replace(/^\/+/, ''));
   if (!rel || rel === '.' || rel === '..' || rel.startsWith('../')) throw new Error('path is outside the checkout');
-  if (/(^|\/)(?:\.git|node_modules)(?:\/|$)/.test(rel)) throw new Error('path is under .git or node_modules');
-  if (/^\.github(?:\/|$)/.test(rel)) throw new Error('nothing under .github/ is written by the fix lane');
-  if (/(?:^|\/)\.gitattributes$/.test(rel)) throw new Error('.gitattributes is never written by the fix lane');
+  const named = writeRule(rel);
+  if (named) throw new Error(named);
   const rootReal = realpathSync(root);
   const abs = resolve(rootReal, rel);
   const inside = (x) => x === rootReal || x.startsWith(rootReal + sep);
@@ -240,6 +263,8 @@ export function safeWritePath(root, p) {
   try { st = lstatSync(abs); } catch { /* a new file */ }
   if (st?.isSymbolicLink()) throw new Error('path is a symlink');
   if (st?.isDirectory()) throw new Error('path is a directory');
+  const landed = writeRule(landingPath(root, abs));
+  if (landed) throw new Error(`${landed} (through a directory symlink)`);
   return abs;
 }
 
@@ -696,7 +721,9 @@ export async function runFix(ctx) {
           const content = String(input.content ?? '');
           if (Buffer.byteLength(content) > LIMITS.writeBytes) return `error: content is larger than ${LIMITS.writeBytes} bytes`;
           const rel = relative(realpathSync(root), abs).split(sep).join('/');
-          if (protectedPaths(root, cenv, [rel]).has(rel)) return `error: ${rel} is marked ${PROTECTED_ATTR} in .gitattributes: it is captured data and is never edited here. Leave it as it is and say in the summary that this finding is about data the fix lane does not change`;
+          const landing = landingPath(root, abs);
+          const marked = protectedPaths(root, cenv, [...new Set([rel, landing])]);
+          if (marked.has(rel) || marked.has(landing)) return `error: ${landing} is marked ${PROTECTED_ATTR} in .gitattributes: it is captured data and is never edited here. Leave it as it is and say in the summary that this finding is about data the fix lane does not change`;
           const now = staged().keep;
           if (!now.includes(rel) && now.length >= LIMITS.files) return `error: the fix already changes ${now.length} files, the limit; no further file is written`;
           mkdirSync(dirname(abs), { recursive: true });

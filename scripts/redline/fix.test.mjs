@@ -157,6 +157,12 @@ console.log('\n  the write sandbox');
   check('the checkout root itself is refused', /outside/.test(err('')) && /outside/.test(err('.')));
   if (symlinked) check('a symlink is refused', /symlink/.test(err('leak.txt')));
   check('a .gitattributes is refused, at any depth', /gitattributes/.test(err('.gitattributes')) && /gitattributes/.test(err('src/.gitattributes')));
+  let dirLinked = true;
+  try { mkdirSync(join(root, '.github', 'workflows'), { recursive: true }); symlinkSync(join(root, '.github'), join(root, 'ghalias'), 'dir'); } catch { dirLinked = false; }
+  if (dirLinked) {
+    check('.github reached through a directory symlink is refused', /\.github.*directory symlink/.test(err('ghalias/workflows/ci.yml')));
+    check('a .gitattributes reached through a directory symlink is refused', /gitattributes/.test(err('ghalias/../.gitattributes')) || /gitattributes/.test(err('ghalias/.gitattributes')));
+  }
 }
 
 console.log('\n  redline-protected files');
@@ -473,6 +479,30 @@ if (!gitOk) {
     check('the protected file is unchanged on disk', readFileSync(join(repo.dir, 'src', 'b.js'), 'utf8') === 'export const token = process.env.X;\nconst y = 2;\n');
     check('the fix commits the other file only', r.outcome === 'fixed' && r.files.join() === 'src/c.js' && fixProblem(r) === null);
     rmSync(w.out, { recursive: true, force: true });
+    rmSync(repo.dir, { recursive: true, force: true });
+  }
+  {
+    // The protected file reached through an unmarked directory symlink lands on the same file.
+    const repo = makeRepo();
+    mkdirSync(join(repo.dir, 'data'));
+    writeFileSync(join(repo.dir, 'data', 'payload.json'), '{"captured":true}\n');
+    writeFileSync(join(repo.dir, '.gitattributes'), `data/payload.json ${PROTECTED_ATTR}\n`);
+    let aliased = true;
+    try { symlinkSync('data', join(repo.dir, 'alias'), 'dir'); } catch { aliased = false; }
+    if (aliased) {
+      sh(repo.dir, ['add', '-A']);
+      sh(repo.dir, ['-c', 'user.name=t', '-c', 'user.email=t@x', 'commit', '-q', '-m', 'chore: captured payload and an alias']);
+      repo.head = sh(repo.dir, ['rev-parse', 'HEAD']);
+      const w = world(repo, { turns: [tool('fix_write', { path: 'alias/payload.json', content: '{"captured":false}\n' }), finish()] });
+      const { record: r } = await runFix(w.ctx);
+      check('a write through a directory symlink onto a protected file is refused',
+        new RegExp(`data/payload.json is marked ${PROTECTED_ATTR}`).test(JSON.stringify(w.calls.model[1].messages.at(-1))));
+      check('the protected file is unchanged on disk', readFileSync(join(repo.dir, 'data', 'payload.json'), 'utf8') === '{"captured":true}\n');
+      check('nothing was written, so no_change', r.outcome === 'no_change' && fixProblem(r) === null);
+      rmSync(w.out, { recursive: true, force: true });
+    } else {
+      console.log('  skip: no directory symlinks here');
+    }
     rmSync(repo.dir, { recursive: true, force: true });
   }
 
