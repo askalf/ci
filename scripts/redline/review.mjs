@@ -205,7 +205,9 @@ export function checkoutCorpus(root, paths) {
       const st = lstatSync(file);
       if (!st.isFile() || st.size > LIMITS.grepFileBytes || bytes + st.size > LIMITS.corpusBytes || isBinary(file)) continue;
       bytes += st.size;
-      out.push(...corpusOf(readFileSync(file, 'utf8')));
+      // One push per line: spreading a file of many short lines into one call passes the
+      // engine's argument limit, and the RangeError would drop the whole file.
+      for (const line of corpusOf(readFileSync(file, 'utf8'))) out.push(line);
     } catch { /* gone or outside the checkout: grounds nothing */ }
   }
   return out;

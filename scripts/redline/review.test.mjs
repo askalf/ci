@@ -135,6 +135,13 @@ console.log('\n  diff, brief and grounding');
     unshownFiles(changed, []).join() === 'src/a.js' && unshownFiles(changed, ['src/b.js']).join() === 'src/a.js,src/b.js');
   const fromCheckout = checkoutCorpus(root, ['src/a.js', '../outside', 'img.png', 'missing.js']);
   check('a quote from a changed file the diff could not show is grounded by the checkout', quoteIsGrounded('line 899', fromCheckout) && quoteIsGrounded('line 899', corpusOf(buildDiff(changed))) === false);
+  {
+    // Under grepFileBytes, but more short lines than a call takes arguments.
+    const many = mkdtempSync(join(tmpdir(), 'redline-many-'));
+    writeFileSync(join(many, 'big.txt'), `${Array.from({ length: 300_000 }, (_, i) => `x${i % 10}`).join('\n')}\nthe unique last line\n`);
+    check('a file of hundreds of thousands of short lines grounds a quote from its end', quoteIsGrounded('the unique last line', checkoutCorpus(many, ['big.txt'])));
+    rmSync(many, { recursive: true, force: true });
+  }
   check('the checkout corpus skips paths outside, binaries and missing files', !fromCheckout.some((l) => /PNG/.test(l)) && fromCheckout.length === 900);
   const pr = { number: 7, title: 'feat: add token', body: '- adds the token\n\nGenerated with a tool', user: { login: 'askalf' },
     head: { ref: 'feat/x', sha: HEAD }, base: { ref: 'main', repo: { full_name: 'askalf/r' } } };
