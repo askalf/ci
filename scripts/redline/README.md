@@ -29,8 +29,9 @@ checks that the checkout is exactly the reviewed head, then `fix.mjs`:
   the PR with the workflow's read-only token;
 - installs the checkout's dependencies once (npm, pnpm, yarn or bun, as detected);
 - lets the model `fix_list`, `fix_read`, `fix_search`, `fix_write` (inside the checkout, never
-  under `.github/`, never a `.gitattributes`, never a file the repository marks `redline-protected`
-  in `.gitattributes`, such as captured payloads and vendored code) and `fix_run` an allowlist only: the package.json `test`, `lint`, `typecheck`
+  under `.github/`, never a `.gitattributes`, never a file the reviewed head marks `redline-protected`
+  in `.gitattributes`, such as captured payloads and vendored code; the marks are read from that
+  commit, so nothing the run does to `.gitattributes` lifts them) and `fix_run` an allowlist only: the package.json `test`, `lint`, `typecheck`
   and `build` scripts and `node <file>`, without a shell, in a scrubbed environment;
 - runs the test script at least once after the last edit; a failing suite is bounced to the
   model once, then reported. The bounce, `fix.json` (`tests.failing`) and the notes name the failed

@@ -505,6 +505,29 @@ if (!gitOk) {
     }
     rmSync(repo.dir, { recursive: true, force: true });
   }
+  {
+    // An allowed command clears the mark in the checkout and edits the payload: the marks come
+    // from the reviewed head, so the payload stays out of the commit.
+    const repo = makeRepo();
+    mkdirSync(join(repo.dir, 'data'));
+    writeFileSync(join(repo.dir, 'data', 'payload.json'), '{"captured":true}\n');
+    writeFileSync(join(repo.dir, '.gitattributes'), `data/payload.json ${PROTECTED_ATTR}\n`);
+    sh(repo.dir, ['add', '-A']);
+    sh(repo.dir, ['-c', 'user.name=t', '-c', 'user.email=t@x', 'commit', '-q', '-m', 'chore: captured payload']);
+    repo.head = sh(repo.dir, ['rev-parse', 'HEAD']);
+    const helper = "import { writeFileSync } from 'node:fs';\nwriteFileSync('.gitattributes', '');\nwriteFileSync('data/payload.json', '{\"captured\":false}\\n');\n";
+    const w = world(repo, { turns: [tool('fix_write', { path: 'clear.mjs', content: helper }), tool('fix_run', { command: 'node clear.mjs' }), finish()] });
+    const { record: r } = await runFix(w.ctx);
+    check('the command did clear the mark and edit the payload in the checkout',
+      readFileSync(join(repo.dir, '.gitattributes'), 'utf8') === '' && readFileSync(join(repo.dir, 'data', 'payload.json'), 'utf8') === '{"captured":false}\n');
+    check('the commit leaves out the payload and .gitattributes, still marked at the reviewed head',
+      r.outcome === 'fixed' && r.files.join() === 'clear.mjs' && fixProblem(r) === null, JSON.stringify(r.files));
+    check('the payload in the commit is the reviewed one',
+      spawnSync('git', ['show', `${r.new_head}:data/payload.json`], { cwd: repo.dir, encoding: 'utf8' }).stdout === '{"captured":true}\n');
+    check('the notes say why the payload was left out', new RegExp(`data/payload.json.*${PROTECTED_ATTR}`).test(r.notes), r.notes);
+    rmSync(w.out, { recursive: true, force: true });
+    rmSync(repo.dir, { recursive: true, force: true });
+  }
 
   console.log('\n  runFix: limits');
   {
