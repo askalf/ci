@@ -11,7 +11,7 @@ import {
   parseReviewUrl, parseReviewBody, inlineItems, formatFinding, detectRunner, allowedCommands, allowedArgv, safeWritePath, stageable,
   protectedFromCheckAttr, protectedPaths, PROTECTED_ATTR,
   commitSubject, hasAttributionTrailer, neutraliseRefs, cleanNotes, summariseTests, renderNotes, fixRecord, fixProblem, saveFix,
-  failingTests, FAILING_NAMES_MAX, runSecrets, leaksSecret, maskSecrets,
+  failingTests, FAILING_NAMES_MAX, runSecrets, leaksSecret, maskSecrets, berryInstall,
   TOOLS, FINISH_REQUIRED, askForFinish, checkFinish, runLoop, buildBrief, childEnv, onlyOrigins, runFix,
   LIMITS, OUTCOMES, AUTHOR, FIX_VERSION, DEFAULT_MODEL, SUBJECT_BANNED,
 } from './fix.mjs';
@@ -122,6 +122,15 @@ try { symlinkSync(join(outside, 'secret.txt'), join(root, 'leak.txt')); } catch 
   check('yarn 2+ installs immutable with scripts off by variable, by .yarnrc.yml or packageManager, any Berry version',
     berry(['yarn.lock', '.yarnrc.yml'], {}) && berry(['yarn.lock'], { packageManager: 'yarn@2.4.2' }) && berry(['yarn.lock'], { packageManager: 'yarn@4.5.0' })
       && detectRunner(['yarn.lock'], { packageManager: 'yarn@4.5.0' }).install.every((a) => !/skip-build/.test(a)));
+  check('yarn 2+ is marked for a version check before the install, yarn 1 is not',
+    detectRunner(['yarn.lock', '.yarnrc.yml'], {}).berry === true && detectRunner(['yarn.lock'], { packageManager: 'yarn@1.22.22' }).berry === false);
+  // A dependenciesMeta `built: true` overrides YARN_ENABLE_SCRIPTS, so the flag that skips builds is
+  // always passed: --skip-builds in yarn 2, --mode=skip-build from 3 (checked against 2.4.2 and 4.5.0).
+  check('berryInstall: the build-skipping flag of each major, nothing for an unknown version',
+    berryInstall('2.4.2\n').join(' ') === 'yarn install --immutable --skip-builds'
+      && berryInstall('4.5.0').join(' ') === 'yarn install --immutable --mode=skip-build'
+      && berryInstall('warning: something\n3.6.4\n').join(' ') === 'yarn install --immutable --mode=skip-build'
+      && berryInstall('1.22.22') === null && berryInstall('') === null && berryInstall('command not found') === null);
   check('yarn 1 keeps its flags and sets no variable',
     detectRunner(['yarn.lock'], { packageManager: 'yarn@1.22.22' }).install.join(' ') === 'yarn install --frozen-lockfile --ignore-scripts'
       && Object.keys(detectRunner(['yarn.lock'], { packageManager: 'yarn@1.22.22' }).installEnv).length === 0);
@@ -616,6 +625,58 @@ if (!gitOk) {
       sh(repo.dir, ['diff', '--name-only', repo.head, 'HEAD']).split('\n').join() === 'lift.mjs,src/c.js');
     rmSync(w.out, { recursive: true, force: true });
     rmSync(repo.dir, { recursive: true, force: true });
+  }
+
+  {
+    // A clean filter (written by a command: a .gitattributes rule and a .git/config entry) stages a
+    // binary blob with the key while the working-tree file stays harmless. The index is checked.
+    const KEY = 'dk_live_0123456789';
+    const repo = makeRepo();
+    const lift = [
+      "import { writeFileSync } from 'node:fs';",
+      "import { spawnSync } from 'node:child_process';",
+      "writeFileSync('leak.sh', \"printf '\\\\000dk_live_%s\\\\000' 0123456789\\n\");",
+      "writeFileSync('.gitattributes', 'harmless.txt filter=leak\\n');",
+      "spawnSync('git', ['config', 'filter.leak.clean', 'sh leak.sh']);",
+      "writeFileSync('harmless.txt', 'harmless\\n');",
+      '',
+    ].join('\n');
+    const w = world(repo, { turns: [tool('fix_write', { path: 'lift.mjs', content: lift }), tool('fix_run', { command: 'node lift.mjs' }), finish()] });
+    const { record: r } = await runFix({ ...w.ctx, darioKey: KEY });
+    check('the command did set up the filter, and the working tree carries no key', readFileSync(join(repo.dir, 'harmless.txt'), 'utf8') === 'harmless\n' && !readFileSync(join(repo.dir, 'leak.sh'), 'utf8').includes(KEY));
+    check('a key that a clean filter put into the staged blob is refused, with no bundle', r.outcome === 'refused' && /credential/.test(r.notes) && !existsSync(join(w.out, 'fix.bundle')) && fixProblem(r) === null);
+    rmSync(w.out, { recursive: true, force: true });
+    rmSync(repo.dir, { recursive: true, force: true });
+  }
+  if (process.platform !== 'win32') {
+    // A stub yarn stands in for Berry: it reports a version and logs the install it is given.
+    const stub = mkdtempSync(join(tmpdir(), 'redline-yarn-'));
+    const log = join(stub, 'calls.log');
+    const yarnStub = (version) => writeFileSync(join(stub, 'yarn'), `#!/bin/sh\necho "$YARN_ENABLE_SCRIPTS $*" >> '${log}'\ncase "$1" in --version) ${version} ;; install) exit 0 ;; test) exec node test.mjs ;; esac\n`, { mode: 0o755 });
+    const env = { ...process.env, PATH: `${stub}:${process.env.PATH}` };
+    const yarnRepo = () => makeRepo({ pkg: { name: 'r', private: true, packageManager: 'yarn@2.4.2', scripts: { test: 'node test.mjs' } } });
+    {
+      yarnStub('echo 2.4.2');
+      const repo = yarnRepo();
+      const w = world(repo, { turns: [tool('fix_write', { path: 'src/b.js', content: FIXED_B }), finish()] });
+      const { record: r } = await runFix({ ...w.ctx, env });
+      const calls = readFileSync(log, 'utf8');
+      check('yarn 2: the version is read, then the install skips builds by flag and by variable', calls.includes('false --version\n') && calls.includes('false install --immutable --skip-builds\n') && r.outcome === 'fixed');
+      rmSync(w.out, { recursive: true, force: true });
+      rmSync(repo.dir, { recursive: true, force: true });
+      rmSync(log, { force: true });
+    }
+    {
+      yarnStub('exit 1');
+      const repo = yarnRepo();
+      const w = world(repo, { turns: [tool('fix_write', { path: 'src/b.js', content: FIXED_B }), finish()] });
+      await runFix({ ...w.ctx, env });
+      const calls = readFileSync(log, 'utf8');
+      check('a yarn version that cannot be read installs nothing, and the brief says so', !/ install/.test(calls) && w.calls.model[0].messages[0].content.includes('nothing installed'));
+      rmSync(w.out, { recursive: true, force: true });
+      rmSync(repo.dir, { recursive: true, force: true });
+    }
+    rmSync(stub, { recursive: true, force: true });
   }
 
   console.log('\n  runFix: limits');

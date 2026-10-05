@@ -30,8 +30,10 @@ checks that the checkout is exactly the reviewed head, then `fix.mjs`:
 - reads the review (the `### N. Blocking:` findings, the `Minor:` list, the inline comments) and
   the PR with the workflow's read-only token;
 - installs the checkout's dependencies once (npm, pnpm, yarn or bun, as detected), with
-  dependencies' lifecycle scripts skipped (`--ignore-scripts`, or `YARN_ENABLE_SCRIPTS=false` for yarn 2 and later, which
-  every Berry version reads where its flags differ);
+  dependencies' lifecycle scripts skipped (`--ignore-scripts`; for yarn 2 and later the build-skipping flag of the version
+  `yarn --version` reports, `--skip-builds` in 2 and `--mode=skip-build` from 3, since a
+  `dependenciesMeta` `built: true` overrides `YARN_ENABLE_SCRIPTS`; an unreadable version installs
+  nothing);
 - lets the model `fix_list`, `fix_read`, `fix_search`, `fix_write` (inside the checkout, never
   under `.github/`, never a `.gitattributes`, never a file the reviewed head marks `redline-protected`
   in `.gitattributes`, such as captured payloads and vendored code; the marks are read from that
@@ -61,8 +63,9 @@ comments with the notes. The model key is the named dario key `first-party-fix` 
 `/etc/askalf/fix-exec.env`, root:gha-exec 640, readable by the exec account and by no other
 (never by gha-oss, which runs untrusted upstream candidates' suites on the same host).
 The PR's tests and the model's `node <file>` run as that same exec account, so they could read the
-key. The script checks everything that leaves the runner for the key and the read token: a diff,
-`fix.json` or `notes.md` carrying one is refused with nothing kept, and the job log masks them.
+key. The script checks everything that leaves the runner for the key and the read token: the diff,
+the staged blobs (a clean filter can stage bytes the working tree lacks), `fix.json` and
+`notes.md`; one carrying a secret is refused with nothing kept, and the job log masks them.
 Keeping the key out of the children's reach entirely is the host's part: run them as a separate
 account, or deny them the network.
 The fixer's brief is `/etc/askalf/fix-prompt.md` on the same host, named by `FIX_PROMPT_FILE`, with

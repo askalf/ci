@@ -31,10 +31,12 @@
 //     build scripts through the detected package manager, and node <file> inside the checkout.
 //     Commands run as the runner's account with a scrubbed environment: the GitHub token and the
 //     model key are never in a child's environment.
-//   - The install skips dependencies' lifecycle scripts (--ignore-scripts, or for yarn 2 and
-//     later YARN_ENABLE_SCRIPTS=false, which every Berry version reads where its flags differ): a
-//     package's postinstall would otherwise run on the exec runner, as the account that can read
-//     the model key, before anything is checked.
+//   - The install skips dependencies' lifecycle scripts (--ignore-scripts; for yarn 2 and later
+//     the build-skipping flag of the version `yarn --version` reports, --skip-builds in 2 and
+//     --mode=skip-build from 3, since a dependenciesMeta `built: true` overrides
+//     YARN_ENABLE_SCRIPTS; a version it cannot read installs nothing): a package's postinstall
+//     would otherwise run on the exec runner, as the account that can read the model key, before
+//     anything is checked.
 //   - Turns, files changed and diff size are bounded; past those the run is refused, never trimmed
 //     into a partial fix. Wall time is counted from the start, install included: at timeMs the
 //     model must finish, and no command or test runs past hardMs, inside the job's timeout.
@@ -170,9 +172,10 @@ export function detectRunner(rootFiles, pkg) {
   const declared = declaredAt?.[1];
   const pm = declared ?? (files.has('pnpm-lock.yaml') ? 'pnpm' : files.has('yarn.lock') ? 'yarn' : (files.has('bun.lockb') || files.has('bun.lock')) ? 'bun' : 'npm');
   const scripts = SCRIPTS.filter((s) => typeof pkg.scripts?.[s] === 'string' && pkg.scripts[s].trim());
-  // Yarn 2 and later (Berry) take neither --frozen-lockfile nor --ignore-scripts, and the flag that
-  // skips builds is --skip-builds in 2 and --mode=skip-build from 3. Every Berry version reads
-  // enableScripts from YARN_ENABLE_SCRIPTS, so the variable needs no version.
+  // Yarn 2 and later (Berry) take neither --frozen-lockfile nor --ignore-scripts. The flag that
+  // skips builds depends on the version (berryInstall), read from `yarn --version` before the
+  // install; YARN_ENABLE_SCRIPTS=false is set as well, but a dependenciesMeta `built: true`
+  // overrides it, so it is never the only guard.
   const berry = pm === 'yarn' && (files.has('.yarnrc.yml') || (declared === 'yarn' && Number(declaredAt[2]) >= 2));
   // Dependencies' lifecycle scripts never run: see the hardening note at the top.
   const install = {
@@ -181,7 +184,19 @@ export function detectRunner(rootFiles, pkg) {
     yarn: berry ? ['yarn', 'install', '--immutable'] : ['yarn', 'install', '--frozen-lockfile', '--ignore-scripts'],
     bun: ['bun', 'install', '--frozen-lockfile', '--ignore-scripts'],
   }[pm];
-  return { pm, scripts, install, installEnv: berry ? { YARN_ENABLE_SCRIPTS: 'false' } : {} };
+  return { pm, scripts, install, berry, installEnv: berry ? { YARN_ENABLE_SCRIPTS: 'false' } : {} };
+}
+
+/**
+ * Yarn Berry's install for the version `yarn --version` printed: --skip-builds in 2, renamed
+ * --mode=skip-build in 3. Null for anything else, so an unknown version installs nothing rather
+ * than running dependencies' builds. Pure.
+ */
+export function berryInstall(versionOutput) {
+  const major = Number(/^\s*(\d+)\.\d+\.\d+\s*$/m.exec(String(versionOutput ?? ''))?.[1]);
+  if (major === 2) return ['yarn', 'install', '--immutable', '--skip-builds'];
+  if (major >= 3) return ['yarn', 'install', '--immutable', '--mode=skip-build'];
+  return null;
 }
 
 /** The allowlist as the model sees it. */
@@ -444,6 +459,19 @@ export function fileWithSecret(root, paths, secrets) {
       bytes = st.isSymbolicLink() ? Buffer.from(readlinkSync(abs)) : st.isFile() ? readFileSync(abs) : null;
     } catch { bytes = null; }
     if (bytes && secrets.some((v) => bytes.includes(v))) return p;
+  }
+  return null;
+}
+
+/**
+ * The first of paths whose staged blob (`git cat-file blob :<path>`, raw bytes, a symlink's target
+ * included) carries a secret, or null. A path with no index entry (a deletion) carries nothing.
+ */
+export function stagedWithSecret(root, env, paths, secrets) {
+  if (!secrets.length) return null;
+  for (const p of paths) {
+    const r = spawnSync('git', ['cat-file', 'blob', `:${p}`], { cwd: root, env, maxBuffer: 64 * 1024 * 1024 });
+    if (r.status === 0 && secrets.some((v) => r.stdout.includes(v))) return p;
   }
   return null;
 }
@@ -798,6 +826,11 @@ async function answerReview(ctx) {
     try { pkg = rootFiles.includes('package.json') ? JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')) : null; } catch { pkg = null; }
     const plan = detectRunner(rootFiles, pkg);
     let installNote = 'no package.json, nothing installed';
+    if (plan.berry) {
+      const v = run(root, { ...cenv, ...plan.installEnv }, ['yarn', '--version'], 60);
+      plan.install = v.exit === 0 ? berryInstall(v.out) : null;
+      if (!plan.install) installNote = `nothing installed: \`yarn --version\` gave no yarn 2+ version (exit ${v.exit}), so no install could skip dependencies' builds`;
+    }
     if (plan.install) {
       const r = run(root, { ...cenv, ...plan.installEnv }, plan.install, LIMITS.installS);
       installNote = `\`${plan.install.join(' ')}\` exited ${r.exit}${r.exit ? ` (tail: ${r.out.slice(-600).replace(/\s+/g, ' ')})` : ''}`
@@ -940,7 +973,9 @@ async function answerReview(ctx) {
     const diff = git(root, cenv, ['diff', '--cached', '--binary', headSha]) ?? '';
     const diffBytes = Buffer.byteLength(diff);
     if (diffBytes > LIMITS.diffBytes) return refuse(`the diff is ${diffBytes} bytes; the limit is ${LIMITS.diffBytes}`, { turns, tests: testsRecord });
-    if (leaksSecret(diff, runSecrets(ctx)) || fileWithSecret(root, st.keep, runSecrets(ctx))) {
+    // The index is what the bundle carries: a clean filter (a .gitattributes rule and a .git/config
+    // entry a command can write) can stage bytes the working tree does not have.
+    if (leaksSecret(diff, runSecrets(ctx)) || fileWithSecret(root, st.keep, runSecrets(ctx)) || stagedWithSecret(root, cenv, st.keep, runSecrets(ctx))) {
       return refuse('The change carried a credential of this run, so nothing is committed.', { turns });
     }
     const common = { turns, tests: testsRecord, files: st.keep };
