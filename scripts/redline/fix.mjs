@@ -21,8 +21,12 @@
 //   - fix_write stays inside the checkout (symlinks resolved) and never touches .github/: a
 //     workflow change from this lane would run with the PR's own permissions on the next push.
 //   - A file the repository marks `redline-protected` in .gitattributes (captured payloads,
-//     vendored code, recorded fixtures) is never written or staged, and no .gitattributes is
-//     written, so a run cannot lift the mark first.
+//     vendored code, recorded fixtures) is never written by fix_write and never enters the commit.
+//     The marks are read from the reviewed head's tree before the install runs and judged in a
+//     scratch repository, never in the checkout, so a command that empties a .gitattributes, or
+//     stages or commits on its own, cannot lift one. A command may still change a protected file
+//     on disk; the commit starts again from the reviewed head and leaves that change out. No
+//     .gitattributes is written or committed.
 //   - run takes an allowlist only, without a shell: the package.json test, lint, typecheck and
 //     build scripts through the detected package manager, and node <file> inside the checkout.
 //     Commands run as the runner's account with a scrubbed environment: the GitHub token and the
@@ -616,12 +620,41 @@ function git(cwd, env, args, { allowFail = false } = {}) {
   return r.status === 0 ? String(r.stdout ?? '').replace(/\n$/, '') : null;
 }
 
-/** The given paths that the checkout marks redline-protected. Throws when git cannot say. */
-function protectedPaths(root, env, paths) {
+/**
+ * The reviewed head's .gitattributes files as { path: text }, read from its tree, not from the
+ * checkout. Taken before the install runs; every redline-protected decision after that is made
+ * against this snapshot. A symlinked .gitattributes is skipped, as git skips it.
+ */
+function headAttributes(root, env, headSha) {
+  const out = {};
+  for (const row of (git(root, env, ['ls-tree', '-r', '-z', headSha]) ?? '').split('\0')) {
+    const tab = row.indexOf('\t');
+    const [mode, type] = row.slice(0, tab).split(' ');
+    const p = row.slice(tab + 1);
+    if (tab < 0 || type !== 'blob' || !['100644', '100755'].includes(mode) || !/(?:^|\/)\.gitattributes$/.test(p)) continue;
+    out[p] = git(root, env, ['cat-file', 'blob', `${headSha}:${p}`]) ?? '';
+  }
+  return out;
+}
+
+/**
+ * The given paths that `attrs` (headAttributes) marks redline-protected. git decides, in a fresh
+ * scratch repository holding only those files, with no global or system config, so nothing a
+ * command did to the checkout or its .git reaches the answer. Throws when git cannot say.
+ */
+export function protectedPaths(attrs, paths) {
   if (!paths.length) return new Set();
-  const r = spawnSync('git', ['check-attr', '-z', PROTECTED_ATTR, '--', ...paths], { cwd: root, env, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 });
-  if (r.status !== 0) throw new Error(`git check-attr failed: ${(r.stderr || r.error?.message || '').trim().slice(0, 200)}`);
-  return protectedFromCheckAttr(r.stdout);
+  const dir = mkdtempSync(join(tmpdir(), 'redline-attrs-'));
+  try {
+    const env = { ...childEnv(process.env, dir), XDG_CONFIG_HOME: dir, GIT_CONFIG_NOSYSTEM: '1' };
+    git(dir, env, ['init', '-q']);
+    for (const [p, text] of Object.entries(attrs)) { mkdirSync(dirname(join(dir, p)), { recursive: true }); writeFileSync(join(dir, p), text); }
+    const r = spawnSync('git', ['check-attr', '-z', PROTECTED_ATTR, '--', ...paths], { cwd: dir, env, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 });
+    if (r.status !== 0) throw new Error(`git check-attr failed: ${(r.stderr || r.error?.message || '').trim().slice(0, 200)}`);
+    return protectedFromCheckAttr(r.stdout);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 }
 
 /** Paths git sees as changed (tracked or untracked, ignored files excluded), forward slashes. */
@@ -683,6 +716,8 @@ export async function runFix(ctx) {
   try {
     if (git(root, cenv, ['rev-parse', 'HEAD'], { allowFail: true }) !== headSha) return refuse('the checkout is not at the reviewed head');
     if (changedPaths(root, cenv).length) return refuse('the checkout is not clean');
+    // The marks as the reviewed head has them, before any command can touch the checkout.
+    const attrs = headAttributes(root, cenv, headSha);
 
     // Toolchain: detected once, installed once, before the model sees anything.
     const rootFiles = readdirSync(root);
@@ -702,7 +737,7 @@ export async function runFix(ctx) {
     const sizeOf = (p) => { try { return statSync(join(root, p)).size; } catch { return 0; } };
     const staged = () => {
       const changed = changedPaths(root, cenv);
-      return stageable(changed, { installDirty, written, sizeOf, protectedSet: protectedPaths(root, cenv, changed) });
+      return stageable(changed, { installDirty, written, sizeOf, protectedSet: protectedPaths(attrs, changed) });
     };
     const runs = [];
     let seq = 0;
@@ -722,7 +757,7 @@ export async function runFix(ctx) {
           if (Buffer.byteLength(content) > LIMITS.writeBytes) return `error: content is larger than ${LIMITS.writeBytes} bytes`;
           const rel = relative(realpathSync(root), abs).split(sep).join('/');
           const landing = landingPath(root, abs);
-          const marked = protectedPaths(root, cenv, [...new Set([rel, landing])]);
+          const marked = protectedPaths(attrs, [...new Set([rel, landing])]);
           if (marked.has(rel) || marked.has(landing)) return `error: ${landing} is marked ${PROTECTED_ATTR} in .gitattributes: it is captured data and is never edited here. Leave it as it is and say in the summary that this finding is about data the fix lane does not change`;
           const now = staged().keep;
           if (!now.includes(rel) && now.length >= LIMITS.files) return `error: the fix already changes ${now.length} files, the limit; no further file is written`;
@@ -764,7 +799,7 @@ export async function runFix(ctx) {
       return { sub: checked.sub };
     };
 
-    const protectedFiles = [...protectedPaths(root, cenv, files.map((f) => f.filename))];
+    const protectedFiles = [...protectedPaths(attrs, files.map((f) => f.filename))];
     const brief = buildBrief({ pr, files, headSha, review, items, plan, installNote, diff: buildDiff(files, LIMITS.diffChars), protectedFiles });
     const loop = await runLoop({
       call: (messages, toolChoice) => callModelWith(ctx, { system: ctx.system, messages, tools: TOOLS, toolChoice, maxTokens: LIMITS.maxTokens, timeoutMs: LIMITS.modelTimeoutMs }),
@@ -779,6 +814,9 @@ export async function runFix(ctx) {
     const sub = loop.sub;
     if (sub.outcome === 'refused') return refuse(sub.reason, { turns, tests: testsRecord });
 
+    // A command may have staged or committed on its own. The commit starts again from the reviewed
+    // head's index, so what is staged below is the whole of it.
+    git(root, cenv, ['reset', '-q', headSha]);
     const st = staged();
     if (!st.keep.length) {
       return { record: fixRecord({ ...base, outcome: 'no_change', turns, tests: testsRecord, notes: renderNotes({ outcome: 'no_change', summary: sub.summary, skipped: st.skipped, tests: testsRecord }) }) };
@@ -808,6 +846,11 @@ export async function runFix(ctx) {
     const message = git(root, cenv, ['log', '-1', '--format=%B']) ?? '';
     if (hasAttributionTrailer(message)) throw new Error('the commit message carries an attribution trailer');
     const newHead = git(root, cenv, ['rev-parse', 'HEAD']);
+    // The commit holds the kept paths and nothing protected, checked on the commit itself.
+    const landed = (git(root, cenv, ['diff', '--name-only', '-z', '--no-renames', headSha, 'HEAD']) ?? '').split('\0').filter(Boolean);
+    const stray = landed.filter((p) => !st.keep.includes(p) || /(?:^|\/)\.gitattributes$/.test(p) || /^\.github(?:\/|$)/.test(p));
+    const marked = protectedPaths(attrs, landed);
+    if (stray.length || marked.size) throw new Error(`the commit carries a path the fix lane leaves out: ${[...new Set([...stray, ...marked])].join(', ').slice(0, 300)}`);
     const commits = (git(root, cenv, ['log', '--format=%H%x00%s', `${headSha}..HEAD`]) ?? '').split('\n').filter(Boolean)
       .map((l) => { const [sha, subject] = l.split('\0'); return { sha, subject }; }).reverse();
     const bundle = join(out, 'fix.bundle');
