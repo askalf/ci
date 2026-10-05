@@ -16,8 +16,13 @@ name: Redline pin bump
 on:
   push:
     branches: [main]
+    # What a caller runs: the scripts the reusable workflows fetch, and the workflows. The tests,
+    # their fixtures and the README change nothing a caller runs, so they move no pin.
     paths:
       - scripts/redline/**
+      - '!scripts/redline/*.test.mjs'
+      - '!scripts/redline/test-fixtures/**'
+      - '!scripts/redline/README.md'
       - .github/workflows/redline-review.yml
       - .github/workflows/redline-fix-run.yml
       - .github/workflows/redline-pin-bump.yml

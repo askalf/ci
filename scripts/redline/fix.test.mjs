@@ -464,6 +464,16 @@ if (!gitOk) {
     rmSync(repo.dir, { recursive: true, force: true });
   }
   {
+    // A NUL makes the file binary, so the diff carries it base85-encoded; the file's own bytes are checked.
+    const KEY = 'dk_live_0123456789';
+    const repo = makeRepo();
+    const w = world(repo, { turns: [tool('fix_write', { path: 'src/blob.bin', content: `\u0000${KEY}\u0000` }), finish()] });
+    const { record: r } = await runFix({ ...w.ctx, darioKey: KEY });
+    check('a binary file that carries the key is refused, with no bundle', r.outcome === 'refused' && /credential/.test(r.notes) && !existsSync(join(w.out, 'fix.bundle')) && fixProblem(r) === null);
+    rmSync(w.out, { recursive: true, force: true });
+    rmSync(repo.dir, { recursive: true, force: true });
+  }
+  {
     const KEY = 'dk_live_0123456789';
     const repo = makeRepo();
     const w = world(repo, { turns: [tool('fix_write', { path: 'src/b.js', content: FIXED_B }), finish({ summary: `Used ${KEY} to check it.` })] });
@@ -600,14 +610,28 @@ if (!gitOk) {
       rmSync(repo.dir, { recursive: true, force: true });
     }
     {
-      // The clock jumps past hardMs after the edit: the suite is not started, and a fix is never
-      // reported without one.
+      // The clock jumps past hardMs after the edit: the suite is not started (the bounce says why),
+      // no model call starts after it, and the run is refused, never fixed.
       let late = false;
       let t = 0;
       const repo = makeRepo({ pkg: { name: 'r', private: true, scripts: { test: 'node test.mjs' } } });
       const w = world(repo, { turns: [tool('fix_write', { path: 'src/b.js', content: FIXED_B }), () => { late = true; return finish(); }] });
       const { record: r } = await runFix({ ...w.ctx, now: () => (late ? LIMITS.hardMs + 60_000 : 0) + (t += 1) });
-      check('no time left for the suite after the last edit: tests_failed, never fixed', r.outcome === 'tests_failed' && r.tests.exit_code === 124 && /time budget/.test(JSON.stringify(w.calls.model.at(-1).messages)) && !existsSync(join(w.out, 'fix.bundle')) && fixProblem(r) === null);
+      check('no time left for the suite, nor for another model call: refused, never fixed', r.outcome === 'refused' && /time budget/.test(r.notes) && w.calls.model.length === 2 && !existsSync(join(w.out, 'fix.bundle')) && !existsSync(join(w.out, 'diff.patch')) && fixProblem(r) === null);
+      rmSync(w.out, { recursive: true, force: true });
+      rmSync(repo.dir, { recursive: true, force: true });
+    }
+    {
+      // A file changed by a node <file> after the passing run makes that run stale: the suite runs
+      // again on the files as they are, and fails.
+      const repo = makeRepo({ pkg: { name: 'r', private: true, scripts: { test: 'node test.mjs' } } });
+      const w = world(repo, { turns: [
+        tool('fix_write', { path: 'src/b.js', content: FIXED_B }),
+        tool('fix_write', { path: 'mutate.mjs', content: "import { writeFileSync } from 'node:fs';\nwriteFileSync('test.mjs', 'process.exit(1);\\n');\n" }),
+        tool('fix_run', { command: 'npm test' }), tool('fix_run', { command: 'node mutate.mjs' }), finish(), finish(),
+      ] });
+      const { record: r } = await runFix(w.ctx);
+      check('a change made by node <file> after the tests is tested again, never passed on the old run', r.outcome === 'tests_failed' && r.tests.exit_code === 1 && !existsSync(join(w.out, 'fix.bundle')) && fixProblem(r) === null);
       rmSync(w.out, { recursive: true, force: true });
       rmSync(repo.dir, { recursive: true, force: true });
     }
@@ -797,6 +821,7 @@ console.log('\n  pin bump, both callers');
   const bump = readFileSync(fileURLToPath(new URL('../../.github/workflows/redline-pin-bump.yml', import.meta.url)), 'utf8');
   check('the bump workflow rewrites both caller paths with pin.mjs', /CALLER_PATHS: .*redline\.yml .*redline-fix\.yml/.test(bump.replace(/\n\s+/g, ' ')) && bump.includes('node scripts/redline/pin.mjs "$SHA" "$note"') && /redline-\(review\|fix-run\)\.yml/.test(bump));
   check('the bump workflow runs when the fix workflow changes', /- \.github\/workflows\/redline-fix-run\.yml/.test(bump));
+  check('the tests, their fixtures and the README move no pin', ["- '!scripts/redline/*.test.mjs'", "- '!scripts/redline/test-fixtures/**'", "- '!scripts/redline/README.md'"].every((l) => bump.includes(l)) && bump.indexOf("'!scripts/redline/") > bump.indexOf('- scripts/redline/**'));
   const selfTest = readFileSync(fileURLToPath(new URL('../../.github/workflows/redline-self-test.yml', import.meta.url)), 'utf8');
   // `test` is a required check, so it must report on every PR: no paths filter, which would leave a
   // PR outside the paths with a check that never runs.

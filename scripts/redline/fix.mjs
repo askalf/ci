@@ -55,12 +55,13 @@
 // there is no bundled fallback, and a variable that is unset, a file that cannot be read or an empty
 // file ends the run.
 
-import { readFileSync, writeFileSync, mkdirSync, rmSync, existsSync, lstatSync, realpathSync, statSync, readdirSync, appendFileSync, mkdtempSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, rmSync, existsSync, lstatSync, realpathSync, statSync, readdirSync, appendFileSync, mkdtempSync, readlinkSync } from 'node:fs';
 import { join, resolve, relative, dirname, sep, posix } from 'node:path';
 import { tmpdir } from 'node:os';
+import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
-import { parseEnvFile, readPrompt, safePath, runTool as readTool, rejectsForcedToolChoice, metaPhrase, gh, ghAll, callModelWith, buildDiff } from './review.mjs';
+import { parseEnvFile, readPrompt, safePath, runTool as readTool, rejectsForcedToolChoice, metaPhrase, gh, ghAll, callModelWith, buildDiff, OutOfTime } from './review.mjs';
 
 export const AUTHOR = { name: 'askalf', email: '263217947+askalf@users.noreply.github.com' };
 export const DEFAULT_MODEL = 'claude-opus-5-5';
@@ -368,6 +369,24 @@ export function runSecrets(ctx) {
 export function leaksSecret(text, secrets) {
   const t = String(text ?? '');
   return secrets.some((v) => t.includes(v));
+}
+
+/**
+ * The first of paths (relative to root) whose raw bytes carry a secret, or null. A binary file
+ * reaches the diff base85-encoded, so the diff text alone cannot show it; the files themselves can.
+ */
+export function fileWithSecret(root, paths, secrets) {
+  if (!secrets.length) return null;
+  for (const p of paths) {
+    let bytes;
+    try {
+      const abs = join(root, p);
+      const st = lstatSync(abs);
+      bytes = st.isSymbolicLink() ? Buffer.from(readlinkSync(abs)) : st.isFile() ? readFileSync(abs) : null;
+    } catch { bytes = null; }
+    if (bytes && secrets.some((v) => bytes.includes(v))) return p;
+  }
+  return null;
 }
 
 /** text with every secret replaced by ***, for the job log. */
@@ -692,10 +711,30 @@ async function answerReview(ctx) {
     const staged = () => stageable(changedPaths(root, cenv), { installDirty, written, sizeOf });
     const runs = [];
     let seq = 0;
-    let lastWrite = 0;
+    // The worktree's changed paths and their bytes, hashed: a test run counts for the fix only
+    // while the stamp it left is the current one, however the files changed since (fix_write, or
+    // a node <file> the model ran).
+    const stamp = () => {
+      const h = createHash('sha256');
+      for (const p of changedPaths(root, cenv).sort()) {
+        h.update(`${p}\0`);
+        try {
+          const abs = join(root, p);
+          const s = lstatSync(abs);
+          h.update(s.isSymbolicLink() ? `link:${readlinkSync(abs)}` : s.isFile() ? readFileSync(abs) : 'other');
+        } catch { h.update('gone'); }
+        h.update('\0');
+      }
+      return h.digest('hex');
+    };
     const testArgv = plan.pm && plan.scripts.includes('test') ? [plan.pm, 'test'] : null;
     const isTest = (argv) => testArgv !== null && argv[0] === testArgv[0] && (argv[1] === 'test' || (argv[1] === 'run' && argv[2] === 'test'));
-    const record = (argv, r) => { const row = { command: argv.join(' '), exit: r.exit, out: r.out, timedOut: r.timedOut, seq: ++seq, isTest: isTest(argv) }; runs.push(row); return row; };
+    const record = (argv, r) => {
+      const row = { command: argv.join(' '), exit: r.exit, out: r.out, timedOut: r.timedOut, seq: ++seq, isTest: isTest(argv) };
+      if (row.isTest) row.stamp = stamp();
+      runs.push(row);
+      return row;
+    };
 
     const tool = (name, input) => {
       if (name === 'fix_list') return readTool(root, 'redline_list', input);
@@ -712,7 +751,6 @@ async function answerReview(ctx) {
           mkdirSync(dirname(abs), { recursive: true });
           writeFileSync(abs, content);
           written.add(rel);
-          lastWrite = ++seq;
           return `wrote ${rel} (${content.split('\n').length} lines)`;
         } catch (e) { return `error: ${e.message}`; }
       }
@@ -734,8 +772,9 @@ async function answerReview(ctx) {
       if (checked.error) return checked;
       if (checked.sub.outcome === 'refused') return { sub: checked.sub };
       if (testArgv && staged().keep.length) {
-        // The suite runs after the last edit, by the model or, failing that, here.
-        let t = [...runs].reverse().find((r) => r.isTest && r.seq > lastWrite);
+        // The suite runs on the files as they are now, by the model or, failing that, here.
+        const now = stamp();
+        let t = [...runs].reverse().find((r) => r.isTest && r.stamp === now);
         if (!t) {
           const s = secondsLeft(LIMITS.runMaxS);
           ctx.log?.(s ? '  no test run after the last edit: running the test script' : '  no test run after the last edit, and no time left to run one');
@@ -754,11 +793,18 @@ async function answerReview(ctx) {
     };
 
     const brief = buildBrief({ pr, files, headSha, review, items, plan, installNote, diff: buildDiff(files, LIMITS.diffChars) });
-    const loop = await runLoop({
-      call: (messages, toolChoice) => callModelWith(ctx, { system: ctx.system, messages, tools: TOOLS, toolChoice, maxTokens: LIMITS.maxTokens,
-        timeoutMs: Math.max(30_000, Math.min(LIMITS.modelTimeoutMs, deadline - ctx.now())) }),
-      tool: async (name, input) => tool(name, input), finalize, now: ctx.now, started, log: ctx.log, canForce: !rejectsForcedToolChoice(ctx.model),
-    }, brief);
+    let loop;
+    let calls = 0;
+    try {
+      loop = await runLoop({
+        call: (messages, toolChoice) => (calls++, callModelWith(ctx, { system: ctx.system, messages, tools: TOOLS, toolChoice, maxTokens: LIMITS.maxTokens, timeoutMs: LIMITS.modelTimeoutMs, deadline })),
+        tool: async (name, input) => tool(name, input), finalize, now: ctx.now, started, log: ctx.log, canForce: !rejectsForcedToolChoice(ctx.model),
+      }, brief);
+    } catch (e) {
+      // Past hardMs no model call starts: nothing is reported as fixed without the model finishing.
+      if (e instanceof OutOfTime) return refuse(`The time budget was spent before the fix finished (${e.message}).`, { turns: calls });
+      throw e;
+    }
     const turns = loop.turns;
     const testsRecord = tests ? {
       command: tests.command, exit_code: tests.exit, summary: summariseTests(tests.out),
@@ -777,7 +823,9 @@ async function answerReview(ctx) {
     const diff = git(root, cenv, ['diff', '--cached', '--binary', headSha]) ?? '';
     const diffBytes = Buffer.byteLength(diff);
     if (diffBytes > LIMITS.diffBytes) return refuse(`the diff is ${diffBytes} bytes; the limit is ${LIMITS.diffBytes}`, { turns, tests: testsRecord });
-    if (leaksSecret(diff, runSecrets(ctx))) return refuse('The change carried a credential of this run, so nothing is committed.', { turns });
+    if (leaksSecret(diff, runSecrets(ctx)) || fileWithSecret(root, st.keep, runSecrets(ctx))) {
+      return refuse('The change carried a credential of this run, so nothing is committed.', { turns });
+    }
     const common = { turns, tests: testsRecord, files: st.keep };
     const notes = (outcome) => renderNotes({ outcome, summary: sub.summary, files: st.keep, skipped: st.skipped, tests: testsRecord });
 

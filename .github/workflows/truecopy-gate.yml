@@ -2,9 +2,8 @@
 # written from TOOLS in review.mjs) and the fixer's (scripts/redline/fix-tools.json, from TOOLS in
 # fix.mjs), both pinned in truecopy.lock. The chain is code -> manifest (--check) -> lock
 # (truecopy verify): a change to a tool fails until it is re-pinned with `truecopy add`, which
-# poison-scans it first. The system prompts are not in the lock: they are files on the runner hosts
-# (/etc/askalf/redline-prompt.md, /etc/askalf/fix-prompt.md), never in this repository, so there is
-# nothing here to pin.
+# poison-scans it first. The system prompts are not in the lock: they are installed on the runner
+# hosts, never in this repository, so there is nothing here to pin.
 name: truecopy gate
 
 on:

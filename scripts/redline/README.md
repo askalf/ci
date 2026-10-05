@@ -34,7 +34,8 @@ checks that the checkout is exactly the reviewed head, then `fix.mjs`:
 - lets the model `fix_list`, `fix_read`, `fix_search`, `fix_write` (inside the checkout, never
   under `.github/`) and `fix_run` an allowlist only: the package.json `test`, `lint`, `typecheck`
   and `build` scripts and `node <file>`, without a shell, in a scrubbed environment;
-- runs the test script at least once after the last edit; a failing suite is bounced to the
+- runs the test script on the files as they finally are, however they were changed (a test run
+  goes stale when a file changes after it, by `fix_write` or by a `node <file>`); a failing suite is bounced to the
   model once, then reported. The bounce, `fix.json` (`tests.failing`) and the notes name the failed
   tests the output reports (TAP `not ok`, jest/vitest `FAIL`); the gate is the exit code alone;
 - commits everything changed except `.github/**`, files over 1 MB and what the install dirtied, as
@@ -45,7 +46,7 @@ checks that the checkout is exactly the reviewed head, then `fix.mjs`:
 
 Limits: 40 turns, 30 files, 400 KB of diff; past any of them the outcome is `refused`. Wall time
 counts from the start of the run, install included: at 45 minutes the model must call `finish_fix`,
-and no command or test runs past 52 minutes; a suite there was no time to run counts as failed. A
+and no command, test or model call starts past 52 minutes; a run out of time is `refused`, never `fixed`. A
 job killed at its 60-minute timeout still uploads a `fix.json` that says so. The job exits 0 only
 for `fixed`. `fix-tools.json` is the fixer's `TOOLS` as a file, pinned in `truecopy.lock` like the
 reviewer's. The artifact is `redline-fix`. Nothing on the runner can push:

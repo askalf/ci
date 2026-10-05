@@ -48,8 +48,8 @@ Next to the prompts the hosts hold the credential files the scripts read (`/etc/
 
 ## The pin bump
 
-A push to `main` that changes `scripts/redline/` or one of the reusable workflows runs
-`redline-pin-bump.yml`. It rewrites `redline.yml` and, where a repository has one, `redline-fix.yml` in
+A push to `main` that changes what a caller runs, `scripts/redline/` (its tests, test fixtures and
+README aside) or one of the reusable workflows, runs `redline-pin-bump.yml`. It rewrites `redline.yml` and, where a repository has one, `redline-fix.yml` in
 every caller in its `CALLERS` list through `pin.mjs`, one commit per caller file on `bot/redline-pin`,
 and opens or updates one pull request per repository. Each repository's own gate reviews and merges the
 bump. This repository is in the list: its own `redline.yml` moves the same way. The job needs

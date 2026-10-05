@@ -12,6 +12,7 @@ import {
   verdictRecord, verdictProblem, saveVerdict, VERDICT_VERSION,
 } from './review.mjs';
 import * as reviewModule from './review.mjs';
+import { withRetry, OutOfTime } from './review.mjs';
 import { bumpCaller, REVIEW_WORKFLOW } from './pin.mjs';
 
 let pass = 0;
@@ -95,6 +96,24 @@ check('an unknown tool is an error, not a throw', /unknown tool/.test(runTool(ro
   check('a search that runs away is stopped at the cap and says so', /was stopped/.test(r) && took < 10_000);
   check('a quick search in the same tree still answers', runTool(slow, 'redline_search', { pattern: '^a{3}' }) === `x.txt:1: ${'a'.repeat(40)}b`);
   rmSync(slow, { recursive: true, force: true });
+}
+
+console.log('\n  retries inside a deadline');
+{
+  let t = 0;
+  const ctx = { now: () => t, sleep: async (ms) => { t += ms; } };
+  const seen = [];
+  // Every attempt times out after the whole of the time it was given.
+  const e = await throws(() => withRetry(ctx, 'model', async (left) => { seen.push(left); t += Math.min(left, 240_000); throw new Error('timed out'); }, 300_000));
+  check('each attempt is given only the time left, and no retry starts or waits past the deadline',
+    e instanceof OutOfTime && seen[0] === 300_000 && seen.every((l, i) => i === 0 || l < seen[i - 1]) && t <= 300_000);
+  t = 0;
+  const late = await throws(() => withRetry(ctx, 'model', async () => ({ ok: true }), -1));
+  check('a call after the deadline is not made', late instanceof OutOfTime && /time budget is spent/.test(late.message));
+  t = 0;
+  let calls = 0;
+  const ok = await withRetry(ctx, 'model', async () => (++calls < 2 ? { ok: false, status: 503, text: async () => '' } : { ok: true }));
+  check('with no deadline the retries are as before', ok.ok && calls === 2 && t === 5_000);
 }
 
 console.log('\n  diff, brief and grounding');

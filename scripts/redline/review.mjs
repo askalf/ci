@@ -102,8 +102,8 @@ export const LIMITS = {
   readLines: 400, readBytes: 64_000, listEntries: 400,
   grepResults: 80, grepFiles: 5_000, grepFileBytes: 1_000_000, grepPattern: 200, searchMs: 10_000,
   corpusBytes: 8_000_000,
-  // timeMs forces the submit; hardMs bounds each model call so the run ends inside the job's
-  // 20-minute timeout.
+  // timeMs forces the submit; past hardMs no model call starts or retries, so the run ends inside
+  // the job's 20-minute timeout.
   turns: 30, forceSubmitAt: 24, timeMs: 12 * 60_000, hardMs: 18 * 60_000, maxTokens: 8_000, modelTimeoutMs: 240_000,
   textOnlyTurns: 3,
 };
@@ -449,13 +449,21 @@ export class ModelParked extends Error {
   }
 }
 
+/** A call that would start, or wait to retry, past the run's deadline. */
+export class OutOfTime extends Error {}
+
 // Shared with fix.mjs: the same retry, GitHub read and model call serve the review and the fix.
-export async function withRetry(ctx, what, fn) {
+// deadline is an absolute ctx.now() time: no attempt starts and no retry waits past it, and fn
+// gets the milliseconds left so each attempt's own timeout can stop there too.
+export async function withRetry(ctx, what, fn, deadline = Infinity) {
   const waits = [5_000, 15_000, 45_000];
+  const left = () => deadline - (ctx.now ?? Date.now)();
   for (let attempt = 0; ; attempt++) {
+    if (left() <= 0) throw new OutOfTime(`${what}: the time budget is spent`);
     let res;
-    try { res = await fn(); } catch (e) {
+    try { res = await fn(left()); } catch (e) {
       if (attempt >= waits.length) throw new Error(`${what}: ${e.message}`);
+      if (left() <= waits[attempt]) throw new OutOfTime(`${what}: ${e.message}; no time left to retry`);
       await ctx.sleep(waits[attempt]); continue;
     }
     if (res.ok) return res;
@@ -465,7 +473,10 @@ export async function withRetry(ctx, what, fn) {
       const budget = waits.slice(attempt).reduce((a, b) => a + b, 0);
       if (!(retryAfterMs > 0) || retryAfterMs > budget) throw new ModelParked(what, retryAfterMs, (await res.text()).slice(0, 300));
     }
-    if ((res.status === 429 || res.status >= 500) && attempt < waits.length) { await ctx.sleep(waits[attempt]); continue; }
+    if ((res.status === 429 || res.status >= 500) && attempt < waits.length) {
+      if (left() <= waits[attempt]) throw new OutOfTime(`${what}: HTTP ${res.status}; no time left to retry`);
+      await ctx.sleep(waits[attempt]); continue;
+    }
     throw new Error(`${what}: HTTP ${res.status} ${(await res.text()).slice(0, 300)}`);
   }
 }
@@ -490,16 +501,16 @@ export async function ghAll(ctx, path, max = 30) {
 }
 
 /** One Messages call through dario. The key travels in a header, never in argv or a URL. */
-export async function callModelWith(ctx, { system, messages, tools, toolChoice, maxTokens = LIMITS.maxTokens, timeoutMs = LIMITS.modelTimeoutMs }) {
-  const res = await withRetry(ctx, 'model', () => ctx.fetch(`${ctx.darioUrl.replace(/\/+$/, '')}/v1/messages`, {
+export async function callModelWith(ctx, { system, messages, tools, toolChoice, maxTokens = LIMITS.maxTokens, timeoutMs = LIMITS.modelTimeoutMs, deadline = Infinity }) {
+  const res = await withRetry(ctx, 'model', (leftMs) => ctx.fetch(`${ctx.darioUrl.replace(/\/+$/, '')}/v1/messages`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-api-key': ctx.darioKey, 'anthropic-version': '2023-06-01' },
     body: JSON.stringify({
       model: ctx.model, max_tokens: maxTokens, system, messages, tools,
       ...(toolChoice ? { tool_choice: toolChoice } : {}),
     }),
-    signal: AbortSignal.timeout(timeoutMs),
-  }));
+    signal: AbortSignal.timeout(Math.max(1, Math.floor(Math.min(timeoutMs, leftMs)))),
+  }), deadline);
   return res.json();
 }
 
@@ -580,7 +591,7 @@ export async function runReview(ctx) {
       res = await callModelWith(ctx, {
         system: ctx.system, messages, tools: TOOLS,
         toolChoice: !force ? null : canForce ? { type: 'tool', name: 'redline_submit' } : { type: 'auto' },
-        timeoutMs: Math.max(30_000, Math.min(LIMITS.modelTimeoutMs, deadline - ctx.now())),
+        deadline,
       });
     } catch (e) {
       if (!(e instanceof ModelParked) || !ctx.fallbackModel || ctx.fallbackModel === ctx.model) throw e;
