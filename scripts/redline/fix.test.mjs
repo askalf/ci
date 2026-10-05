@@ -9,6 +9,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
   parseReviewUrl, parseReviewBody, inlineItems, formatFinding, detectRunner, allowedCommands, allowedArgv, safeWritePath, stageable,
+  protectedFromCheckAttr, PROTECTED_ATTR,
   commitSubject, hasAttributionTrailer, neutraliseRefs, cleanNotes, summariseTests, renderNotes, fixRecord, fixProblem, saveFix,
   failingTests, FAILING_NAMES_MAX,
   TOOLS, FINISH_REQUIRED, askForFinish, checkFinish, runLoop, buildBrief, childEnv, onlyOrigins, runFix,
@@ -155,6 +156,17 @@ console.log('\n  the write sandbox');
   check('a directory is refused', /directory/.test(err('src')));
   check('the checkout root itself is refused', /outside/.test(err('')) && /outside/.test(err('.')));
   if (symlinked) check('a symlink is refused', /symlink/.test(err('leak.txt')));
+  check('a .gitattributes is refused, at any depth', /gitattributes/.test(err('.gitattributes')) && /gitattributes/.test(err('src/.gitattributes')));
+}
+
+console.log('\n  redline-protected files');
+{
+  const raw = ['src/cc-template-data.json', PROTECTED_ATTR, 'set', 'src/a.js', PROTECTED_ATTR, 'unspecified',
+    'b.json', PROTECTED_ATTR, 'unset', 'c.json', PROTECTED_ATTR, 'captured', 'd.json', PROTECTED_ATTR, 'false', ''].join('\0');
+  const got = protectedFromCheckAttr(raw);
+  check('set and valued paths are protected', got.has('src/cc-template-data.json') && got.has('c.json'));
+  check('unspecified, unset and false are not', !got.has('src/a.js') && !got.has('b.json') && !got.has('d.json') && got.size === 2);
+  check('empty output protects nothing', protectedFromCheckAttr('').size === 0);
 }
 
 console.log('\n  what gets staged');
@@ -166,6 +178,9 @@ console.log('\n  what gets staged');
     r.skipped.map((s) => s.path).join() === '.github/workflows/ci.yml,package-lock.json,big.bin'
     && /\.github/.test(r.skipped[0].why) && /install/.test(r.skipped[1].why) && /larger/.test(r.skipped[2].why));
   check('a path the install dirtied that the model then wrote is the fix', r.keep.includes('src/new.js'));
+  const q = stageable(['src/a.js', 'src/data.json', '.gitattributes', 'lib/.gitattributes'], { protectedSet: new Set(['src/data.json']) });
+  check('a protected path and any .gitattributes are left out, each with its reason',
+    q.keep.join() === 'src/a.js' && q.skipped.map((x) => `${x.path}:${x.why}`).join('|') === `src/data.json:marked ${PROTECTED_ATTR}|.gitattributes:a .gitattributes|lib/.gitattributes:a .gitattributes`);
 }
 
 console.log('\n  the commit subject');
@@ -435,6 +450,28 @@ if (!gitOk) {
     check('a read outside is refused', /outside/.test(result(7)));
     check('nothing was written, so the outcome is no_change with no bundle', r.outcome === 'no_change' && !existsSync(join(w.out, 'fix.bundle')) && !existsSync(join(repo.dir, '..', 'escape.js')) && fixProblem(r) === null);
     check('no_change notes say so', /No file changed/.test(r.notes));
+    rmSync(w.out, { recursive: true, force: true });
+    rmSync(repo.dir, { recursive: true, force: true });
+  }
+
+  console.log('\n  runFix: a file the repository marks redline-protected');
+  {
+    const repo = makeRepo();
+    writeFileSync(join(repo.dir, '.gitattributes'), `src/b.js ${PROTECTED_ATTR}\n`);
+    sh(repo.dir, ['add', '-A']);
+    sh(repo.dir, ['-c', 'user.name=t', '-c', 'user.email=t@x', 'commit', '-q', '-m', 'chore: mark the captured file']);
+    repo.head = sh(repo.dir, ['rev-parse', 'HEAD']);
+    const w = world(repo, { turns: [
+      tool('fix_write', { path: 'src/b.js', content: FIXED_B }), tool('fix_write', { path: '.gitattributes', content: '' }),
+      tool('fix_write', { path: 'src/c.js', content: 'export const c = 1;\n' }), finish({ summary: 'Adds `src/c.js`; the finding about `src/b.js` is about captured data, left as it is.' }),
+    ] });
+    const { record: r } = await runFix(w.ctx);
+    const result = (i) => JSON.stringify(w.calls.model[i].messages.at(-1));
+    check('the brief names the protected file', w.calls.model[0].messages[0].content.includes(`marked ${PROTECTED_ATTR}`) && w.calls.model[0].messages[0].content.includes('src/b.js'));
+    check('a write to the protected file is refused at the tool', new RegExp(`src/b.js is marked ${PROTECTED_ATTR}`).test(result(1)));
+    check('a write to .gitattributes is refused, so the mark cannot be lifted first', /gitattributes is never written/.test(result(2)));
+    check('the protected file is unchanged on disk', readFileSync(join(repo.dir, 'src', 'b.js'), 'utf8') === 'export const token = process.env.X;\nconst y = 2;\n');
+    check('the fix commits the other file only', r.outcome === 'fixed' && r.files.join() === 'src/c.js' && fixProblem(r) === null);
     rmSync(w.out, { recursive: true, force: true });
     rmSync(repo.dir, { recursive: true, force: true });
   }

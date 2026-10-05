@@ -20,6 +20,9 @@
 //     review on another PR, a moved head or a fork PR is refused before the model is called.
 //   - fix_write stays inside the checkout (symlinks resolved) and never touches .github/: a
 //     workflow change from this lane would run with the PR's own permissions on the next push.
+//   - A file the repository marks `redline-protected` in .gitattributes (captured payloads,
+//     vendored code, recorded fixtures) is never written or staged, and no .gitattributes is
+//     written, so a run cannot lift the mark first.
 //   - run takes an allowlist only, without a shell: the package.json test, lint, typecheck and
 //     build scripts through the detected package manager, and node <file> inside the checkout.
 //     Commands run as the runner's account with a scrubbed environment: the GitHub token and the
@@ -197,6 +200,25 @@ export function allowedArgv(command, plan, root) {
 // ---------- the filesystem ----------
 
 /**
+ * The attribute a repository sets on files that are data, not code: a payload captured from a
+ * live system and rebuilt by a script, vendored code, a recorded fixture. Their text is what was
+ * captured, so a review finding about it is answered by declining that finding, never by an edit
+ * (dario's src/cc-template-data.json is Claude Code's own request as captured; a hand edit would
+ * change the wire dario sends). A repository opts a path in with `<pattern> redline-protected`.
+ */
+export const PROTECTED_ATTR = 'redline-protected';
+
+/** The paths `git check-attr -z redline-protected -- <paths>` reports as set or valued. Pure. */
+export function protectedFromCheckAttr(raw) {
+  const f = String(raw ?? '').split('\0');
+  const out = new Set();
+  for (let i = 0; i + 2 < f.length; i += 3) {
+    if (f[i] && !['unspecified', 'unset', 'false'].includes(f[i + 2])) out.add(f[i]);
+  }
+  return out;
+}
+
+/**
  * Resolve a path the model wants to write. Inside the checkout, symlinks included; never under
  * .git or node_modules, and never under .github: a workflow or action definition changed by this
  * lane would run with the PR's own permissions on the next push. Returns the absolute path or throws.
@@ -206,6 +228,7 @@ export function safeWritePath(root, p) {
   if (!rel || rel === '.' || rel === '..' || rel.startsWith('../')) throw new Error('path is outside the checkout');
   if (/(^|\/)(?:\.git|node_modules)(?:\/|$)/.test(rel)) throw new Error('path is under .git or node_modules');
   if (/^\.github(?:\/|$)/.test(rel)) throw new Error('nothing under .github/ is written by the fix lane');
+  if (/(?:^|\/)\.gitattributes$/.test(rel)) throw new Error('.gitattributes is never written by the fix lane');
   const rootReal = realpathSync(root);
   const abs = resolve(rootReal, rel);
   const inside = (x) => x === rootReal || x.startsWith(rootReal + sep);
@@ -222,15 +245,18 @@ export function safeWritePath(root, p) {
 
 /**
  * Which changed paths become the commit. Everything the checkout shows as changed is staged
- * (`git add -A`) except: paths under .github/, files over LIMITS.fileBytes, and paths the install
- * step dirtied that the model did not write (a lockfile rewritten by npm is not the fix). Pure:
- * `sizeOf(path)` supplies sizes. Returns { keep, skipped: [{ path, why }] }.
+ * (`git add -A`) except: paths under .github/, a .gitattributes, paths marked redline-protected
+ * (`protectedSet`), files over LIMITS.fileBytes, and paths the install step dirtied that the model
+ * did not write (a lockfile rewritten by npm is not the fix). Pure: `sizeOf(path)` supplies sizes.
+ * Returns { keep, skipped: [{ path, why }] }.
  */
-export function stageable(paths, { installDirty = [], written = new Set(), sizeOf = () => 0 } = {}) {
+export function stageable(paths, { installDirty = [], written = new Set(), sizeOf = () => 0, protectedSet = new Set() } = {}) {
   const keep = [];
   const skipped = [];
   for (const p of paths) {
     if (/^\.github(?:\/|$)/.test(p)) skipped.push({ path: p, why: 'under .github/' });
+    else if (/(?:^|\/)\.gitattributes$/.test(p)) skipped.push({ path: p, why: 'a .gitattributes' });
+    else if (protectedSet.has(p)) skipped.push({ path: p, why: `marked ${PROTECTED_ATTR}` });
     else if (installDirty.includes(p) && !written.has(p)) skipped.push({ path: p, why: 'changed by the install, not by the fix' });
     else if (sizeOf(p) > LIMITS.fileBytes) skipped.push({ path: p, why: `larger than ${LIMITS.fileBytes} bytes` });
     else keep.push(p);
@@ -507,7 +533,7 @@ export async function runLoop(ctx, brief) {
   return { refused: `no fix submitted within ${LIMITS.turns} turns`, turns };
 }
 
-export function buildBrief({ pr, files, headSha, review, items, plan, installNote, diff }) {
+export function buildBrief({ pr, files, headSha, review, items, plan, installNote, diff, protectedFiles = [] }) {
   const findings = review.findings;
   return [
     `Repository: ${pr.base.repo.full_name}`,
@@ -515,6 +541,9 @@ export function buildBrief({ pr, files, headSha, review, items, plan, installNot
     `${pr.head.ref} -> ${pr.base.ref}; head ${headSha}`,
     '', 'PR description:', String(pr.body ?? '').slice(0, LIMITS.bodyChars) || '(empty)',
     '', `Files the PR changes (${files.length}):`, ...files.map((f) => `- ${f.status} +${f.additions} -${f.deletions} ${f.filename}`),
+    ...(protectedFiles.length
+      ? ['', `Captured data, marked ${PROTECTED_ATTR} (never written by fix_write): ${protectedFiles.join(', ')}. A finding about the text inside one of these is answered in the summary, not by an edit.`]
+      : []),
     '', `Review summary: ${review.summary || '(none)'}`,
     '', `Findings (${findings.length}):`, ...findings.map(formatFinding),
     '', `Inline comments (${items.length}):`, ...items.map((c, i) => `[${i + 1}] ${c.path}${c.line ? `:${c.line}` : ''}\n${c.body}`),
@@ -560,6 +589,14 @@ function git(cwd, env, args, { allowFail = false } = {}) {
   const r = spawnSync('git', args, { cwd, env, encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 });
   if (r.status !== 0 && !allowFail) throw new Error(`git ${args[0]} failed: ${(r.stderr || r.stdout || r.error?.message || '').trim().slice(0, 300)}`);
   return r.status === 0 ? String(r.stdout ?? '').replace(/\n$/, '') : null;
+}
+
+/** The given paths that the checkout marks redline-protected. Throws when git cannot say. */
+function protectedPaths(root, env, paths) {
+  if (!paths.length) return new Set();
+  const r = spawnSync('git', ['check-attr', '-z', PROTECTED_ATTR, '--', ...paths], { cwd: root, env, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 });
+  if (r.status !== 0) throw new Error(`git check-attr failed: ${(r.stderr || r.error?.message || '').trim().slice(0, 200)}`);
+  return protectedFromCheckAttr(r.stdout);
 }
 
 /** Paths git sees as changed (tracked or untracked, ignored files excluded), forward slashes. */
@@ -638,7 +675,10 @@ export async function runFix(ctx) {
     const written = new Set();
     // The fix as it would be staged now: everything changed minus what the contract leaves out.
     const sizeOf = (p) => { try { return statSync(join(root, p)).size; } catch { return 0; } };
-    const staged = () => stageable(changedPaths(root, cenv), { installDirty, written, sizeOf });
+    const staged = () => {
+      const changed = changedPaths(root, cenv);
+      return stageable(changed, { installDirty, written, sizeOf, protectedSet: protectedPaths(root, cenv, changed) });
+    };
     const runs = [];
     let seq = 0;
     let lastWrite = 0;
@@ -656,6 +696,7 @@ export async function runFix(ctx) {
           const content = String(input.content ?? '');
           if (Buffer.byteLength(content) > LIMITS.writeBytes) return `error: content is larger than ${LIMITS.writeBytes} bytes`;
           const rel = relative(realpathSync(root), abs).split(sep).join('/');
+          if (protectedPaths(root, cenv, [rel]).has(rel)) return `error: ${rel} is marked ${PROTECTED_ATTR} in .gitattributes: it is captured data and is never edited here. Leave it as it is and say in the summary that this finding is about data the fix lane does not change`;
           const now = staged().keep;
           if (!now.includes(rel) && now.length >= LIMITS.files) return `error: the fix already changes ${now.length} files, the limit; no further file is written`;
           mkdirSync(dirname(abs), { recursive: true });
@@ -696,7 +737,8 @@ export async function runFix(ctx) {
       return { sub: checked.sub };
     };
 
-    const brief = buildBrief({ pr, files, headSha, review, items, plan, installNote, diff: buildDiff(files, LIMITS.diffChars) });
+    const protectedFiles = [...protectedPaths(root, cenv, files.map((f) => f.filename))];
+    const brief = buildBrief({ pr, files, headSha, review, items, plan, installNote, diff: buildDiff(files, LIMITS.diffChars), protectedFiles });
     const loop = await runLoop({
       call: (messages, toolChoice) => callModelWith(ctx, { system: ctx.system, messages, tools: TOOLS, toolChoice, maxTokens: LIMITS.maxTokens, timeoutMs: LIMITS.modelTimeoutMs }),
       tool: async (name, input) => tool(name, input), finalize, now: ctx.now, log: ctx.log, canForce: !rejectsForcedToolChoice(ctx.model),
