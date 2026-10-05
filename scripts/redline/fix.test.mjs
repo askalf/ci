@@ -649,6 +649,44 @@ if (!gitOk) {
     rmSync(repo.dir, { recursive: true, force: true });
   }
   if (process.platform !== 'win32') {
+    // The filter turns a small working-tree file into a staged blob of the key and 70 MB of zeros:
+    // past any read buffer, small as a compressed patch. It is refused by its staged size.
+    const KEY = 'dk_live_0123456789';
+    const repo = makeRepo();
+    const lift = [
+      "import { writeFileSync } from 'node:fs';",
+      "import { spawnSync } from 'node:child_process';",
+      "writeFileSync('leak.sh', \"printf 'dk_live_%s' 0123456789; head -c 70000000 /dev/zero\\n\");",
+      "writeFileSync('.gitattributes', 'harmless.txt filter=leak\\n');",
+      "spawnSync('git', ['config', 'filter.leak.clean', 'sh leak.sh']);",
+      "writeFileSync('harmless.txt', 'harmless\\n');",
+      '',
+    ].join('\n');
+    const w = world(repo, { turns: [tool('fix_write', { path: 'lift.mjs', content: lift }), tool('fix_run', { command: 'node lift.mjs' }), finish()] });
+    const { record: r } = await runFix({ ...w.ctx, darioKey: KEY });
+    check('a staged blob past the size limit is refused before it is read, with no bundle or patch',
+      r.outcome === 'refused' && /harmless\.txt is \d+ bytes; the limit is/.test(r.notes) && !existsSync(join(w.out, 'fix.bundle')) && !existsSync(join(w.out, 'diff.patch')) && fixProblem(r) === null);
+    rmSync(w.out, { recursive: true, force: true });
+    rmSync(repo.dir, { recursive: true, force: true });
+  }
+  if (process.platform !== 'win32') {
+    // The reviewed head tracks a file named `*`; a command deletes it and writes under .github.
+    // With no file of that name left, a plain pathspec `*` is a pattern that would also stage
+    // .github; taken literally it stages the deletion alone.
+    const repo = makeRepo();
+    writeFileSync(join(repo.dir, '*'), 'star\n');
+    sh(repo.dir, ['add', '-A']);
+    sh(repo.dir, ['-c', 'user.name=t', '-c', 'user.email=t@x', 'commit', '-q', '-m', 'chore: a file named star']);
+    repo.head = sh(repo.dir, ['rev-parse', 'HEAD']);
+    const star = "import { writeFileSync, mkdirSync, unlinkSync } from 'node:fs';\nunlinkSync('*');\nmkdirSync('.github', { recursive: true });\nwriteFileSync('.github/x.yml', 'x\\n');\n";
+    const w = world(repo, { turns: [tool('fix_write', { path: 'star.mjs', content: star }), tool('fix_run', { command: 'node star.mjs' }), finish()] });
+    const { record: r } = await runFix(w.ctx);
+    check('a deleted file named * is staged literally: the commit holds its deletion and nothing under .github',
+      r.outcome === 'fixed' && r.files.sort().join() === '*,star.mjs' && sh(repo.dir, ['diff', '--name-only', repo.head, 'HEAD']).split('\n').sort().join() === '*,star.mjs' && fixProblem(r) === null);
+    rmSync(w.out, { recursive: true, force: true });
+    rmSync(repo.dir, { recursive: true, force: true });
+  }
+  if (process.platform !== 'win32') {
     // A stub yarn stands in for Berry: it reports a version and logs the install it is given.
     const stub = mkdtempSync(join(tmpdir(), 'redline-yarn-'));
     const log = join(stub, 'calls.log');

@@ -64,8 +64,9 @@ comments with the notes. The model key is the named dario key `first-party-fix` 
 (never by gha-oss, which runs untrusted upstream candidates' suites on the same host).
 The PR's tests and the model's `node <file>` run as that same exec account, so they could read the
 key. The script checks everything that leaves the runner for the key and the read token: the diff,
-the staged blobs (a clean filter can stage bytes the working tree lacks), `fix.json` and
-`notes.md`; one carrying a secret is refused with nothing kept, and the job log masks them.
+the staged blobs (a clean filter can stage bytes the working tree lacks; each is sized first,
+refused past 1 MB, and an unreadable one is a refusal), `fix.json` and `notes.md`; one carrying
+a secret is refused with nothing kept, and the job log masks them.
 Keeping the key out of the children's reach entirely is the host's part: run them as a separate
 account, or deny them the network.
 The fixer's brief is `/etc/askalf/fix-prompt.md` on the same host, named by `FIX_PROMPT_FILE`, with

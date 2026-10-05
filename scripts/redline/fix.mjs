@@ -464,16 +464,31 @@ export function fileWithSecret(root, paths, secrets) {
 }
 
 /**
- * The first of paths whose staged blob (`git cat-file blob :<path>`, raw bytes, a symlink's target
- * included) carries a secret, or null. A path with no index entry (a deletion) carries nothing.
+ * Why the staged blobs of paths cannot go into the bundle, or '' when they can. Each index entry
+ * (`git ls-files -s`, paths taken literally) is sized, refused past LIMITS.fileBytes (a clean
+ * filter can stage far more than the working-tree file holds), then read whole and checked for
+ * a secret, a symlink's target included. Fails closed: an entry that cannot be listed, sized or
+ * read is a refusal. A path with no index entry is a deletion and carries nothing.
  */
-export function stagedWithSecret(root, env, paths, secrets) {
-  if (!secrets.length) return null;
-  for (const p of paths) {
-    const r = spawnSync('git', ['cat-file', 'blob', `:${p}`], { cwd: root, env, maxBuffer: 64 * 1024 * 1024 });
-    if (r.status === 0 && secrets.some((v) => r.stdout.includes(v))) return p;
+export function stagedProblem(root, env, paths, secrets) {
+  if (!paths.length) return '';
+  const gitOut = (args, maxBuffer) => spawnSync('git', ['--literal-pathspecs', ...args], { cwd: root, env, maxBuffer });
+  const ls = gitOut(['ls-files', '-s', '-z', '--', ...paths], 64 * 1024 * 1024);
+  if (ls.status !== 0) return 'the staged files could not be listed';
+  for (const row of ls.stdout.toString('utf8').split('\0').filter(Boolean)) {
+    const m = /^(\d+) ([0-9a-f]{40,64}) \d+\t([\s\S]+)$/.exec(row);
+    if (!m) return 'an index entry could not be read';
+    const [, mode, sha, p] = m;
+    if (mode === '160000') continue; // a gitlink names a commit, it carries no bytes
+    const sized = gitOut(['cat-file', '-s', sha], 1024);
+    const size = sized.status === 0 ? Number(sized.stdout.toString().trim()) : NaN;
+    if (!Number.isFinite(size)) return `the staged ${p} could not be sized`;
+    if (size > LIMITS.fileBytes) return `the staged ${p} is ${size} bytes; the limit is ${LIMITS.fileBytes}`;
+    const blob = gitOut(['cat-file', 'blob', sha], LIMITS.fileBytes + 1024);
+    if (blob.status !== 0 || blob.stdout.length !== size) return `the staged ${p} could not be read`;
+    if (secrets.some((v) => blob.stdout.includes(v))) return 'The change carried a credential of this run, so nothing is committed.';
   }
-  return null;
+  return '';
 }
 
 /** text with every secret replaced by ***, for the job log. */
@@ -969,15 +984,18 @@ async function answerReview(ctx) {
       return { record: fixRecord({ ...base, outcome: 'no_change', turns, tests: testsRecord, notes: renderNotes({ outcome: 'no_change', summary: sub.summary, skipped: st.skipped, tests: testsRecord }) }) };
     }
     if (st.keep.length > LIMITS.files) return refuse(`the fix changes ${st.keep.length} files; the limit is ${LIMITS.files}`, { turns, tests: testsRecord });
-    git(root, cenv, ['add', '-A', '--', ...st.keep]);
+    // Literal pathspecs: a file a command named `*` must not stage everything.
+    git(root, cenv, ['--literal-pathspecs', 'add', '-A', '--', ...st.keep]);
     const diff = git(root, cenv, ['diff', '--cached', '--binary', headSha]) ?? '';
     const diffBytes = Buffer.byteLength(diff);
     if (diffBytes > LIMITS.diffBytes) return refuse(`the diff is ${diffBytes} bytes; the limit is ${LIMITS.diffBytes}`, { turns, tests: testsRecord });
     // The index is what the bundle carries: a clean filter (a .gitattributes rule and a .git/config
     // entry a command can write) can stage bytes the working tree does not have.
-    if (leaksSecret(diff, runSecrets(ctx)) || fileWithSecret(root, st.keep, runSecrets(ctx)) || stagedWithSecret(root, cenv, st.keep, runSecrets(ctx))) {
+    if (leaksSecret(diff, runSecrets(ctx)) || fileWithSecret(root, st.keep, runSecrets(ctx))) {
       return refuse('The change carried a credential of this run, so nothing is committed.', { turns });
     }
+    const blobIssue = stagedProblem(root, cenv, st.keep, runSecrets(ctx));
+    if (blobIssue) return refuse(blobIssue, { turns });
     const common = { turns, tests: testsRecord, files: st.keep };
     const notes = (outcome) => renderNotes({ outcome, summary: sub.summary, files: st.keep, skipped: st.skipped, tests: testsRecord });
 
