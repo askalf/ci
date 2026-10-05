@@ -781,6 +781,25 @@ if (!gitOk) {
       rmSync(w.out, { recursive: true, force: true });
       rmSync(repo.dir, { recursive: true, force: true });
     }
+    if (process.platform !== 'win32') {
+      // Same bytes, executable bit gone: the passing run is stale, and the suite that runs the
+      // script now fails.
+      const repo = makeRepo({ pkg: { name: 'r', private: true, scripts: { test: './check.sh' } } });
+      writeFileSync(join(repo.dir, 'check.sh'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+      sh(repo.dir, ['add', '-A']);
+      sh(repo.dir, ['-c', 'user.name=t', '-c', 'user.email=t@x', 'commit', '-q', '-m', 'test: a script the suite runs']);
+      repo.head = sh(repo.dir, ['rev-parse', 'HEAD']);
+      const w = world(repo, { turns: [
+        tool('fix_write', { path: 'check.sh', content: '#!/bin/sh\n# checked\nexit 0\n' }),
+        tool('fix_write', { path: 'chmod.mjs', content: "import { chmodSync } from 'node:fs';\nchmodSync('check.sh', 0o644);\n" }),
+        tool('fix_run', { command: 'npm test' }), tool('fix_run', { command: 'node chmod.mjs' }), finish(), finish(),
+      ] });
+      const { record: r } = await runFix(w.ctx);
+      check('a script that lost its executable bit after the tests is tested again, never passed on the old run',
+        JSON.stringify(w.calls.model[3].messages.at(-1)).includes('exit 0') && r.outcome === 'tests_failed' && r.tests.exit_code !== 0 && !existsSync(join(w.out, 'fix.bundle')) && fixProblem(r) === null);
+      rmSync(w.out, { recursive: true, force: true });
+      rmSync(repo.dir, { recursive: true, force: true });
+    }
     {
       const repo = makeRepo({ pkg: { name: 'r', private: true, scripts: { test: 'node test.mjs' } } });
       const w = world(repo, { turns: [tool('fix_write', { path: 'src/b.js', content: FIXED_B }), tool('fix_run', { command: 'npm test' }), finish()] });

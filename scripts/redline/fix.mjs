@@ -828,7 +828,9 @@ async function answerReview(ctx) {
         try {
           const abs = join(root, p);
           const s = lstatSync(abs);
-          h.update(s.isSymbolicLink() ? `link:${readlinkSync(abs)}` : s.isFile() ? readFileSync(abs) : 'other');
+          // The executable bit as git records it (100755 or 100644): a script that lost it fails
+          // the suite with the same bytes.
+          h.update(s.isSymbolicLink() ? `link:${readlinkSync(abs)}` : s.isFile() ? Buffer.concat([Buffer.from(s.mode & 0o100 ? 'x:' : '-:'), readFileSync(abs)]) : 'other');
         } catch { h.update('gone'); }
         h.update('\0');
       }
