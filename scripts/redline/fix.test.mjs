@@ -208,6 +208,11 @@ console.log('\n  a new PR description');
     && /attribution/.test(descriptionProblem('Body.\n\nCo-Authored-By: Claude <noreply@anthropic.com>', 'x')));
   check('an em or en dash is refused', /dash/.test(descriptionProblem('A \u2014 B', 'x')) && /dash/.test(descriptionProblem('1\u20132', 'x')));
   check('a description longer than the brief shows is never rewritten', /not rewritten whole/.test(descriptionProblem('short', 'x'.repeat(LIMITS.bodyChars + 1))));
+  check('the limit is the raw length the brief cuts: leading whitespace counts',
+    /not rewritten whole/.test(descriptionProblem('short', ' '.repeat(100) + 'x'.repeat(LIMITS.bodyChars - 50))));
+  check('the limit is the raw length the brief cuts: CRLF counts',
+    /not rewritten whole/.test(descriptionProblem('short', 'ab\r\n'.repeat(Math.floor(LIMITS.bodyChars / 4) + 1))));
+  check('a body exactly at the limit can still be rewritten', descriptionProblem('short', 'x'.repeat(LIMITS.bodyChars)) === null);
   check('the new text has a ceiling', /longer than/.test(descriptionProblem('y'.repeat(LIMITS.descriptionChars + 1), 'x')));
 }
 
@@ -656,6 +661,23 @@ if (!gitOk) {
     check('saveFix writes description.md next to fix.json', readFileSync(join(w.out, 'description.md'), 'utf8') === 'Adds the token, read from the environment.\n');
     check('a run without fix_describe writes no description.md', (() => { const d = mkdtempSync(join(tmpdir(), 'redline-fix-nodesc-')); saveFix(d, fixRecord({ repo: 'askalf/r', pr: 7, headSha: repo.head, outcome: 'no_change' }), null); const ok = !existsSync(join(d, 'description.md')); rmSync(d, { recursive: true, force: true }); return ok; })());
     check('fix.json refuses a description on a refusal', /carries no description/.test(fixProblem({ ...r, outcome: 'refused', description: true })));
+    rmSync(w.out, { recursive: true, force: true });
+    rmSync(repo.dir, { recursive: true, force: true });
+  }
+  {
+    // A description that carries a credential of the run is refused like any other output.
+    const KEY = 'dk_live_0123456789';
+    const repo = makeRepo();
+    const body = '### 1. Blocking: `PR description:1`\n\n> Adds it.\n\nSay what is added.';
+    const w = world(repo, { body, comments: [], turns: [
+      tool('fix_describe', { body: `Adds the token. Key: ${KEY}` }),
+      finish({ summary: 'The description says what the PR adds.' }),
+    ] });
+    const { record: r, description } = await runFix({ ...w.ctx, darioKey: KEY });
+    check('a description carrying the model key refuses the run, with no description returned',
+      r.outcome === 'refused' && /credential/.test(r.notes) && r.description !== true && (description ?? null) === null && fixProblem(r) === null, JSON.stringify(r));
+    saveFix(w.out, r, description ?? null);
+    check('and no description.md is written', !existsSync(join(w.out, 'description.md')));
     rmSync(w.out, { recursive: true, force: true });
     rmSync(repo.dir, { recursive: true, force: true });
   }

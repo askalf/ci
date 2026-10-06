@@ -543,8 +543,11 @@ export const DESCRIPTION_ATTRIBUTION = /^\s*(?:Co-Authored-By:.*|.*Generated wit
  */
 export function descriptionProblem(text, current) {
   const t = String(text ?? '').replace(/\r\n/g, '\n').trim();
-  const c = String(current ?? '').replace(/\r\n/g, '\n').trim();
-  if (c.length > LIMITS.bodyChars) return `the current description is ${c.length} characters and the brief shows ${LIMITS.bodyChars}, so it is not rewritten whole here`;
+  // Measured exactly as buildBrief cuts it (the raw body, sliced at bodyChars), so a body the
+  // brief showed only in part is never replaced whole, whatever whitespace or line endings it has.
+  const raw = String(current ?? '');
+  if (raw.length > LIMITS.bodyChars) return `the current description is ${raw.length} characters and the brief shows ${LIMITS.bodyChars}, so it is not rewritten whole here`;
+  const c = raw.replace(/\r\n/g, '\n').trim();
   if (!t) return 'the description is empty';
   if (t.length > LIMITS.descriptionChars) return `the description is longer than ${LIMITS.descriptionChars} characters`;
   if (t === c) return 'that is the current description';
@@ -819,8 +822,9 @@ export function onlyOrigins(fetchFn, urls) {
  */
 export async function runFix(ctx) {
   const result = await answerReview(ctx);
-  // Last gate before anything is uploaded: fix.json and notes.md are public through forge.
-  if (leaksSecret(JSON.stringify(result.record), runSecrets(ctx))) {
+  // Last gate before anything is uploaded: fix.json, notes.md and description.md are public
+  // through forge (the description becomes the PR body), so the description is checked with them.
+  if (leaksSecret(`${JSON.stringify(result.record)}\n${result.description ?? ''}`, runSecrets(ctx))) {
     for (const f of ['fix.bundle', 'diff.patch']) rmSync(join(ctx.out, f), { force: true });
     return { record: fixRecord({ repo: ctx.repo, pr: ctx.pr, headSha: ctx.headSha, model: ctx.model, outcome: 'refused', turns: result.record.turns,
       notes: renderNotes({ outcome: 'refused', reason: 'The result carried a credential of this run, so nothing from it is kept.' }) }) };
