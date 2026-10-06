@@ -946,7 +946,8 @@ if (!gitOk) {
         rmSync(repo.dir, { recursive: true, force: true });
         rmSync(log, { force: true });
       }
-      for (const [who, uid, re] of [['root', 0, /is root/], ['this account', process.getuid(), /is this account/], ['an account id -u cannot name', 'x', /could not be read/]]) {
+      // Run as root, this account is root, which the root check names first.
+      for (const [who, uid, re] of [['root', 0, /is root/], ['this account', process.getuid(), process.getuid() === 0 ? /is root/ : /is this account/], ['an account id -u cannot name', 'x', /could not be read/]]) {
         stubs({ uid });
         const repo = repoWithTests();
         const w = world(repo, { turns: [finish()] });
