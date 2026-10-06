@@ -1420,7 +1420,8 @@ console.log('\n  pin bump, both callers');
       && bump.includes('fetch-depth: 0'));
   {
     // The pick step itself, in a scratch history: a branch whose runtime change is hours old,
-    // merged into main a minute ago, is picked as the merge and waits out the quiet window.
+    // merged into main a minute ago and followed by a docs commit, is picked as the merge and waits
+    // out the quiet window.
     const lines = bump.split('\n');
     const at = lines.findIndex((l) => l.includes('- name: Pick the commit to pin'));
     const runAt = lines.findIndex((l, i) => i > at && l.trim() === 'run: |');
@@ -1444,6 +1445,8 @@ console.log('\n  pin bump, both callers');
       put('README.md', 'x\n'); git(['add', '-A'], now - 3600); git(['commit', '-qm', 'docs on main'], now - 3600);
       git(['merge', '-q', '--no-ff', '-m', 'merge topic', 'topic'], now - 60);
       const merge = git(['rev-parse', 'HEAD'], now).stdout.trim();
+      // A later commit that changes nothing a caller runs does not hide the merge.
+      put('README.md', 'y\n'); git(['commit', '-qam', 'docs after the merge'], now - 30);
       const out = join(d, 'out');
       writeFileSync(out, '');
       const r = spawnSync('bash', ['-c', script.join('\n')], { cwd: d, encoding: 'utf8',
