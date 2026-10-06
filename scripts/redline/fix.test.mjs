@@ -958,6 +958,62 @@ if (!gitOk) {
       }
       rmSync(stub, { recursive: true, force: true });
     }
+    // With REDLINE_TEST_RUN_AS (the self-test makes the account), the checkout's commands run as a
+    // real second account and try the boundary: the key file, .git, and the git configuration
+    // this process's own git might read. Set but unusable is a failure, never a skip.
+    const realRunAs = process.env.REDLINE_TEST_RUN_AS ?? '';
+    if (!realRunAs) {
+      console.log('\n  skip the real run-account tests: REDLINE_TEST_RUN_AS is not set (the self-test sets it)');
+    } else {
+      console.log(`\n  runFix: a real run account (${realRunAs})`);
+      check('sudo reaches the run account', spawnSync('sudo', ['-n', '-u', realRunAs, '--', 'true']).status === 0);
+      const secretDir = mkdtempSync(join(tmpdir(), 'redline-secret-'));
+      const secret = join(secretDir, 'fix-exec.env');
+      writeFileSync(secret, 'DARIO_API_KEY=dk_live_0123456789\n', { mode: 0o600 });
+      const realRun = async (testBody) => {
+        const repo = makeRepo({ pkg: { name: 'r', private: true, scripts: { test: 'node test.mjs' } }, testBody });
+        const w = world(repo, { turns: [tool('fix_write', { path: 'src/b.js', content: FIXED_B }), finish()] });
+        // A throw is a refusal, as the CLI makes it.
+        let r;
+        try { ({ record: r } = await runFix({ ...w.ctx, runAs: realRunAs, guardFiles: [secret] })); } catch (e) { r = { outcome: 'refused', notes: e.message }; }
+        return { r, repo, w };
+      };
+      const done = ({ repo, w }) => { rmSync(w.out, { recursive: true, force: true }); rmSync(repo.dir, { recursive: true, force: true }); };
+      {
+        const report = join(tmpdir(), `redline-runas-${process.pid}.json`);
+        const body = [
+          "import { readFileSync, writeFileSync, appendFileSync } from 'node:fs';",
+          'const r = { uid: process.getuid(), env: Object.keys(process.env) };',
+          `try { readFileSync(${JSON.stringify(secret)}); r.key = 'read'; } catch (e) { r.key = e.code; }`,
+          "try { appendFileSync('.git/config', '#'); r.git = 'written'; } catch (e) { r.git = e.code; }",
+          "try { writeFileSync('scratch.txt', 'x'); r.checkout = 'written'; } catch (e) { r.checkout = e.code; }",
+          `writeFileSync(${JSON.stringify(report)}, JSON.stringify(r));`, '',
+        ].join('\n');
+        const run = await realRun(body);
+        const seen = existsSync(report) ? JSON.parse(readFileSync(report, 'utf8')) : {};
+        rmSync(report, { force: true });
+        check('the tests run as the run account and cannot read the key file or write .git, but can write the checkout',
+          seen.uid !== process.getuid() && seen.key === 'EACCES' && seen.git === 'EACCES' && seen.checkout === 'written' && !seen.env.includes('GH_READ_TOKEN'));
+        check('and the fix goes through', run.r.outcome === 'fixed' && fixProblem(run.r) === null, run.r.notes);
+        done(run);
+      }
+      for (const [name, body] of [
+        // .git is read-only but its directory entry is not: rename it and put a writable copy,
+        // with a command in its config, in its place.
+        ['a replaced .git', (mark) => "import { renameSync, cpSync, appendFileSync } from 'node:fs';\nrenameSync('.git', '.git-old');\ncpSync('.git-old', '.git', { recursive: true });\nappendFileSync('.gitignore', '.git-old/\\n');\n"
+          + `appendFileSync('.git/config', '[core]\\n\\tfsmonitor = touch ${mark}\\n[safe]\\n\\tdirectory = *\\n');\n`],
+        // The commands' HOME: a global git config there, which a git run with that HOME would read.
+        ['a .gitconfig in the commands\' HOME', (mark) => "import { writeFileSync } from 'node:fs';\n"
+          + `writeFileSync(process.env.HOME + '/.gitconfig', '[core]\\n\\tfsmonitor = touch ${mark}\\n[safe]\\n\\tdirectory = *\\n');\n`],
+      ]) {
+        const mark = join(tmpdir(), `redline-pwned-${process.pid}-${Math.random().toString(36).slice(2)}`);
+        const run = await realRun(body(mark));
+        check(`${name} runs nothing as this account`, !existsSync(mark) && run.r.outcome !== 'refused', run.r.notes);
+        rmSync(mark, { force: true });
+        done(run);
+      }
+      rmSync(secretDir, { recursive: true, force: true });
+    }
     console.log('\n  runFix: the test script');
     {
       const repo = makeRepo({ pkg: { name: 'r', private: true, scripts: { test: 'node test.mjs' } } });
@@ -1237,6 +1293,8 @@ console.log('\n  pin bump, both callers');
   const selfTest = readFileSync(fileURLToPath(new URL('../../.github/workflows/redline-self-test.yml', import.meta.url)), 'utf8');
   // `test` is a required check, so it must report on every PR: no paths filter, which would leave a
   // PR outside the paths with a check that never runs.
+  check('the self-test makes a second account and runs the real run-account tests with it',
+    /sudo useradd [^\n]* redline-run\n/.test(selfTest) && /- run: node scripts\/redline\/fix\.test\.mjs\n\s+env:\n\s+REDLINE_TEST_RUN_AS: redline-run\n/.test(selfTest));
   check('the self-test runs these tests on every pull request', selfTest.includes('node scripts/redline/fix.test.mjs')
     && /^on:\n {2}pull_request:\n\n/m.test(selfTest.replace(/\r\n/g, '\n')) && !/^\s+paths(-ignore)?:/m.test(selfTest));
 }

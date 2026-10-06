@@ -96,8 +96,8 @@ run account.
 3. **ACLs and paths.** The `acl` package, for `setfacl`, on a filesystem mounted with ACL support.
    Every directory above the runner's work directory must be searchable by the run account (`x`),
    and the tool cache setup-node installs into must be readable and searchable by it, since the
-   tests run that node. The run account cannot write `.git`, so a test that writes there (a commit,
-   an index refresh) fails in this lane.
+   tests run that node. The run account cannot write `.git` and does not own it, so a test that
+   runs git in the checkout fails in this lane.
 4. **Egress.** The run account reaches a forward proxy and nothing else; dario and every other
    local service included. With nftables:
    ```
@@ -119,7 +119,9 @@ run account.
    ```
 
 Each run proves the setup before it runs anything: sudo to the run account works, the run account
-cannot read the env file or the brief, it can write the checkout, and it cannot write `.git`. A run
+cannot read the env file or the brief, it can write the checkout, and it cannot write `.git`. The
+script's own git then works on a private copy of `.git`, with a HOME of its own and no global or
+system config, so nothing the run account writes (a replaced `.git`, a `.gitconfig`) reaches it. A run
 that fails any of these is `refused`, and its notes say which. Without `FIX_RUN_AS` the commands
 run as the exec account, and the job log warns that they could read the key.
 

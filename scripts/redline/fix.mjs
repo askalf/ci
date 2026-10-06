@@ -46,9 +46,11 @@
 //     account FIX_RUN_AS names in the env file, through sudo, from an empty environment: not the
 //     account that reads FIX_ENV_FILE. Before anything runs, the run account is proved to work
 //     and to read neither the env file nor the brief; it gets the checkout to write, its .git
-//     read-only (so no command can point this process's git at its own code), and a HOME of its
-//     own. After every command its processes are killed, so none can swap a file while this
-//     process reads it. FIX_PROXY sends the package managers through the host's proxy; the host's
+//     read-only, and a HOME of its own. This process's git reads nothing the run account can
+//     write: it has a HOME of its own with no global or system config, and works on a private
+//     copy of .git, so a command that replaces the checkout's .git (its directory is writable) or
+//     writes a .gitconfig cannot make this process's git run its code. After every command the
+//     run account's processes are killed, so none can swap a file while this process reads it. FIX_PROXY sends the package managers through the host's proxy; the host's
 //     egress rule keeps the run account to that proxy. Without FIX_RUN_AS the commands run as this
 //     account, with a warning in the log (README: host setup).
 //   - Whatever would leave the runner (the diff, the bundle, fix.json, notes.md and the job log)
@@ -73,7 +75,7 @@
 // there is no bundled fallback, and a variable that is unset, a file that cannot be read or an empty
 // file ends the run.
 
-import { readFileSync, writeFileSync, mkdirSync, rmSync, existsSync, lstatSync, realpathSync, statSync, readdirSync, appendFileSync, mkdtempSync, readlinkSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, rmSync, existsSync, lstatSync, realpathSync, statSync, readdirSync, appendFileSync, mkdtempSync, readlinkSync, cpSync } from 'node:fs';
 import { join, resolve, relative, dirname, basename, sep, posix } from 'node:path';
 import { tmpdir, userInfo } from 'node:os';
 import { createHash } from 'node:crypto';
@@ -906,6 +908,11 @@ async function answerReview(ctx) {
   const home = mkdtempSync(join(tmpdir(), 'redline-fix-home-'));
   const cenv = childEnv(ctx.env ?? process.env, home, ctx.proxy);
   const sudoEnv = { PATH: cenv.PATH };
+  // git as this account reads no configuration the checkout's commands can write: a HOME of its
+  // own, no global or system config, and with a run account a private copy of .git (below).
+  const gitHome = mkdtempSync(join(tmpdir(), 'redline-fix-git-'));
+  const genv = { ...cenv, HOME: gitHome, XDG_CONFIG_HOME: gitHome, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: process.platform === 'win32' ? 'NUL' : '/dev/null',
+    ...(process.platform === 'win32' ? { USERPROFILE: gitHome } : {}) };
   const asRun = (args) => spawnSync('sudo', ['-n', '-u', runAs, '--', ...args], { env: sudoEnv, encoding: 'utf8', timeout: 120_000 });
   // After every command: no process of the run account outlives it (none can swap a file while
   // this process reads it), and what it created is readable here again, whatever modes it set.
@@ -917,10 +924,10 @@ async function answerReview(ctx) {
   // Every command the checkout supplies goes through here.
   const exec = (argv, seconds, extraEnv = {}) => { const r = run(root, { ...cenv, ...extraEnv }, argv, seconds, runAs); settle(); return r; };
   try {
-    if (git(root, cenv, ['rev-parse', 'HEAD'], { allowFail: true }) !== headSha) return refuse('the checkout is not at the reviewed head');
-    if (changedPaths(root, cenv).length) return refuse('the checkout is not clean');
+    if (git(root, genv, ['rev-parse', 'HEAD'], { allowFail: true }) !== headSha) return refuse('the checkout is not at the reviewed head');
+    if (changedPaths(root, genv).length) return refuse('the checkout is not clean');
     // The marks as the reviewed head has them, before any command can touch the checkout.
-    const attrs = headAttributes(root, cenv, headSha);
+    const attrs = headAttributes(root, genv, headSha);
 
     if (runAs) {
       // The run account must work, must not read the key or the brief, may write the checkout
@@ -930,6 +937,14 @@ async function answerReview(ctx) {
       for (const f of (ctx.guardFiles ?? []).filter(Boolean)) {
         if (asRun(['test', '-r', f]).status === 0) return refuse(`the run account can read ${basename(f)}, which holds what it must never see`);
       }
+      // This account's git works on a private copy of .git that the run account cannot reach: the
+      // checkout's own .git, which a command could rename and replace (its directory is writable),
+      // is never read by this process again.
+      try {
+        const privateGit = join(gitHome, 'git');
+        cpSync(git(root, genv, ['rev-parse', '--absolute-git-dir']), privateGit, { recursive: true });
+        Object.assign(genv, { GIT_DIR: privateGit, GIT_WORK_TREE: realpathSync(root) });
+      } catch (e) { return refuse(`the checkout's .git could not be copied aside: ${String(e.message).slice(0, 200)}`); }
       const me = userInfo().username;
       const acl = (args) => { const r = spawnSync('setfacl', args, { env: sudoEnv, encoding: 'utf8' }); if (r.status !== 0) throw new Error(`setfacl failed: ${String(r.stderr || r.error?.message || '').trim().slice(0, 200)}`); };
       try {
@@ -960,7 +975,7 @@ async function answerReview(ctx) {
         + '; dependency install scripts were skipped, so run the build script first if the tests need its output';
       ctx.log?.(`install: ${installNote.slice(0, 200)}`);
     }
-    const installDirty = changedPaths(root, cenv);
+    const installDirty = changedPaths(root, genv);
 
     const written = new Set();
     let description = null; // fix_describe's text, set as the PR body by forge
@@ -970,8 +985,8 @@ async function answerReview(ctx) {
     // included, sees all of the change against the reviewed head, and the commit is the whole of it.
     const sizeOf = (p) => { try { return statSync(join(root, p)).size; } catch { return 0; } };
     const staged = () => {
-      git(root, cenv, ['reset', '-q', headSha]);
-      const changed = changedPaths(root, cenv);
+      git(root, genv, ['reset', '-q', headSha]);
+      const changed = changedPaths(root, genv);
       return stageable(changed, { installDirty, written, sizeOf, protectedSet: protectedPaths(attrs, changed) });
     };
     const runs = [];
@@ -982,9 +997,9 @@ async function answerReview(ctx) {
     // Measured against the reviewed head, as staged() measures, so a command's own commit cannot
     // hide a change from it.
     const stamp = () => {
-      git(root, cenv, ['reset', '-q', headSha]);
+      git(root, genv, ['reset', '-q', headSha]);
       const h = createHash('sha256');
-      for (const p of changedPaths(root, cenv).sort()) {
+      for (const p of changedPaths(root, genv).sort()) {
         h.update(`${p}\0`);
         try {
           const abs = join(root, p);
@@ -1101,8 +1116,8 @@ async function answerReview(ctx) {
     }
     if (st.keep.length > LIMITS.files) return refuse(`the fix changes ${st.keep.length} files; the limit is ${LIMITS.files}`, { turns, tests: testsRecord });
     // Literal pathspecs: a file a command named `*` must not stage everything.
-    git(root, cenv, ['--literal-pathspecs', 'add', '-A', '--', ...st.keep]);
-    const diff = git(root, cenv, ['diff', '--cached', '--binary', headSha]) ?? '';
+    git(root, genv, ['--literal-pathspecs', 'add', '-A', '--', ...st.keep]);
+    const diff = git(root, genv, ['diff', '--cached', '--binary', headSha]) ?? '';
     const diffBytes = Buffer.byteLength(diff);
     if (diffBytes > LIMITS.diffBytes) return refuse(`the diff is ${diffBytes} bytes; the limit is ${LIMITS.diffBytes}`, { turns, tests: testsRecord });
     // The index is what the bundle carries: a clean filter (a .gitattributes rule and a .git/config
@@ -1110,7 +1125,7 @@ async function answerReview(ctx) {
     if (leaksSecret(diff, runSecrets(ctx)) || fileWithSecret(root, st.keep, runSecrets(ctx))) {
       return refuse('The change carried a credential of this run, so nothing is committed.', { turns });
     }
-    const blobIssue = stagedProblem(root, cenv, st.keep, runSecrets(ctx));
+    const blobIssue = stagedProblem(root, genv, st.keep, runSecrets(ctx));
     if (blobIssue) return refuse(blobIssue, { turns });
     const common = { turns, tests: testsRecord, files: st.keep };
     const notes = (outcome) => renderNotes({ outcome, summary: sub.summary, files: st.keep, skipped: st.skipped, tests: testsRecord, described: described && outcome === 'fixed' });
@@ -1127,25 +1142,26 @@ async function answerReview(ctx) {
     // One commit as askalf, hooks off, then the message is checked and the bundle written.
     const hooks = join(home, 'no-hooks');
     mkdirSync(hooks, { recursive: true });
-    git(root, cenv, ['-c', `user.name=${AUTHOR.name}`, '-c', `user.email=${AUTHOR.email}`, '-c', `core.hooksPath=${hooks}`,
+    git(root, genv, ['-c', `user.name=${AUTHOR.name}`, '-c', `user.email=${AUTHOR.email}`, '-c', `core.hooksPath=${hooks}`,
       'commit', '--quiet', '--no-verify', '-m', sub.subject, '-m', `Answers the review at ${ctx.reviewUrl}.`]);
-    const message = git(root, cenv, ['log', '-1', '--format=%B']) ?? '';
+    const message = git(root, genv, ['log', '-1', '--format=%B']) ?? '';
     if (hasAttributionTrailer(message)) throw new Error('the commit message carries an attribution trailer');
-    const newHead = git(root, cenv, ['rev-parse', 'HEAD']);
+    const newHead = git(root, genv, ['rev-parse', 'HEAD']);
     // The commit holds the kept paths and nothing protected, checked on the commit itself.
-    const landed = (git(root, cenv, ['diff', '--name-only', '-z', '--no-renames', headSha, 'HEAD']) ?? '').split('\0').filter(Boolean);
+    const landed = (git(root, genv, ['diff', '--name-only', '-z', '--no-renames', headSha, 'HEAD']) ?? '').split('\0').filter(Boolean);
     const stray = landed.filter((p) => !st.keep.includes(p) || /(?:^|\/)\.gitattributes$/.test(p) || /^\.github(?:\/|$)/.test(p));
     const marked = protectedPaths(attrs, landed);
     if (stray.length || marked.size) throw new Error(`the commit carries a path the fix lane leaves out: ${[...new Set([...stray, ...marked])].join(', ').slice(0, 300)}`);
-    const commits = (git(root, cenv, ['log', '--format=%H%x00%s', `${headSha}..HEAD`]) ?? '').split('\n').filter(Boolean)
+    const commits = (git(root, genv, ['log', '--format=%H%x00%s', `${headSha}..HEAD`]) ?? '').split('\n').filter(Boolean)
       .map((l) => { const [sha, subject] = l.split('\0'); return { sha, subject }; }).reverse();
     const bundle = join(out, 'fix.bundle');
-    git(root, cenv, ['bundle', 'create', bundle, `${headSha}..HEAD`]);
-    git(root, cenv, ['bundle', 'verify', bundle]);
+    git(root, genv, ['bundle', 'create', bundle, `${headSha}..HEAD`]);
+    git(root, genv, ['bundle', 'verify', bundle]);
     return { record: fixRecord({ ...base, ...common, outcome: 'fixed', newHead, commits, description: described, notes: notes('fixed') }), description };
   } finally {
     settle();
     rmSync(home, { recursive: true, force: true });
+    rmSync(gitHome, { recursive: true, force: true });
   }
 }
 
