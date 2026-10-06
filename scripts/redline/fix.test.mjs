@@ -1408,8 +1408,13 @@ console.log('\n  pin bump, both callers');
   const selfTest = readFileSync(fileURLToPath(new URL('../../.github/workflows/redline-self-test.yml', import.meta.url)), 'utf8');
   // `test` is a required check, so it must report on every PR: no paths filter, which would leave a
   // PR outside the paths with a check that never runs.
-  check('the self-test makes a second account and runs the real run-account tests with it',
-    /sudo useradd [^\n]* redline-run\n/.test(selfTest) && /- run: node scripts\/redline\/fix\.test\.mjs\n\s+env:\n\s+REDLINE_TEST_RUN_AS: redline-run\n/.test(selfTest));
+  const runAccountJob = selfTest.slice(selfTest.indexOf('\n  run-account:'));
+  check('test uses a run account where it can lend or make one, and skips the real tests only with a notice',
+    /sudo -n -u redline-run -- true[^\n]*\n\s+echo "REDLINE_TEST_RUN_AS=redline-run" >> "\$GITHUB_ENV"/.test(selfTest)
+      && /elif sudo -n true[^\n]*\n\s+sudo useradd [^\n]* redline-run\n/.test(selfTest) && /::notice::no run account/.test(selfTest));
+  check('the run-account job runs the real run-account tests on GitHub\'s runners, whichever runner test used',
+    runAccountJob.startsWith('\n  run-account:\n    runs-on: ubuntu-latest\n') && /sudo useradd [^\n]* redline-run\n/.test(runAccountJob)
+      && /- run: node scripts\/redline\/fix\.test\.mjs\n\s+env:\n\s+REDLINE_TEST_RUN_AS: redline-run\n/.test(runAccountJob));
   check('the self-test runs these tests on every pull request', selfTest.includes('node scripts/redline/fix.test.mjs')
     && /^on:\n {2}pull_request:\n\n/m.test(selfTest.replace(/\r\n/g, '\n')) && !/^\s+paths(-ignore)?:/m.test(selfTest));
 }

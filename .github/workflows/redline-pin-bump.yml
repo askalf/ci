@@ -36,7 +36,9 @@ concurrency:
 
 jobs:
   bump:
-    runs-on: ubuntu-latest
+    # push to main and dispatch only, so only our own code runs here: on ci-exec, a pin bump
+    # reaches the callers while GitHub's hosted queue is down.
+    runs-on: [self-hosted, ci-exec]
     timeout-minutes: 10
     permissions:
       contents: read

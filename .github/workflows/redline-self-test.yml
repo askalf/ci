@@ -14,7 +14,11 @@ permissions:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    # Our own code (pushes, same-repo PRs, schedules, dispatches) runs on ci-exec, our
+    # non-root runners that take one job each, so GitHub's hosted queue going down does not
+    # hold our PRs. A fork's PR and a Dependabot PR run code nobody
+    # here wrote, so they stay on GitHub's runners.
+    runs-on: ${{ github.event.pull_request && (github.event.pull_request.head.repo.full_name != github.repository || github.event.pull_request.user.login == 'dependabot[bot]') && 'ubuntu-latest' || fromJSON('["self-hosted","ci-exec"]') }}
     timeout-minutes: 5
     steps:
       - uses: askalf/checkout-with-retry@115a6407547e9711edbc2e915838d495cad9583f  # v1.1.0
@@ -24,8 +28,39 @@ jobs:
         with:
           node-version: 22
       - run: node scripts/redline/review.test.mjs
-      # A second account, so the fix tests run the checkout's commands as a real run account and
-      # try the boundary for real. The runner's own account has passwordless sudo.
+      # The real run-account tests need a second account this job may sudo to. A host that
+      # provides one (redline-run, with a sudoers line for the runner's account) lends it; on
+      # GitHub's runners, where the job has passwordless sudo, it is made; anywhere else they skip
+      # here, and the run-account job below runs them.
+      - name: Find or make a run account for the fix tests
+        run: |
+          if sudo -n -u redline-run -- true 2>/dev/null; then
+            echo "REDLINE_TEST_RUN_AS=redline-run" >> "$GITHUB_ENV"
+          elif sudo -n true 2>/dev/null; then
+            sudo useradd --system --no-create-home --shell /usr/sbin/nologin redline-run
+            command -v setfacl >/dev/null || { sudo apt-get update -q && sudo apt-get install -y -q acl; }
+            echo "REDLINE_TEST_RUN_AS=redline-run" >> "$GITHUB_ENV"
+          else
+            echo "::notice::no run account on this runner; the run-account job runs the real run-account tests"
+          fi
+      - run: node scripts/redline/fix.test.mjs
+      # tools.json and fix-tools.json are TOOLS as files; this fails when review.mjs or fix.mjs
+      # changed a tool without them.
+      - run: node scripts/redline/dump-tools.mjs --check
+
+  # The fix tests against a real second account, on GitHub's runners, where the job has the sudo
+  # to make one: the run account's boundary is tested on every PR whichever runner `test` used.
+  # Not a required check, so a hosted outage holds no PR.
+  run-account:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: askalf/checkout-with-retry@115a6407547e9711edbc2e915838d495cad9583f  # v1.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
       - name: Make a run account for the fix tests
         run: |
           sudo useradd --system --no-create-home --shell /usr/sbin/nologin redline-run
@@ -33,6 +68,3 @@ jobs:
       - run: node scripts/redline/fix.test.mjs
         env:
           REDLINE_TEST_RUN_AS: redline-run
-      # tools.json and fix-tools.json are TOOLS as files; this fails when review.mjs or fix.mjs
-      # changed a tool without them.
-      - run: node scripts/redline/dump-tools.mjs --check
