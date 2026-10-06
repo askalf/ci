@@ -20,9 +20,9 @@ import { bumpCaller, fixCallerYaml, REVIEW_WORKFLOW, FIX_WORKFLOW, CALLERS } fro
 
 let pass = 0;
 let fail = 0;
-function check(name, cond) {
+function check(name, cond, detail) {
   if (cond) { console.log(`  ok   ${name}`); pass++; }
-  else { console.log(`  FAIL ${name}`); fail++; }
+  else { console.log(`  FAIL ${name}${detail !== undefined ? ` :: ${String(detail).slice(0, 1500)}` : ''}`); fail++; }
 }
 async function throws(fn) { try { await fn(); return null; } catch (e) { return e; } }
 const SHA = /^[0-9a-f]{40}$/;
@@ -1024,6 +1024,7 @@ if (!gitOk) {
         let r;
         try { ({ record: r } = await runFix({ ...w.ctx, runAs: realRunAs, guardFiles: [secret], ...extra })); } catch (e) { r = { outcome: 'refused', notes: e.message }; }
         inspect(repo.dir);
+        console.log(`  [probe] real run: ${r.outcome} :: ${String(r.notes).slice(0, 1500)}`);
         return { r, repo, w };
       };
       const done = ({ repo, w }) => { rmSync(w.out, { recursive: true, force: true }); rmSync(repo.dir, { recursive: true, force: true }); };
