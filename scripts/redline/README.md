@@ -123,7 +123,9 @@ run account.
    ```
 
 Each run proves the setup before it runs anything: sudo to the run account works, the run account
-cannot read the env file or the brief, it can write the checkout, and it cannot write `.git`. The
+is neither root nor the exec account (`id -u`), it cannot read the env file or the brief, it can
+write the checkout, and it cannot write `.git`. Its processes are killed only after it has passed
+all of these, so a refused account is never sent `kill -1`. The
 script's own git then works on a private copy of `.git`, with a HOME of its own and no global or
 system config, so nothing the run account writes (a replaced `.git`, a `.gitconfig`) reaches it. A run
 that fails any of these is `refused`, and its notes say which. Without `FIX_RUN_AS` the commands

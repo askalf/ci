@@ -12,7 +12,7 @@ import {
   protectedFromCheckAttr, protectedPaths, PROTECTED_ATTR, descriptionProblem,
   commitSubject, hasAttributionTrailer, neutraliseRefs, cleanNotes, summariseTests, renderNotes, fixRecord, fixProblem, saveFix,
   failingTests, FAILING_NAMES_MAX, runSecrets, leaksSecret, maskSecrets, berryInstall, runAccount, asRunAccount, proxyEnv,
-  TOOLS, FINISH_REQUIRED, askForFinish, checkFinish, runLoop, buildBrief, childEnv, onlyOrigins, runFix,
+  runAccountUidProblem, TOOLS, FINISH_REQUIRED, askForFinish, checkFinish, runLoop, buildBrief, childEnv, onlyOrigins, runFix,
   LIMITS, OUTCOMES, AUTHOR, FIX_VERSION, DEFAULT_MODEL, SUBJECT_BANNED,
 } from './fix.mjs';
 import { bumpCaller, fixCallerYaml, REVIEW_WORKFLOW, FIX_WORKFLOW, CALLERS } from './pin.mjs';
@@ -389,6 +389,10 @@ console.log('\n  the run account and the proxy');
   const argv = asRunAccount('gha-exec-run', { PATH: '/bin', HOME: '/h' }, ['timeout', '-k', '10', '5', 'npm', 'test']);
   check('a command runs through sudo as the run account, from an empty environment holding only its own variables',
     argv.join(' ') === 'sudo -n -u gha-exec-run -- env -i PATH=/bin HOME=/h timeout -k 10 5 npm test');
+  check('the run account is never root or this account, and a uid id -u did not print is no uid',
+    runAccountUidProblem('1002\n', 1001) === null && /is root/.test(runAccountUidProblem('0\n', 1001))
+      && /is this account/.test(runAccountUidProblem('1001\n', 1001)) && /could not be read/.test(runAccountUidProblem('', 1001))
+      && /could not be read/.test(runAccountUidProblem('uid=0(root)', 1001)) && /could not be read/.test(runAccountUidProblem(undefined, 1001)));
   const p = proxyEnv('http://127.0.0.1:3128');
   check('FIX_PROXY reaches every package manager, and nothing is exempt from it',
     ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy', 'npm_config_proxy', 'npm_config_https_proxy', 'YARN_HTTP_PROXY', 'YARN_HTTPS_PROXY'].every((k) => p[k] === 'http://127.0.0.1:3128')
@@ -887,15 +891,16 @@ if (!gitOk) {
     if (process.platform !== 'win32') {
       console.log('\n  runFix: commands as the run account');
       // A stand-in sudo and setfacl log what they are given; sudo runs the command as this account,
-      // reports the guard files unreadable and .git unwritable, and leaves kill and find out. The
-      // ps check runs for real and finds no process of an account that does not exist.
+      // answers id -u with `uid` (another account's by default), reports the guard files unreadable
+      // and .git unwritable, and leaves kill and find out. The ps check runs for real and finds no
+      // process of an account that does not exist.
       const stub = mkdtempSync(join(tmpdir(), 'redline-runas-'));
       const log = join(stub, 'calls.log');
-      const stubs = ({ guardReadable = false, sudoWorks = true } = {}) => {
+      const stubs = ({ guardReadable = false, sudoWorks = true, uid = process.getuid() + 1 } = {}) => {
         writeFileSync(join(stub, 'sudo'), [
           '#!/bin/sh', `echo "sudo $*" >> '${log}'`, ...(sudoWorks ? [] : ['exit 1']),
           'shift 3; [ "$1" = -- ] && shift',
-          `case "$1 $2" in "test -r") exit ${guardReadable ? 0 : 1};; "test -w") case "$3" in */.git) exit 1;; esac;; kill*|find*) exit 0;; esac`,
+          `case "$1 $2" in "id -u") echo ${uid}; exit 0;; "test -r") exit ${guardReadable ? 0 : 1};; "test -w") case "$3" in */.git) exit 1;; esac;; kill*|find*) exit 0;; esac`,
           'exec "$@"', '',
         ].join('\n'), { mode: 0o755 });
         writeFileSync(join(stub, 'setfacl'), `#!/bin/sh\necho "setfacl $*" >> '${log}'\n`, { mode: 0o755 });
@@ -909,8 +914,8 @@ if (!gitOk) {
         const { record: r } = await runFix({ ...w.ctx, env, runAs: 'gha-exec-run', guardFiles: ['/etc/askalf/fix-exec.env'] });
         const calls = readFileSync(log, 'utf8').split('\n');
         const at = (re) => calls.findIndex((l) => re.test(l));
-        check('the run account is proved first: it works and cannot read the guard files',
-          at(/^sudo -n -u gha-exec-run -- true$/) === 0 && at(/^sudo -n -u gha-exec-run -- test -r \/etc\/askalf\/fix-exec\.env$/) === 1);
+        check('the run account is proved first: it works, is another account and cannot read the guard files',
+          at(/^sudo -n -u gha-exec-run -- id -u$/) === 0 && at(/^sudo -n -u gha-exec-run -- test -r \/etc\/askalf\/fix-exec\.env$/) === 1);
         check('it may write the checkout, reads .git only, and has a HOME of its own',
           at(new RegExp(`^setfacl -R -m u:gha-exec-run:rwX,d:u:gha-exec-run:rwX,d:u:[^ ]+:rwX ${repo.dir}$`)) > 1
             && at(new RegExp(`^setfacl -R -m u:gha-exec-run:rX,d:u:gha-exec-run:rX ${repo.dir}/\\.git$`)) > 1 && at(/^setfacl -m u:gha-exec-run:rwx,.* \/.*redline-fix-home-/) > 1);
@@ -934,8 +939,21 @@ if (!gitOk) {
         const repo = repoWithTests();
         const w = world(repo, { turns: [tool('fix_write', { path: 'src/b.js', content: FIXED_B }), finish()] });
         const { record: r } = await runFix({ ...w.ctx, env, runAs: 'gha-exec-run', guardFiles: ['/etc/askalf/fix-exec.env'] });
-        check('a run account that can read the key file is refused before anything runs',
-          r.outcome === 'refused' && /can read fix-exec\.env/.test(r.notes) && w.calls.model.length === 0 && !readFileSync(log, 'utf8').includes(' -- env -i '));
+        const calls = readFileSync(log, 'utf8');
+        check('a run account that can read the key file is refused before anything runs, and is never sent kill -1',
+          r.outcome === 'refused' && /can read fix-exec\.env/.test(r.notes) && w.calls.model.length === 0 && !calls.includes(' -- env -i ') && !calls.includes(' -- kill '));
+        rmSync(w.out, { recursive: true, force: true });
+        rmSync(repo.dir, { recursive: true, force: true });
+        rmSync(log, { force: true });
+      }
+      for (const [who, uid, re] of [['root', 0, /is root/], ['this account', process.getuid(), /is this account/], ['an account id -u cannot name', 'x', /could not be read/]]) {
+        stubs({ uid });
+        const repo = repoWithTests();
+        const w = world(repo, { turns: [finish()] });
+        const { record: r } = await runFix({ ...w.ctx, env, runAs: 'gha-exec-run', guardFiles: ['/etc/askalf/fix-exec.env'] });
+        const calls = readFileSync(log, 'utf8');
+        check(`a run account that is ${who} is refused before anything runs, and is never sent kill -1`,
+          r.outcome === 'refused' && re.test(r.notes) && w.calls.model.length === 0 && !calls.includes(' -- env -i ') && !calls.includes(' -- kill '));
         rmSync(w.out, { recursive: true, force: true });
         rmSync(repo.dir, { recursive: true, force: true });
         rmSync(log, { force: true });
@@ -945,9 +963,11 @@ if (!gitOk) {
         const repo = repoWithTests();
         const w = world(repo, { turns: [finish()] });
         const { record: r } = await runFix({ ...w.ctx, env, runAs: 'gha-exec-run' });
-        check('a run account sudo cannot reach is refused', r.outcome === 'refused' && /cannot run as the run account/.test(r.notes) && w.calls.model.length === 0);
+        check('a run account sudo cannot reach is refused, and is never sent kill -1',
+          r.outcome === 'refused' && /cannot run as the run account/.test(r.notes) && w.calls.model.length === 0 && !readFileSync(log, 'utf8').includes(' -- kill '));
         rmSync(w.out, { recursive: true, force: true });
         rmSync(repo.dir, { recursive: true, force: true });
+        rmSync(log, { force: true });
       }
       {
         const repo = repoWithTests();
