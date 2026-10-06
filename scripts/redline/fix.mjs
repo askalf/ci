@@ -911,7 +911,7 @@ async function answerReview(ctx) {
   // git as this account reads no configuration the checkout's commands can write: a HOME of its
   // own, no global or system config, and with a run account a private copy of .git (below).
   const gitHome = mkdtempSync(join(tmpdir(), 'redline-fix-git-'));
-  const genv = { ...cenv, HOME: gitHome, XDG_CONFIG_HOME: gitHome, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: process.platform === 'win32' ? 'NUL' : '/dev/null',
+  const genv = { ...cenv, HOME: gitHome, TMPDIR: gitHome, XDG_CONFIG_HOME: gitHome, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: process.platform === 'win32' ? 'NUL' : '/dev/null',
     ...(process.platform === 'win32' ? { USERPROFILE: gitHome } : {}) };
   const asRun = (args) => spawnSync('sudo', ['-n', '-u', runAs, '--', ...args], { env: sudoEnv, encoding: 'utf8', timeout: 120_000 });
   // After every command: no process of the run account outlives it (none can swap a file while
@@ -1140,7 +1140,9 @@ async function answerReview(ctx) {
     }
 
     // One commit as askalf, hooks off, then the message is checked and the bundle written.
-    const hooks = join(home, 'no-hooks');
+    // An empty hooks directory where the run account cannot reach: its HOME is writable to it, and
+    // --no-verify does not skip post-commit.
+    const hooks = join(gitHome, 'no-hooks');
     mkdirSync(hooks, { recursive: true });
     git(root, genv, ['-c', `user.name=${AUTHOR.name}`, '-c', `user.email=${AUTHOR.email}`, '-c', `core.hooksPath=${hooks}`,
       'commit', '--quiet', '--no-verify', '-m', sub.subject, '-m', `Answers the review at ${ctx.reviewUrl}.`]);
