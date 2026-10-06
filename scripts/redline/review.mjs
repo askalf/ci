@@ -46,7 +46,8 @@
 // The env file holds DARIO_API_KEY, or DARIO_SOCKET (a dario key socket: the socket is the key, and
 // no key is stored or sent), and optionally REDLINE_GITHUB_TOKEN (or GITHUB_PAT_REVIEWER),
 // DARIO_URL (default http://127.0.0.1:3456), REDLINE_MODEL and REDLINE_FALLBACK_MODEL (default
-// claude-opus-5-5; set it empty for no fallback). REDLINE_PROMPT_FILE names the system
+// claude-opus-5-5; set it empty for no fallback), and REDLINE_PIN_MODEL (default claude-opus-5-5,
+// the model for a PR that only moves Redline pins; set it empty to read those on REDLINE_MODEL). REDLINE_PROMPT_FILE names the system
 // prompt, installed on the runner host: this repository is public and carries no prompt, so there is
 // no bundled fallback, and a variable that is unset, a file that cannot be read or an empty file ends
 // the run. REDLINE_VERDICT_FILE, when set, is where verdict.json goes.
@@ -79,6 +80,10 @@ export function metaPhrase(text) {
 }
 export const DEFAULT_MODEL = 'claude-fable-5-1';
 export const DEFAULT_FALLBACK_MODEL = 'claude-opus-5-5';
+// A PR that only moves Redline pins (redline-pin-bump.yml opens one in every caller after each
+// askalf/ci change) is read on this model instead of REDLINE_MODEL. On 2026-10-06 68 such
+// reviews ran on gpt-6-astra in a day and, with the rest, spent the GPT seat's week in four days.
+export const DEFAULT_PIN_MODEL = 'claude-opus-5-5';
 
 // Claude Fable 5.1, Claude Mythos 5.1 and Claude Opus 5.5 answer a forced tool_choice (type "tool"
 // or "any") with 400 `tool_choice: type "tool" and "any" are not supported for this model.`, on
@@ -616,6 +621,24 @@ export function buildBrief(pr, files, commits, diff) {
   ].join('\n');
 }
 
+const PIN_CALLERS = new Set(['.github/workflows/redline.yml', '.github/workflows/redline-fix.yml']);
+// The lines pin.mjs writes: the pinned call, the redline-ref input naming the same commit, and comments.
+const PIN_LINE = /^\s*(?:uses: askalf\/ci\/\.github\/workflows\/redline-(?:review|fix-run)\.yml@[0-9a-f]{40}|redline-ref: ['"]?[0-9a-f]{40}['"]?)?\s*(?:#.*)?$/;
+
+/**
+ * True when the PR changes nothing but Redline pins: only the caller files, each modified, and
+ * every added or removed line a pinned call, a redline-ref input or a comment. Pure.
+ * @param {{ filename: string, status: string, patch?: string }[]} files
+ */
+export function pinOnly(files) {
+  if (!files.length) return false;
+  return files.every((f) => {
+    if (!PIN_CALLERS.has(f.filename) || f.status !== 'modified' || typeof f.patch !== 'string') return false;
+    const changed = f.patch.split('\n').filter((l) => /^[+-]/.test(l) && !/^(\+\+\+|---) /.test(l));
+    return changed.length > 0 && changed.every((l) => PIN_LINE.test(l.slice(1)));
+  });
+}
+
 /**
  * Review one PR head. ctx: { repo, pr, headSha, checkout, readToken, reviewToken, darioUrl, darioKey,
  * model, fallbackModel, system, fetch, sleep, now, log }. With no reviewToken the review is built but not posted.
@@ -636,6 +659,10 @@ export async function runReview(ctx) {
   if (standing) return { outcome: 'existing', verdict: standing.state === 'APPROVED' ? 'APPROVE' : 'REQUEST_CHANGES', url: standing.html_url };
 
   const files = await ghAll(ctx, `/repos/${repo}/pulls/${n}/files`);
+  if (ctx.pinModel && ctx.pinModel !== ctx.model && pinOnly(files)) {
+    ctx.log?.(`the PR only moves Redline pins; read on ${ctx.pinModel} instead of ${ctx.model}`);
+    ctx.model = ctx.pinModel;
+  }
   const commits = await ghAll(ctx, `/repos/${repo}/pulls/${n}/commits`, 3);
   const diff = planDiff(files);
   const brief = buildBrief(pr, files, commits, diff.text);
@@ -767,6 +794,7 @@ async function main() {
     darioUrl: dario.darioUrl, darioKey: dario.darioKey,
     model: secrets.REDLINE_MODEL || DEFAULT_MODEL,
     fallbackModel: secrets.REDLINE_FALLBACK_MODEL ?? DEFAULT_FALLBACK_MODEL,
+    pinModel: secrets.REDLINE_PIN_MODEL ?? DEFAULT_PIN_MODEL,
     system,
     fetch: withDarioSocket(globalThis.fetch, dario.darioUrl, dario.darioSocket), sleep: (ms) => new Promise((r) => setTimeout(r, ms)), now: () => Date.now(),
     dryRun: env.REDLINE_DRY_RUN === '1',
