@@ -11,6 +11,8 @@
 //   fix.json     { version, repo, pr, base_head, new_head, outcome, commits, files, tests, turns, model, notes }
 //                outcome: fixed | no_change | tests_failed | refused. Always written, whatever happened.
 //   notes.md     the notes field: markdown for the PR comment forge posts.
+//   description.md  the PR's new description, only when fix_describe answered a finding on it
+//                (fix.json `description: true`); forge sets it as the PR body.
 //   fix.bundle   outcome fixed, not a dry run: the new commit, `git bundle create <base_head>..HEAD`.
 //   diff.patch   a dry run, or tests_failed: the staged diff instead of a commit.
 // The process exits 0 only for outcome fixed, so the job's own status says whether there is a fix.
@@ -83,7 +85,7 @@ export const LIMITS = {
   turns: 40, forceFinishAt: 36, timeMs: 45 * 60_000, hardMs: 52 * 60_000, files: 30, diffBytes: 400_000, fileBytes: 1_000_000,
   writeBytes: 400_000, runDefaultS: 600, runMaxS: 900, installS: 600, runOutChars: 16_000,
   maxTokens: 16_000, modelTimeoutMs: 240_000, textOnlyTurns: 3, testBounces: 1,
-  notesChars: 6_000, bodyChars: 8_000, diffChars: 120_000, subjectChars: 72,
+  notesChars: 6_000, bodyChars: 8_000, diffChars: 120_000, subjectChars: 72, descriptionChars: 20_000,
 };
 
 // ---------- the review ----------
@@ -416,11 +418,12 @@ export function failingTests(out) {
   return ids;
 }
 
-export function renderNotes({ outcome, summary = '', reason = '', files = [], tests = null, skipped = [] }) {
+export function renderNotes({ outcome, summary = '', reason = '', files = [], tests = null, skipped = [], described = false }) {
   const parts = [];
   if (outcome === 'refused') parts.push(reason || 'The fix was refused.');
   else {
     if (summary) parts.push(summary);
+    if (described) parts.push('The pull request description is replaced.');
     if (outcome === 'no_change') parts.push('No file changed.');
     if (files.length) parts.push(`Files: ${files.map((f) => `\`${f}\``).join(', ')}`);
     if (skipped.length) parts.push(`Left out: ${skipped.map((s) => `\`${s.path}\` (${s.why})`).join(', ')}`);
@@ -501,8 +504,8 @@ export function maskSecrets(text, secrets) {
 // ---------- fix.json ----------
 
 /** fix.json exactly as forge reads it. */
-export function fixRecord({ repo, pr, headSha, newHead = null, outcome, commits = [], files = [], tests = null, turns = 0, model = '', notes = '' }) {
-  return { version: FIX_VERSION, repo, pr, base_head: headSha, new_head: newHead, outcome, commits, files, tests, turns, model, notes: String(notes ?? '') };
+export function fixRecord({ repo, pr, headSha, newHead = null, outcome, commits = [], files = [], tests = null, turns = 0, model = '', notes = '', description = false }) {
+  return { version: FIX_VERSION, repo, pr, base_head: headSha, new_head: newHead, outcome, commits, files, tests, turns, model, notes: String(notes ?? ''), description: description === true };
 }
 
 /** Why a parsed fix.json is malformed, or null. Forge applies its own checks as well. */
@@ -526,14 +529,39 @@ export function fixProblem(v) {
   if (typeof v.model !== 'string') return 'model must be a string';
   if (typeof v.notes !== 'string' || v.notes.length > LIMITS.notesChars) return `notes must be a string of at most ${LIMITS.notesChars} characters`;
   if (/[\u2013\u2014]/.test(v.notes)) return 'notes must not contain an em dash';
+  if (v.description !== undefined && typeof v.description !== 'boolean') return 'description must be a boolean';
+  if (v.description === true && v.outcome !== 'fixed' && v.outcome !== 'no_change') return `${v.outcome} carries no description`;
+  return null;
+}
+
+/** An attribution line in a PR description: a trailer, a "Generated with" line or a session link. */
+export const DESCRIPTION_ATTRIBUTION = /^\s*(?:Co-Authored-By:.*|.*Generated with \[?Claude Code\]?.*|.*claude\.ai\/code\/session_\S*.*|Claude-Session:.*)$/im;
+
+/**
+ * Why `text` cannot replace the PR description `current`, or null. The whole description is
+ * replaced, so it is refused when the brief showed the model only part of the current one. Pure.
+ */
+export function descriptionProblem(text, current) {
+  const t = String(text ?? '').replace(/\r\n/g, '\n').trim();
+  // Measured exactly as buildBrief cuts it (the raw body, sliced at bodyChars), so a body the
+  // brief showed only in part is never replaced whole, whatever whitespace or line endings it has.
+  const raw = String(current ?? '');
+  if (raw.length > LIMITS.bodyChars) return `the current description is ${raw.length} characters and the brief shows ${LIMITS.bodyChars}, so it is not rewritten whole here`;
+  const c = raw.replace(/\r\n/g, '\n').trim();
+  if (!t) return 'the description is empty';
+  if (t.length > LIMITS.descriptionChars) return `the description is longer than ${LIMITS.descriptionChars} characters`;
+  if (t === c) return 'that is the current description';
+  if (DESCRIPTION_ATTRIBUTION.test(t)) return 'the description carries an attribution line';
+  if (/[\u2013\u2014]/.test(t)) return 'the description contains an em or en dash';
   return null;
 }
 
 /** Write fix.json and notes.md into dir, creating it. */
-export function saveFix(dir, record) {
+export function saveFix(dir, record, description = null) {
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, 'fix.json'), `${JSON.stringify(record, null, 2)}\n`);
   writeFileSync(join(dir, 'notes.md'), `${record.notes}\n`);
+  if (record.description === true && typeof description === 'string') writeFileSync(join(dir, 'description.md'), `${description}\n`);
 }
 
 // ---------- tools ----------
@@ -553,6 +581,8 @@ export const TOOLS = [
     input_schema: { type: 'object', required: ['path', 'content'], properties: { path: { type: 'string' }, content: { type: 'string' } } } },
   { name: 'fix_run', description: `Run one allowed command in the checkout, without a shell; stdout and stderr together, capped. Default timeout ${LIMITS.runDefaultS}s, at most ${LIMITS.runMaxS}s. The allowed commands are listed in the brief.`,
     input_schema: { type: 'object', required: ['command'], properties: { command: { type: 'string' }, timeout_seconds: { type: 'integer', minimum: 1, maximum: LIMITS.runMaxS } } } },
+  { name: 'fix_describe', description: 'Replace the pull request description with the complete new text. Only for a finding on the PR description or title: start from the current description in the brief and change only what the finding asks. No attribution lines and no em dashes.',
+    input_schema: { type: 'object', required: ['body'], properties: { body: { type: 'string', description: 'The whole new description, markdown.' } } } },
   { name: 'finish_fix', description: 'Finish. Call exactly once, last, after the tests have run on your edits.',
     input_schema: { type: 'object', required: ['outcome', 'summary'], properties: {
       outcome: { type: 'string', enum: ['fixed', 'refused'], description: 'fixed when the findings are answered in code; refused when none can be.' },
@@ -792,8 +822,9 @@ export function onlyOrigins(fetchFn, urls) {
  */
 export async function runFix(ctx) {
   const result = await answerReview(ctx);
-  // Last gate before anything is uploaded: fix.json and notes.md are public through forge.
-  if (leaksSecret(JSON.stringify(result.record), runSecrets(ctx))) {
+  // Last gate before anything is uploaded: fix.json, notes.md and description.md are public
+  // through forge (the description becomes the PR body), so the description is checked with them.
+  if (leaksSecret(`${JSON.stringify(result.record)}\n${result.description ?? ''}`, runSecrets(ctx))) {
     for (const f of ['fix.bundle', 'diff.patch']) rmSync(join(ctx.out, f), { force: true });
     return { record: fixRecord({ repo: ctx.repo, pr: ctx.pr, headSha: ctx.headSha, model: ctx.model, outcome: 'refused', turns: result.record.turns,
       notes: renderNotes({ outcome: 'refused', reason: 'The result carried a credential of this run, so nothing from it is kept.' }) }) };
@@ -855,6 +886,7 @@ async function answerReview(ctx) {
     const installDirty = changedPaths(root, cenv);
 
     const written = new Set();
+    let description = null; // fix_describe's text, set as the PR body by forge
     // The fix as it would be staged now: everything changed minus what the contract leaves out.
     // A command may have staged or committed on its own, so HEAD and the index go back to the
     // reviewed head first (the working tree is kept): every check, the test gate in finalize
@@ -918,6 +950,12 @@ async function answerReview(ctx) {
           return `wrote ${rel} (${content.split('\n').length} lines)`;
         } catch (e) { return `error: ${e.message}`; }
       }
+      if (name === 'fix_describe') {
+        const why = descriptionProblem(input.body, pr.body);
+        if (why) return `error: ${why}`;
+        description = String(input.body).replace(/\r\n/g, '\n').trim();
+        return `the PR description is replaced with this text (${description.split('\n').length} lines) when the run finishes`;
+      }
       if (name === 'fix_run') {
         const a = allowedArgv(input.command, plan, root);
         if (a.error) return `error: ${a.error}`;
@@ -980,8 +1018,9 @@ async function answerReview(ctx) {
     if (sub.outcome === 'refused') return refuse(sub.reason, { turns, tests: testsRecord });
 
     const st = staged();
+    const described = description !== null;
     if (!st.keep.length) {
-      return { record: fixRecord({ ...base, outcome: 'no_change', turns, tests: testsRecord, notes: renderNotes({ outcome: 'no_change', summary: sub.summary, skipped: st.skipped, tests: testsRecord }) }) };
+      return { record: fixRecord({ ...base, outcome: 'no_change', turns, tests: testsRecord, description: described, notes: renderNotes({ outcome: 'no_change', summary: sub.summary, skipped: st.skipped, tests: testsRecord, described }) }), description };
     }
     if (st.keep.length > LIMITS.files) return refuse(`the fix changes ${st.keep.length} files; the limit is ${LIMITS.files}`, { turns, tests: testsRecord });
     // Literal pathspecs: a file a command named `*` must not stage everything.
@@ -997,7 +1036,7 @@ async function answerReview(ctx) {
     const blobIssue = stagedProblem(root, cenv, st.keep, runSecrets(ctx));
     if (blobIssue) return refuse(blobIssue, { turns });
     const common = { turns, tests: testsRecord, files: st.keep };
-    const notes = (outcome) => renderNotes({ outcome, summary: sub.summary, files: st.keep, skipped: st.skipped, tests: testsRecord });
+    const notes = (outcome) => renderNotes({ outcome, summary: sub.summary, files: st.keep, skipped: st.skipped, tests: testsRecord, described: described && outcome === 'fixed' });
 
     if (testsRecord && testsRecord.exit_code !== 0) {
       writeFileSync(join(out, 'diff.patch'), `${diff}\n`);
@@ -1005,7 +1044,7 @@ async function answerReview(ctx) {
     }
     if (ctx.dryRun) {
       writeFileSync(join(out, 'diff.patch'), `${diff}\n`);
-      return { record: fixRecord({ ...base, ...common, outcome: 'fixed', notes: notes('fixed') }) };
+      return { record: fixRecord({ ...base, ...common, outcome: 'fixed', description: described, notes: notes('fixed') }), description };
     }
 
     // One commit as askalf, hooks off, then the message is checked and the bundle written.
@@ -1026,7 +1065,7 @@ async function answerReview(ctx) {
     const bundle = join(out, 'fix.bundle');
     git(root, cenv, ['bundle', 'create', bundle, `${headSha}..HEAD`]);
     git(root, cenv, ['bundle', 'verify', bundle]);
-    return { record: fixRecord({ ...base, ...common, outcome: 'fixed', newHead, commits, notes: notes('fixed') }) };
+    return { record: fixRecord({ ...base, ...common, outcome: 'fixed', newHead, commits, description: described, notes: notes('fixed') }), description };
   } finally {
     rmSync(home, { recursive: true, force: true });
   }
@@ -1063,11 +1102,12 @@ async function main() {
   // A job killed at its timeout or cancelled still leaves forge a fix.json that says so.
   saveFix(out, fixRecord({ ...ctx, outcome: 'refused', notes: renderNotes({ outcome: 'refused', reason: 'The fix run ended before it finished: the job timed out or was cancelled.' }) }));
   let record;
-  try { ({ record } = await runFix(ctx)); } catch (e) {
+  let description = null;
+  try { ({ record, description = null } = await runFix(ctx)); } catch (e) {
     console.error(`::error::the fix run could not finish: ${maskSecrets(e.message, hidden)}`);
     record = fixRecord({ ...ctx, outcome: 'refused', notes: renderNotes({ outcome: 'refused', reason: `The fix run could not finish: ${maskSecrets(e.message, hidden)}` }) });
   }
-  saveFix(out, record);
+  saveFix(out, record, description);
   const line = `Redline fix: ${record.outcome}${record.new_head ? ` at ${record.new_head}` : ''}${record.files.length ? ` (${record.files.length} file${record.files.length === 1 ? '' : 's'})` : ''}`;
   console.log(line);
   if (env.GITHUB_STEP_SUMMARY) appendFileSync(env.GITHUB_STEP_SUMMARY, `${line}\n\n${record.notes}\n`);

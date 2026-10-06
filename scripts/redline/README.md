@@ -38,7 +38,9 @@ checks that the checkout is exactly the reviewed head, then `fix.mjs`:
   under `.github/`, never a `.gitattributes`, never a file the reviewed head marks `redline-protected`
   in `.gitattributes`, such as captured payloads and vendored code; the marks are read from that
   commit, so nothing the run does to `.gitattributes` lifts them) and `fix_run` an allowlist only: the package.json `test`, `lint`, `typecheck`
-  and `build` scripts and `node <file>`, without a shell, in a scrubbed environment;
+  and `build` scripts and `node <file>`, without a shell, in a scrubbed environment, and
+  `fix_describe` replace the PR description for a finding on it (whole text, no attribution, no
+  em dashes, never when the brief showed only part of the current one);
 - runs the test script on the files as they finally are, however they were changed (a test run
   goes stale when a file changes after it, by `fix_write` or by a `node <file>`); a failing suite is bounced to the
   model once, then reported. The bounce, `fix.json` (`tests.failing`) and the notes name the failed
@@ -49,7 +51,8 @@ checks that the checkout is exactly the reviewed head, then `fix.mjs`:
   a protected file on disk; the commit starts again from the reviewed head, leaves that change out,
   and is checked for a protected path before the bundle is written;
 - writes `fix.json` (`outcome`: `fixed`, `no_change`, `tests_failed` or `refused`; the commits,
-  files, tests, turns and notes), `notes.md` and, for a fix, `fix.bundle` (`<head>..HEAD`). A dry
+  files, tests, turns, notes and `description`), `notes.md`, `description.md` when the description
+  is replaced, and, for a fix, `fix.bundle` (`<head>..HEAD`). A dry
   run writes `diff.patch` instead of committing.
 
 Limits: 40 turns, 30 files, 400 KB of diff; past any of them the outcome is `refused`. Wall time

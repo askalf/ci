@@ -9,7 +9,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
   parseReviewUrl, parseReviewBody, inlineItems, formatFinding, detectRunner, allowedCommands, allowedArgv, safeWritePath, stageable,
-  protectedFromCheckAttr, protectedPaths, PROTECTED_ATTR,
+  protectedFromCheckAttr, protectedPaths, PROTECTED_ATTR, descriptionProblem,
   commitSubject, hasAttributionTrailer, neutraliseRefs, cleanNotes, summariseTests, renderNotes, fixRecord, fixProblem, saveFix,
   failingTests, FAILING_NAMES_MAX, runSecrets, leaksSecret, maskSecrets, berryInstall,
   TOOLS, FINISH_REQUIRED, askForFinish, checkFinish, runLoop, buildBrief, childEnv, onlyOrigins, runFix,
@@ -200,6 +200,22 @@ console.log('\n  redline-protected files');
   }
 }
 
+console.log('\n  a new PR description');
+{
+  check('a changed description passes', descriptionProblem('Adds the token, read from the config.', 'Adds it.') === null);
+  check('empty or unchanged is refused', /empty/.test(descriptionProblem('  ', 'Adds it.')) && /current description/.test(descriptionProblem('Adds it.\n', 'Adds it.')));
+  check('attribution is refused', /attribution/.test(descriptionProblem('Body.\n\nhttps://claude.ai/code/session_01abc', 'x'))
+    && /attribution/.test(descriptionProblem('Body.\n\nCo-Authored-By: Claude <noreply@anthropic.com>', 'x')));
+  check('an em or en dash is refused', /dash/.test(descriptionProblem('A \u2014 B', 'x')) && /dash/.test(descriptionProblem('1\u20132', 'x')));
+  check('a description longer than the brief shows is never rewritten', /not rewritten whole/.test(descriptionProblem('short', 'x'.repeat(LIMITS.bodyChars + 1))));
+  check('the limit is the raw length the brief cuts: leading whitespace counts',
+    /not rewritten whole/.test(descriptionProblem('short', ' '.repeat(100) + 'x'.repeat(LIMITS.bodyChars - 50))));
+  check('the limit is the raw length the brief cuts: CRLF counts',
+    /not rewritten whole/.test(descriptionProblem('short', 'ab\r\n'.repeat(Math.floor(LIMITS.bodyChars / 4) + 1))));
+  check('a body exactly at the limit can still be rewritten', descriptionProblem('short', 'x'.repeat(LIMITS.bodyChars)) === null);
+  check('the new text has a ceiling', /longer than/.test(descriptionProblem('y'.repeat(LIMITS.descriptionChars + 1), 'x')));
+}
+
 console.log('\n  what gets staged');
 {
   const big = (p) => (p === 'big.bin' ? LIMITS.fileBytes + 1 : 10);
@@ -259,7 +275,7 @@ console.log('\n  fix.json');
 {
   const base = { repo: 'askalf/r', pr: 7, headSha: HEAD, model: 'm' };
   const fixed = fixRecord({ ...base, outcome: 'fixed', newHead: OTHER, commits: [{ sha: OTHER, subject: 'fix: x' }], files: ['a'], tests: { command: 'npm test', exit_code: 0, summary: '1 pass, 0 fail' }, turns: 3, notes: 'n' });
-  check('the record has exactly the contract keys', Object.keys(fixed).join() === 'version,repo,pr,base_head,new_head,outcome,commits,files,tests,turns,model,notes');
+  check('the record has exactly the contract keys', Object.keys(fixed).join() === 'version,repo,pr,base_head,new_head,outcome,commits,files,tests,turns,model,notes,description');
   check('fixed passes', fixProblem(fixed) === null && fixed.version === FIX_VERSION);
   check('no_change passes with no commit', fixProblem(fixRecord({ ...base, outcome: 'no_change', notes: 'n', turns: 1 })) === null);
   check('tests_failed passes with files and tests and no commit', fixProblem(fixRecord({ ...base, outcome: 'tests_failed', files: ['a'], tests: { command: 'npm test', exit_code: 1, summary: '' }, notes: 'n' })) === null);
@@ -285,7 +301,7 @@ console.log('\n  fix.json');
 
 console.log('\n  finish_fix and the loop');
 {
-  check('the tool set is the contract', TOOLS.map((t) => t.name).join() === 'fix_list,fix_read,fix_search,fix_write,fix_run,finish_fix');
+  check('the tool set is the contract', TOOLS.map((t) => t.name).join() === 'fix_list,fix_read,fix_search,fix_write,fix_run,fix_describe,finish_fix');
   // dario remaps a client tool with a common name (read_file, write_file, run, search, list_files, ...)
   // onto Claude Code's own and sends the rest as mcp__client__<name>. Every name must be one no client
   // uses, so the whole set goes out one way.
@@ -436,7 +452,7 @@ if (!gitOk) {
     check('no test script: tests is null and the notes say so', r.tests === null && /no test script/.test(r.notes));
     check('the record passes the schema and carries the turns and the model', fixProblem(r) === null && r.turns === 4 && r.model === 'm');
     check('the notes are the summary, files and tests, clean', r.notes.startsWith('Reads the token from the config') && r.notes.includes('Files: `src/b.js`') && !/[\u2013\u2014]/.test(r.notes));
-    check('the model got the brief with the findings and the tools, the key in a header', w.calls.model[0].messages[0].content.includes('[1] blocking `src/b.js:1`') && w.calls.model[0].tools.length === 6 && w.calls.model[0].key === 'k');
+    check('the model got the brief with the findings and the tools, the key in a header', w.calls.model[0].messages[0].content.includes('[1] blocking `src/b.js:1`') && w.calls.model[0].tools.length === 7 && w.calls.model[0].key === 'k');
     check('the read went back to the model, the write and run reported', JSON.stringify(w.calls.model[1].messages.at(-1)).includes('export const token') && JSON.stringify(w.calls.model[2].messages.at(-1)).includes('wrote src/b.js') && JSON.stringify(w.calls.model[3].messages.at(-1)).includes('exit 0'));
     const bundle = join(w.out, 'fix.bundle');
     check('fix.bundle exists and verifies against the repo', existsSync(bundle) && spawnSync('git', ['bundle', 'verify', bundle], { cwd: repo.dir, encoding: 'utf8' }).status === 0);
@@ -627,6 +643,44 @@ if (!gitOk) {
     rmSync(repo.dir, { recursive: true, force: true });
   }
 
+  console.log('\n  runFix: a finding on the description');
+  {
+    const repo = makeRepo();
+    const body = '### 1. Blocking: `PR description:1`\n\n> Adds it.\n\nSay what is added.';
+    const w = world(repo, { body, comments: [], turns: [
+      tool('fix_describe', { body: 'Adds it \u2014 the token.' }),
+      tool('fix_describe', { body: 'Adds the token, read from the environment.' }),
+      finish({ summary: 'The description says what the PR adds.' }),
+    ] });
+    const { record: r, description } = await runFix(w.ctx);
+    check('a description the rules refuse is answered with the reason', /dash/.test(JSON.stringify(w.calls.model[1].messages.at(-1))));
+    check('a description-only answer is no_change with description true', r.outcome === 'no_change' && r.description === true && fixProblem(r) === null, JSON.stringify(r));
+    check('runFix returns the text', description === 'Adds the token, read from the environment.');
+    check('the notes say the description is replaced', /description is replaced/.test(r.notes));
+    saveFix(w.out, r, description);
+    check('saveFix writes description.md next to fix.json', readFileSync(join(w.out, 'description.md'), 'utf8') === 'Adds the token, read from the environment.\n');
+    check('a run without fix_describe writes no description.md', (() => { const d = mkdtempSync(join(tmpdir(), 'redline-fix-nodesc-')); saveFix(d, fixRecord({ repo: 'askalf/r', pr: 7, headSha: repo.head, outcome: 'no_change' }), null); const ok = !existsSync(join(d, 'description.md')); rmSync(d, { recursive: true, force: true }); return ok; })());
+    check('fix.json refuses a description on a refusal', /carries no description/.test(fixProblem({ ...r, outcome: 'refused', description: true })));
+    rmSync(w.out, { recursive: true, force: true });
+    rmSync(repo.dir, { recursive: true, force: true });
+  }
+  {
+    // A description that carries a credential of the run is refused like any other output.
+    const KEY = 'dk_live_0123456789';
+    const repo = makeRepo();
+    const body = '### 1. Blocking: `PR description:1`\n\n> Adds it.\n\nSay what is added.';
+    const w = world(repo, { body, comments: [], turns: [
+      tool('fix_describe', { body: `Adds the token. Key: ${KEY}` }),
+      finish({ summary: 'The description says what the PR adds.' }),
+    ] });
+    const { record: r, description } = await runFix({ ...w.ctx, darioKey: KEY });
+    check('a description carrying the model key refuses the run, with no description returned',
+      r.outcome === 'refused' && /credential/.test(r.notes) && r.description !== true && (description ?? null) === null && fixProblem(r) === null, JSON.stringify(r));
+    saveFix(w.out, r, description ?? null);
+    check('and no description.md is written', !existsSync(join(w.out, 'description.md')));
+    rmSync(w.out, { recursive: true, force: true });
+    rmSync(repo.dir, { recursive: true, force: true });
+  }
   {
     // A clean filter (written by a command: a .gitattributes rule and a .git/config entry) stages a
     // binary blob with the key while the working-tree file stays harmless. The index is checked.
