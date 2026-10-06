@@ -918,7 +918,11 @@ if (!gitOk) {
         check('the install, node <file> and the test script all run as the run account, under timeout, from a clean environment',
           ran.some((l) => /timeout -k 10 \d+ npm install /.test(l)) && ran.some((l) => /timeout -k 10 \d+ node test\.mjs$/.test(l)) && ran.some((l) => /timeout -k 10 \d+ npm test$/.test(l))
             && ran.every((l) => /^sudo -n -u gha-exec-run -- env -i PATH=/.test(l) && !/GH_READ_TOKEN|DARIO_API_KEY/.test(l)));
-        const killAfter = ran.every((l) => { const i = calls.indexOf(l); return /^sudo -n -u gha-exec-run -- kill -KILL -1$/.test(calls[i + 1]) && /^sudo -n -u gha-exec-run -- find .* -user gha-exec-run /.test(calls[i + 2]); });
+        const killAfter = ran.every((l) => {
+          const i = calls.indexOf(l);
+          return /^sudo -n -u gha-exec-run -- kill -KILL -1$/.test(calls[i + 1]) && /^sudo -n -u gha-exec-run -- chmod -R u\+rwX /.test(calls[i + 2])
+            && /^sudo -n -u gha-exec-run -- setfacl -R -m u:[^:]+:rwX,d:u:[^:]+:rwX /.test(calls[i + 3]);
+        });
         check('after every command its processes are killed and what it made is readable again', killAfter);
         check('and the fix goes through', r.outcome === 'fixed' && r.files.join() === 'src/b.js' && fixProblem(r) === null);
         rmSync(w.out, { recursive: true, force: true });
@@ -1016,6 +1020,17 @@ if (!gitOk) {
         const run = await realRun(body(mark));
         check(`${name} runs nothing as this account`, !existsSync(mark) && run.r.outcome !== 'refused', run.r.notes);
         rmSync(mark, { force: true });
+        done(run);
+      }
+      {
+        // The test strips the inherited ACL from a directory and a file it made and locks them to
+        // itself (700, 600, and a 000 directory inside). This account still reaches and commits them.
+        const lock = "import { mkdirSync, writeFileSync, chmodSync } from 'node:fs';\nimport { spawnSync } from 'node:child_process';\n"
+          + "mkdirSync('locked/inner', { recursive: true });\nwriteFileSync('locked/f.txt', 'x\\n');\nwriteFileSync('locked/inner/g.txt', 'y\\n');\n"
+          + "spawnSync('setfacl', ['-R', '-b', 'locked']);\nchmodSync('locked/f.txt', 0o600);\nchmodSync('locked/inner/g.txt', 0o600);\nchmodSync('locked/inner', 0o000);\nchmodSync('locked', 0o700);\n";
+        const run = await realRun(lock);
+        check('files the run account locked to itself are reached and committed, and nothing is left this account cannot remove',
+          run.r.outcome === 'fixed' && ['locked/f.txt', 'locked/inner/g.txt'].every((f) => run.r.files.includes(f)), run.r.notes);
         done(run);
       }
       {

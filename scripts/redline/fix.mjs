@@ -908,6 +908,7 @@ async function answerReview(ctx) {
   const home = mkdtempSync(join(tmpdir(), 'redline-fix-home-'));
   const cenv = childEnv(ctx.env ?? process.env, home, ctx.proxy);
   const sudoEnv = { PATH: cenv.PATH };
+  const me = userInfo().username;
   // git as this account reads no configuration the checkout's commands can write: a HOME of its
   // own, no global or system config, and with a run account a private copy of .git (below).
   const gitHome = mkdtempSync(join(tmpdir(), 'redline-fix-git-'));
@@ -930,7 +931,16 @@ async function answerReview(ctx) {
       if (ps.status !== 0 && ps.status !== 1) throw new Error(`could not confirm that the run account has no process left (ps exited ${ps.status})`);
       if (round >= 4) throw new Error(`the run account still has ${live.length} process(es) after five kills`);
     }
-    asRun(['find', root, home, '-user', runAs, '!', '-type', 'l', '-exec', 'chmod', 'u+rwX,g+rwX', '{}', '+']);
+    // What it made is reachable here again, whatever it did to its own modes and ACLs (a command
+    // can strip the inherited ACL and set 700): as owner, it gives itself traversal first, then
+    // this account an explicit ACL entry, recursively. Then this account must reach every path;
+    // a path it cannot is a refusal, never a file git silently skips.
+    asRun(['chmod', '-R', 'u+rwX', root, home]);
+    asRun(['setfacl', '-R', '-m', `u:${me}:rwX,d:u:${me}:rwX`, root, home]);
+    const blocked = spawnSync('find', [root, home, '!', '-type', 'l', '(', '!', '-readable', '-o', '-type', 'd', '!', '-executable', ')', '-print', '-quit'],
+      { env: sudoEnv, encoding: 'utf8' });
+    const stuck = String(blocked.stdout ?? '').trim();
+    if (stuck) throw new Error(`the run account left a path this account cannot reach: ${relative(root, stuck).slice(0, 200)}`);
   };
   // Every command the checkout supplies goes through here.
   const exec = (argv, seconds, extraEnv = {}) => { const r = run(root, { ...cenv, ...extraEnv }, argv, seconds, runAs); settle(); return r; };
@@ -956,7 +966,6 @@ async function answerReview(ctx) {
         cpSync(git(root, genv, ['rev-parse', '--absolute-git-dir']), privateGit, { recursive: true });
         Object.assign(genv, { GIT_DIR: privateGit, GIT_WORK_TREE: realpathSync(root) });
       } catch (e) { return refuse(`the checkout's .git could not be copied aside: ${String(e.message).slice(0, 200)}`); }
-      const me = userInfo().username;
       const acl = (args) => { const r = spawnSync('setfacl', args, { env: sudoEnv, encoding: 'utf8' }); if (r.status !== 0) throw new Error(`setfacl failed: ${String(r.stderr || r.error?.message || '').trim().slice(0, 200)}`); };
       try {
         acl(['-R', '-m', `u:${runAs}:rwX,d:u:${runAs}:rwX,d:u:${me}:rwX`, root]);
@@ -1172,9 +1181,11 @@ async function answerReview(ctx) {
     git(root, genv, ['bundle', 'verify', bundle]);
     return { record: fixRecord({ ...base, ...common, outcome: 'fixed', newHead, commits, description: described, notes: notes('fixed') }), description };
   } finally {
+    // Cleanup never replaces the result: a failure here is a warning.
     try { settle(); } catch (e) { ctx.log?.(`::warning::${e.message}`); }
-    rmSync(home, { recursive: true, force: true });
-    rmSync(gitHome, { recursive: true, force: true });
+    for (const dir of [home, gitHome]) {
+      try { rmSync(dir, { recursive: true, force: true }); } catch (e) { ctx.log?.(`::warning::could not remove ${dir}: ${e.code ?? e.message}`); }
+    }
   }
 }
 

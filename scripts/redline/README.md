@@ -91,10 +91,12 @@ run account.
    ```
    gha-exec ALL=(gha-exec-run) NOPASSWD: ALL
    ```
-   `fix.mjs` runs `sudo -n -u gha-exec-run -- env -i ...` for each command, then `kill -KILL -1`
-   and a `find ... chmod` as the same account. `kill -1` signals all of the account's processes at
-   once, so one that keeps forking cannot escape it; the script then checks with `ps` that none is
-   left alive and refuses the run if any is.
+   `fix.mjs` runs `sudo -n -u gha-exec-run -- env -i ...` for each command, then, as the same
+   account, `kill -KILL -1`, `chmod -R u+rwX` and `setfacl -R -m u:<exec account>:rwX,...`.
+   `kill -1` signals all of the account's processes at once, so one that keeps forking cannot
+   escape it, and `ps` must then show none alive. The `chmod` and `setfacl` give the exec account
+   back whatever the run account locked to itself, and every path must then be reachable. Either
+   check failing refuses the run.
 3. **ACLs and paths.** The `acl` package, for `setfacl`, on a filesystem mounted with ACL support.
    Every directory above the runner's work directory must be searchable by the run account (`x`),
    and the tool cache setup-node installs into must be readable and searchable by it, since the
