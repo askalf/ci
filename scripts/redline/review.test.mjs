@@ -262,8 +262,9 @@ console.log('\n  verdictAtHead');
 
 // ---------- end to end against a fake GitHub and a fake model ----------
 
+
 const PATCH = '@@ -1 +1,2 @@\n+export const token = process.env.X;\n const y = 2;';
-function world({ reviews = [], heads = [HEAD], turns, modelStatus = [], draft = false } = {}) {
+function world({ reviews = [], heads = [HEAD], turns, modelStatus = [], draft = false, files = null } = {}) {
   const calls = { posted: [], model: [], sleeps: 0 };
   let headReads = 0;
   const json = (body, status = 200, headers = {}) => ({ ok: status < 300, status, headers: new Headers(headers), json: async () => body, text: async () => JSON.stringify(body) });
@@ -285,7 +286,7 @@ function world({ reviews = [], heads = [HEAD], turns, modelStatus = [], draft = 
     if (init.method === 'POST' && p.endsWith('/reviews')) { const b = JSON.parse(init.body); calls.posted.push({ ...b, auth: init.headers.authorization }); return json({ html_url: 'https://x/review/1' }); }
     if (/\/pulls\/7$/.test(p)) { const sha = heads[Math.min(headReads++, heads.length - 1)]; return json({ number: 7, state: 'open', draft, title: 'feat: add token', body: 'Adds it.', user: { login: 'askalf' }, head: { sha, ref: 'feat/x', repo: { full_name: 'askalf/r' } }, base: { ref: 'main', repo: { full_name: 'askalf/r' } } }); }
     if (p.endsWith('/reviews')) return json(u.searchParams.get('page') === '1' ? reviews : []);
-    if (p.endsWith('/files')) return json(u.searchParams.get('page') === '1' ? [{ filename: 'src/b.js', status: 'modified', additions: 1, deletions: 0, patch: PATCH }] : []);
+    if (p.endsWith('/files')) return json(u.searchParams.get('page') === '1' ? (files ?? [{ filename: 'src/b.js', status: 'modified', additions: 1, deletions: 0, patch: PATCH }]) : []);
     if (p.endsWith('/commits')) return json(u.searchParams.get('page') === '1' ? [{ sha: HEAD, commit: { message: 'feat: add token' } }] : []);
     return json({ message: `unexpected ${p}` }, 404);
   };
@@ -826,6 +827,48 @@ console.log('\n  pin bump');
     own.includes("if: github.event_name == 'workflow_dispatch' || (github.event.pull_request.draft == false && github.event.pull_request.head.repo.full_name == github.repository)\n"));
   check('the caller passes the dispatch inputs through',
     own.includes('      pr: ${{ inputs.pr }}\n      head: ${{ inputs.head }}\n      reread: ${{ inputs.reread == true }}\n'));
+}
+
+// ---------- a PR that only moves Redline pins ----------
+{
+  const { pinOnly } = reviewModule;
+  const A = 'a'.repeat(40), B = 'b'.repeat(40);
+  const bump = (path = '.github/workflows/redline.yml') => ({ filename: path, status: 'modified', patch:
+    `@@ -9,7 +9,7 @@\n jobs:\n   review:\n-    uses: askalf/ci/.github/workflows/redline-review.yml@${A}  # main 2026-10-05\n+    uses: askalf/ci/.github/workflows/redline-review.yml@${B}  # main 2026-10-06, askalf/ci#27\n     with:\n-      redline-ref: ${A}\n+      redline-ref: ${B}` });
+  check('a bump of the review caller is pin-only', pinOnly([bump()]));
+  check('the review and fix callers together are pin-only', pinOnly([bump(), bump('.github/workflows/redline-fix.yml')]));
+  check('the fix-run pin is a pin line', pinOnly([{ filename: '.github/workflows/redline-fix.yml', status: 'modified',
+    patch: `@@ -1 +1 @@\n-    uses: askalf/ci/.github/workflows/redline-fix-run.yml@${A}\n+    uses: askalf/ci/.github/workflows/redline-fix-run.yml@${B}` }]));
+  check('any other line in a caller is not', !pinOnly([{ filename: '.github/workflows/redline.yml', status: 'modified',
+    patch: `@@ -1 +1,2 @@\n+    secrets: inherit\n-      redline-ref: ${A}\n+      redline-ref: ${B}` }]));
+  check('another repo\'s reusable workflow is not a Redline pin', !pinOnly([{ filename: '.github/workflows/redline.yml', status: 'modified',
+    patch: `@@ -1 +1 @@\n-    uses: someone/ci/.github/workflows/redline-review.yml@${A}\n+    uses: someone/ci/.github/workflows/redline-review.yml@${B}` }]));
+  check('any other file is not', !pinOnly([bump(), { filename: 'src/b.js', status: 'modified', patch: PATCH }]));
+  check('a new or renamed caller is not', !pinOnly([{ ...bump(), status: 'added' }]));
+  check('a file with no patch (too large to show) is not', !pinOnly([{ filename: '.github/workflows/redline.yml', status: 'modified' }]));
+  check('no files is not', !pinOnly([]));
+
+  {
+    const { ctx, calls } = world({ files: [bump()], turns: [submit({ ...APPROVE, summary: 'Moves the pin; read .github/workflows/redline.yml.' })] });
+    ctx.model = 'gpt-6-astra'; ctx.pinModel = 'claude-opus-5-5';
+    const lines = [];
+    ctx.log = (l) => lines.push(l);
+    await runReview(ctx);
+    check('a pin-only PR is read on the pin model', calls.model.length > 0 && calls.model.every((b) => b.model === 'claude-opus-5-5'));
+    check('and the switch is logged', lines.some((l) => l.includes('only moves Redline pins; read on claude-opus-5-5 instead of gpt-6-astra')));
+  }
+  {
+    const { ctx, calls } = world({ turns: [submit(APPROVE)] });
+    ctx.model = 'gpt-6-astra'; ctx.pinModel = 'claude-opus-5-5';
+    await runReview(ctx);
+    check('a code PR stays on REDLINE_MODEL', calls.model.every((b) => b.model === 'gpt-6-astra'));
+  }
+  {
+    const { ctx, calls } = world({ files: [bump()], turns: [submit(APPROVE)] });
+    ctx.model = 'gpt-6-astra'; ctx.pinModel = '';
+    await runReview(ctx);
+    check('an empty REDLINE_PIN_MODEL reads pin bumps on REDLINE_MODEL', calls.model.every((b) => b.model === 'gpt-6-astra'));
+  }
 }
 
 rmSync(root, { recursive: true, force: true });

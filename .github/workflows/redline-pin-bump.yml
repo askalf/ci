@@ -11,21 +11,16 @@
 # refuses a change to a workflow file from a token without it. A PR opened with GITHUB_TOKEN would
 # also start no CI, so no required check would report.
 # Without the secret the job says so and stops, green.
+#
+# Each bump PR is a review in every caller, so bumps are batched: the hourly run bumps to the newest
+# main commit that changed what a caller runs, once that commit has been quiet for QUIET_MINUTES, so a
+# burst of merges is one wave. A dispatch bumps at once, for a fix that cannot wait. An open bump PR
+# that already proposes the picked commit is left alone, so its review and checks are not restarted.
 name: Redline pin bump
 
 on:
-  push:
-    branches: [main]
-    # What a caller runs: the scripts the reusable workflows fetch, and the workflows. The tests,
-    # their fixtures and the README change nothing a caller runs, so they move no pin.
-    paths:
-      - scripts/redline/**
-      - '!scripts/redline/*.test.mjs'
-      - '!scripts/redline/test-fixtures/**'
-      - '!scripts/redline/README.md'
-      - .github/workflows/redline-review.yml
-      - .github/workflows/redline-fix-run.yml
-      - .github/workflows/redline-pin-bump.yml
+  schedule:
+    - cron: '41 * * * *'
   workflow_dispatch:
 
 permissions: {}
@@ -36,7 +31,7 @@ concurrency:
 
 jobs:
   bump:
-    # push to main and dispatch only, so only our own code runs here: on ci-exec, a pin bump
+    # Schedule and dispatch only, so only our own code runs here: on ci-exec, a pin bump
     # reaches the callers while GitHub's hosted queue is down.
     runs-on: [self-hosted, ci-exec]
     timeout-minutes: 10
@@ -56,6 +51,17 @@ jobs:
       # missing one is skipped, not an error.
       CALLER_PATHS: >-
         .github/workflows/redline.yml .github/workflows/redline-fix.yml
+      # What a caller runs: the scripts the reusable workflows fetch, and the workflows. The tests,
+      # their fixtures and the README change nothing a caller runs, so they move no pin.
+      PIN_PATHS: >-
+        scripts/redline
+        :(exclude)scripts/redline/*.test.mjs
+        :(exclude)scripts/redline/test-fixtures
+        :(exclude)scripts/redline/README.md
+        .github/workflows/redline-review.yml
+        .github/workflows/redline-fix-run.yml
+        .github/workflows/redline-pin-bump.yml
+      QUIET_MINUTES: 60
     steps:
       - name: Check for the token
         id: guard
@@ -69,24 +75,50 @@ jobs:
             echo "ok=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Fetch the pin rewriter
+      - name: Fetch the pin rewriter and main's history
         if: steps.guard.outputs.ok == 'true'
         uses: askalf/checkout-with-retry@115a6407547e9711edbc2e915838d495cad9583f  # v1.1.0
         with:
+          fetch-depth: 0
           sparse-checkout: scripts/redline/pin.mjs
           sparse-checkout-cone-mode: false
           persist-credentials: false
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - name: Pick the commit to pin
         if: steps.guard.outputs.ok == 'true'
+        id: pick
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          # Unquoted on purpose: PIN_PATHS is a list of pathspecs, none with a space; set -f keeps
+          # the shell from globbing them, so git reads each pattern itself. --first-parent walks
+          # main's own history, so a merge is picked with the time it landed, not the time of the
+          # merged branch's last commit.
+          set -f
+          # shellcheck disable=SC2086
+          read -r sha at < <(git log -1 --first-parent --format='%H %ct' HEAD -- $PIN_PATHS)
+          set +f
+          age=$(( ( $(date +%s) - at ) / 60 ))
+          echo "newest change a caller runs: ${sha:0:7}, ${age} minutes ago"
+          if [ "$EVENT" = schedule ] && [ "$age" -lt "$QUIET_MINUTES" ]; then
+            echo "::notice::${sha:0:7} landed ${age} minutes ago; the bump waits for ${QUIET_MINUTES} quiet minutes, so a burst of merges is one wave"
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+            echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        if: steps.pick.outputs.ok == 'true'
         with:
           node-version: 22
 
       - name: Open or update a bump PR in each caller
-        if: steps.guard.outputs.ok == 'true'
+        if: steps.pick.outputs.ok == 'true'
         env:
           GH_TOKEN: ${{ secrets.REDLINE_PIN_BUMP_TOKEN }}
-          SHA: ${{ github.sha }}
+          SHA: ${{ steps.pick.outputs.sha }}
           SOURCE: ${{ github.repository }}
         run: |
           set -euo pipefail
@@ -121,6 +153,17 @@ jobs:
               todo="${todo:+$todo }${path}"
             done
             [ -n "$todo" ] || return "$bad"
+            # An open bump PR that already proposes this commit in every file that needs it is left
+            # alone: resetting its branch would restart its review and checks for no change.
+            open="$(gh pr list --repo "$repo" --head "$BRANCH" --state open --json number --jq '.[0].number // empty')"
+            if [ -n "$open" ]; then
+              local carried=1
+              for path in $todo; do
+                if ! current="$(gh api "repos/${repo}/contents/${path}?ref=${BRANCH}" --jq .content 2>/dev/null | base64 -d)"; then carried=0; break; fi
+                if ! printf '%s\n' "$current" | grep -Eq "redline-(review|fix-run).yml@${SHA}" || ! printf '%s\n' "$current" | grep -q "redline-ref: ${SHA}"; then carried=0; break; fi
+              done
+              if [ "$carried" -eq 1 ]; then echo "#${open} already proposes ${short}"; return "$bad"; fi
+            fi
             # The bump branch is this job's alone: reset it to the default branch tip each time,
             # so an open bump PR carries exactly the newest pin, one commit per caller file.
             if gh api "repos/${repo}/git/ref/heads/${BRANCH}" >/dev/null 2>&1; then
