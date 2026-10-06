@@ -12,7 +12,8 @@ import {
   verdictRecord, verdictProblem, saveVerdict, VERDICT_VERSION,
 } from './review.mjs';
 import * as reviewModule from './review.mjs';
-import { withRetry, OutOfTime } from './review.mjs';
+import { withRetry, OutOfTime, darioAccess, socketFetch, withDarioSocket, callModelWith } from './review.mjs';
+import { createServer as createHttpServer } from 'node:http';
 import { bumpCaller, REVIEW_WORKFLOW } from './pin.mjs';
 
 let pass = 0;
@@ -114,6 +115,55 @@ console.log('\n  retries inside a deadline');
   let calls = 0;
   const ok = await withRetry(ctx, 'model', async () => (++calls < 2 ? { ok: false, status: 503, text: async () => '' } : { ok: true }));
   check('with no deadline the retries are as before', ok.ok && calls === 2 && t === 5_000);
+}
+
+console.log('\n  dario: a key or a key socket');
+{
+  const key = darioAccess({ DARIO_API_KEY: 'dk_x' });
+  check('a key alone: sent as before, at the default URL', key.darioKey === 'dk_x' && key.darioSocket === '' && key.darioUrl === 'http://127.0.0.1:3456' && !key.error && !key.warning);
+  const sock = darioAccess({ DARIO_SOCKET: '/run/dario/fix.sock' });
+  check('a key socket alone: no key needed, none sent', sock.darioKey === '' && sock.darioSocket === '/run/dario/fix.sock' && !sock.error && !sock.warning);
+  const both = darioAccess({ DARIO_SOCKET: '/run/dario/fix.sock', DARIO_API_KEY: 'dk_x' });
+  check('both: the socket wins, the key is not used, and a warning says to remove it', both.darioKey === '' && /remove it/.test(both.warning));
+  check('a relative socket path is an error', /absolute/.test(darioAccess({ DARIO_SOCKET: 'run/fix.sock' }).error ?? ''));
+  check('neither is an error that names both', /DARIO_API_KEY is not set .*DARIO_SOCKET/.test(darioAccess({}).error ?? ''));
+}
+if (process.platform !== 'win32') {
+  const dir = mkdtempSync(join(tmpdir(), 'redline-sock-'));
+  const sock = join(dir, 'dario.sock');
+  const seen = [];
+  const server = createHttpServer((req, res) => {
+    let body = '';
+    req.on('data', (c) => { body += c; });
+    req.on('end', () => {
+      seen.push({ method: req.method, url: req.url, headers: req.headers, body });
+      if (req.url === '/hang') return;
+      res.writeHead(req.url === '/gone' ? 204 : req.url === '/reset' ? 205 : 200, { 'content-type': 'application/json', 'x-dario-upstream-rejection': 'none' });
+      res.end(['/gone', '/reset'].includes(req.url) ? undefined : JSON.stringify({ content: [{ type: 'text', text: 'PONG' }] }));
+    });
+  });
+  await new Promise((r) => server.listen(sock, r));
+  const f = socketFetch(sock);
+  const r = await f('http://127.0.0.1:3456/v1/messages?x=1', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"a":"é"}' });
+  check('socketFetch: method, path, query and body arrive over the socket', seen[0]?.method === 'POST' && seen[0].url === '/v1/messages?x=1' && seen[0].body === '{"a":"é"}' && seen[0].headers['content-length'] === String(Buffer.byteLength('{"a":"é"}')));
+  check('socketFetch: a Response with status, headers and body', r.ok && r.status === 200 && r.headers.get('x-dario-upstream-rejection') === 'none' && (await r.json()).content[0].text === 'PONG');
+  const empty = await f('http://127.0.0.1:3456/gone');
+  check('socketFetch: a 204 has no body', empty.status === 204 && (await empty.text()) === '');
+  const reset = await throws(async () => { const r205 = await f('http://127.0.0.1:3456/reset'); if (r205.status !== 205 || (await r205.text()) !== '') throw new Error(`got ${r205.status}`); });
+  check('socketFetch: a 205 resolves with no body instead of throwing in a listener', reset === null);
+  const hung = await throws(() => f('http://127.0.0.1:3456/hang', { signal: AbortSignal.timeout(100) }));
+  check('socketFetch: a timeout aborts the request', hung?.name === 'TimeoutError');
+  const elsewhere = [];
+  const routed = withDarioSocket((url) => { elsewhere.push(String(url)); return Promise.resolve(new Response('{}')); }, 'http://127.0.0.1:3456', sock);
+  seen.length = 0;
+  await routed('https://api.github.com/repos/a/b');
+  const res = await callModelWith({ darioUrl: 'http://127.0.0.1:3456', darioKey: '', model: 'm', fetch: routed, sleep: async () => {}, now: () => Date.now() }, { system: 's', messages: [{ role: 'user', content: 'hi' }], tools: [] });
+  check('withDarioSocket: dario goes over the socket, everything else through the given fetch', elsewhere.join() === 'https://api.github.com/repos/a/b' && seen.length === 1 && seen[0].url === '/v1/messages');
+  check('callModelWith over a key socket sends no x-api-key, and gets the reply', !('x-api-key' in seen[0].headers) && JSON.parse(seen[0].body).model === 'm' && res.content[0].text === 'PONG');
+  check('withDarioSocket without a socket is the given fetch', withDarioSocket(globalThis.fetch, 'http://127.0.0.1:3456', '') === globalThis.fetch);
+  server.closeAllConnections?.();
+  await new Promise((r) => server.close(r));
+  rmSync(dir, { recursive: true, force: true });
 }
 
 console.log('\n  diff, brief and grounding');
@@ -590,7 +640,7 @@ console.log('\n  CLI');
   const empty = run({ ...base, REDLINE_PROMPT_FILE: join(dir, 'empty.md') });
   check('an empty prompt file: exit 2, the error names the variable', empty.status === 2 && /::error::REDLINE_PROMPT_FILE: .*empty\.md is empty/.test(empty.stderr));
   const s = run({ ...base, REDLINE_PROMPT_FILE: PROMPT_FIXTURE });
-  check('with the prompt file, a reviewer token is optional: the next missing key is the model key', s.status === 2 && s.stderr.includes('::error::DARIO_API_KEY is not set') && !/GITHUB_PAT_REVIEWER|REDLINE_GITHUB_TOKEN|REDLINE_PROMPT_FILE/.test(s.stderr));
+  check('with the prompt file, a reviewer token is optional: the next missing key is the model key', s.status === 2 && s.stderr.includes('::error::DARIO_API_KEY is not set (or set DARIO_SOCKET') && !/GITHUB_PAT_REVIEWER|REDLINE_GITHUB_TOKEN|REDLINE_PROMPT_FILE/.test(s.stderr));
   let staleLeft = true;
   try { readFileSync(stale); } catch { staleLeft = false; }
   check('a verdict file left by an earlier run is removed before the review starts', !staleLeft);
