@@ -44,8 +44,9 @@
 //     model must finish, and no command or test runs past hardMs, inside the job's timeout.
 //   - Every command the checkout supplies (the install, the tests, node <file>) runs as the run
 //     account FIX_RUN_AS names in the env file, through sudo, from an empty environment: not the
-//     account that reads FIX_ENV_FILE. Before anything runs, the run account is proved to work
-//     and to read neither the env file nor the brief; it gets the checkout to write, its .git
+//     account that reads FIX_ENV_FILE. Before anything runs, the run account is proved to work,
+//     to be neither root nor this account, and to read neither the env file nor the brief; its
+//     processes are killed only once it has passed. It gets the checkout to write, its .git
 //     read-only, and a HOME of its own. This process's git reads nothing the run account can
 //     write: it has a HOME of its own with no global or system config, and works on a private
 //     copy of .git, so a command that replaces the checkout's .git (its directory is writable) or
@@ -774,6 +775,19 @@ export function asRunAccount(runAs, env, argv) {
 }
 
 /**
+ * Why the account sudo reaches, whose `id -u` printed `uid`, cannot be the run account; null when
+ * it can. Every process of the run account is killed with kill -1, so it is never root and never
+ * this account (ownUid). Pure.
+ */
+export function runAccountUidProblem(uid, ownUid) {
+  const s = String(uid ?? '').trim();
+  if (!/^\d+$/.test(s)) return `the run account's uid could not be read (\`id -u\` printed ${JSON.stringify(s.slice(0, 40))})`;
+  if (Number(s) === 0) return 'the run account is root, and its processes are all killed after every command';
+  if (Number(s) === ownUid) return 'the run account is this account, and its processes are all killed after every command';
+  return null;
+}
+
+/**
  * Run argv in cwd with a hard time cap: coreutils timeout on the runner, node's own elsewhere.
  * With runAs, the command runs as that account (asRunAccount). argv is already allowlisted, so on
  * Windows (a developer box, never the runner) a package manager's .cmd shim may go through the
@@ -921,8 +935,11 @@ async function answerReview(ctx) {
   // the task list, so a process that keeps forking cannot slip a child past it (pkill lists, then
   // signals). The account must then show no live process (a zombie holds no code); anything else,
   // or a ps that cannot say, throws, and the run is refused rather than read on.
+  // Off until the run account has passed every check below, so a refused account (root, this
+  // account, one that can read the key) is never sent kill -1, not even by the cleanup in finally.
+  let armed = false;
   const settle = () => {
-    if (!runAs) return;
+    if (!runAs || !armed) return;
     for (let round = 0; ; round++) {
       asRun(['kill', '-KILL', '-1']);
       const ps = spawnSync('ps', ['-u', runAs, '-o', 'stat='], { env: sudoEnv, encoding: 'utf8' });
@@ -954,7 +971,10 @@ async function answerReview(ctx) {
       // The run account must work, must not read the key or the brief, may write the checkout
       // but not its .git (whose config a command could otherwise point git at its own code), and
       // gets a scratch HOME of its own. Default ACLs keep what it creates manageable here.
-      if (asRun(['true']).status !== 0) return refuse(`commands cannot run as the run account: \`sudo -n -u ${runAs}\` failed`);
+      const id = asRun(['id', '-u']);
+      if (id.status !== 0) return refuse(`commands cannot run as the run account: \`sudo -n -u ${runAs}\` failed`);
+      const uidProblem = runAccountUidProblem(id.stdout, process.getuid?.());
+      if (uidProblem) return refuse(uidProblem);
       for (const f of (ctx.guardFiles ?? []).filter(Boolean)) {
         if (asRun(['test', '-r', f]).status === 0) return refuse(`the run account can read ${basename(f)}, which holds what it must never see`);
       }
@@ -974,6 +994,7 @@ async function answerReview(ctx) {
       } catch (e) { return refuse(e.message); }
       if (asRun(['test', '-w', root]).status !== 0) return refuse('the run account cannot write the checkout (check that every directory above it is searchable)');
       if (asRun(['test', '-w', join(root, '.git')]).status === 0) return refuse('the run account can write the checkout\'s .git');
+      armed = true;
     } else {
       ctx.log?.('::warning::FIX_RUN_AS is not set: the checkout\'s commands run as this account, which can read the model key');
     }
