@@ -12,10 +12,10 @@
 # also start no CI, so no required check would report.
 # Without the secret the job says so and stops, green.
 #
-# Batched (2026-10-06): a bump PR in eleven callers is eleven reviews, and one bump per merge here
-# made six waves in a day (68 reviews). The hourly run bumps to the newest main commit that changed
-# what a caller runs, once that commit has been quiet for QUIET_MINUTES, so a burst of merges is one
-# wave. A dispatch bumps at once, for a fix that cannot wait.
+# Each bump PR is a review in every caller, so bumps are batched: the hourly run bumps to the newest
+# main commit that changed what a caller runs, once that commit has been quiet for QUIET_MINUTES, so a
+# burst of merges is one wave. A dispatch bumps at once, for a fix that cannot wait. An open bump PR
+# that already proposes the picked commit is left alone, so its review and checks are not restarted.
 name: Redline pin bump
 
 on:
@@ -151,6 +151,17 @@ jobs:
               todo="${todo:+$todo }${path}"
             done
             [ -n "$todo" ] || return "$bad"
+            # An open bump PR that already proposes this commit in every file that needs it is left
+            # alone: resetting its branch would restart its review and checks for no change.
+            open="$(gh pr list --repo "$repo" --head "$BRANCH" --state open --json number --jq '.[0].number // empty')"
+            if [ -n "$open" ]; then
+              local carried=1
+              for path in $todo; do
+                if ! current="$(gh api "repos/${repo}/contents/${path}?ref=${BRANCH}" --jq .content 2>/dev/null | base64 -d)"; then carried=0; break; fi
+                if ! printf '%s\n' "$current" | grep -Eq "redline-(review|fix-run).yml@${SHA}" || ! printf '%s\n' "$current" | grep -q "redline-ref: ${SHA}"; then carried=0; break; fi
+              done
+              if [ "$carried" -eq 1 ]; then echo "#${open} already proposes ${short}"; return "$bad"; fi
+            fi
             # The bump branch is this job's alone: reset it to the default branch tip each time,
             # so an open bump PR carries exactly the newest pin, one commit per caller file.
             if gh api "repos/${repo}/git/ref/heads/${BRANCH}" >/dev/null 2>&1; then

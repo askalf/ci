@@ -80,9 +80,9 @@ export function metaPhrase(text) {
 }
 export const DEFAULT_MODEL = 'claude-fable-5-1';
 export const DEFAULT_FALLBACK_MODEL = 'claude-opus-5-5';
-// A PR that only moves Redline pins (redline-pin-bump.yml opens one in every caller after each
-// askalf/ci change) is read on this model instead of REDLINE_MODEL. On 2026-10-06 68 such
-// reviews ran on gpt-6-astra in a day and, with the rest, spent the GPT seat's week in four days.
+// A PR that only moves Redline pins (redline-pin-bump.yml opens one in every caller) is read on
+// this model instead of REDLINE_MODEL: it changes one commit sha per caller file, and every bump
+// wave is a review in each caller, so it does not spend the reviewer model's seat.
 export const DEFAULT_PIN_MODEL = 'claude-opus-5-5';
 
 // Claude Fable 5.1, Claude Mythos 5.1 and Claude Opus 5.5 answer a forced tool_choice (type "tool"

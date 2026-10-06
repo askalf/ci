@@ -1411,13 +1411,71 @@ console.log('\n  pin bump, both callers');
   check('the tests, their fixtures and the README move no pin',
     ['scripts/redline/*.test.mjs', 'scripts/redline/test-fixtures', 'scripts/redline/README.md'].every((x) => pinPaths.includes(`:(exclude)${x}`))
       && pinPaths.indexOf(':(exclude)scripts/redline/*.test.mjs') > pinPaths.indexOf('scripts/redline'));
-  // Batched: a merge here no longer opens eleven bump PRs at once (68 reviews on 2026-10-06).
+  // Batched: a burst of merges here is one bump wave, and an open bump PR is not reset for no change.
   const on = /\non:\n((?: {2}.*\n)+)/.exec(bump)?.[1] ?? '';
   check('the bump runs hourly and on dispatch, never per push', /^  schedule:\n    - cron: '\d+ \* \* \* \*'\n  workflow_dispatch:\n$/.test(on));
   check('a scheduled bump waits for the newest change to be quiet; a dispatch does not',
     /QUIET_MINUTES: \d+/.test(bump) && bump.includes('if [ "$EVENT" = schedule ] && [ "$age" -lt "$QUIET_MINUTES" ]; then')
       && bump.includes("git log -1 --format='%H %ct' HEAD -- $PIN_PATHS") && bump.includes('SHA: ${{ steps.pick.outputs.sha }}')
       && bump.includes('fetch-depth: 0'));
+  {
+    // The bump step itself, run twice against a fake gh: an hourly run that finds its bump PR
+    // already proposing the picked commit changes nothing; one that finds an older proposal resets it.
+    const lines = bump.split('\n');
+    const at = lines.findIndex((l) => l.includes('- name: Open or update a bump PR in each caller'));
+    const runAt = lines.findIndex((l, i) => i > at && l.trim() === 'run: |');
+    const script = [];
+    for (const l of lines.slice(runAt + 1)) { if (l.trim() && !l.startsWith('          ')) break; script.push(l.slice(10)); }
+    const bashOk = spawnSync('bash', ['-c', 'true']).status === 0;
+    if (!bashOk || process.platform === 'win32') {
+      console.log('  skip the bump step run: no POSIX bash here');
+    } else {
+      const NEWSHA = 'b'.repeat(40), OLDSHA = 'a'.repeat(40);
+      const caller = (sha) => `jobs:\n  review:\n    uses: askalf/ci/.github/workflows/redline-review.yml@${sha} # main\n    with:\n      redline-ref: ${sha}\n`;
+      const run = (branchSha) => {
+        const d = mkdtempSync(join(tmpdir(), 'bump-'));
+        const b64 = (x) => Buffer.from(x).toString('base64');
+        writeFileSync(join(d, 'gh'), `#!/usr/bin/env bash
+echo "$*" >> "${d}/calls"
+case "$*" in
+  *"commits/${NEWSHA}/pulls"*) ;;
+  "api repos/askalf/x --jq .default_branch") echo main ;;
+  *"git/ref/heads/main"*) echo tip0000 ;;
+  *"git/ref/heads/bot/redline-pin"*) echo exists ;;
+  *"contents/.github/workflows/redline.yml?ref=tip0000"*) echo "${b64(caller(OLDSHA))}" ;;
+  *"contents/.github/workflows/redline.yml?ref=bot/redline-pin --jq .sha"*) echo blob1 ;;
+  *"contents/.github/workflows/redline.yml?ref=bot/redline-pin"*) echo "${b64(caller(branchSha))}" ;;
+  *"pr list"*) echo 7 ;;
+esac
+`);
+        chmodSync(join(d, 'gh'), 0o755);
+        // The step runs pin.mjs from the checkout and writes caller.yml in its working directory.
+        mkdirSync(join(d, 'work', 'scripts', 'redline'), { recursive: true });
+        writeFileSync(join(d, 'work', 'scripts', 'redline', 'pin.mjs'), readFileSync(fileURLToPath(new URL('./pin.mjs', import.meta.url))));
+        const r = spawnSync('bash', ['-c', script.join('\n')], { encoding: 'utf8', cwd: join(d, 'work'),
+          env: { ...process.env, PATH: `${d}:${process.env.PATH}`, GH_TOKEN: 't', SHA: NEWSHA, SOURCE: 'askalf/ci', CALLERS: 'askalf/x',
+            BRANCH: 'bot/redline-pin', CALLER_PATHS: '.github/workflows/redline.yml' } });
+        const calls = existsSync(join(d, 'calls')) ? readFileSync(join(d, 'calls'), 'utf8') : '';
+        rmSync(d, { recursive: true, force: true });
+        return { out: r.stdout + r.stderr, calls, status: r.status };
+      };
+      const same = run(NEWSHA);
+      check('an hourly run whose open bump PR already proposes the commit resets nothing and writes nothing',
+        same.status === 0 && /#7 already proposes bbbbbbb/.test(same.out) && !/-X PATCH|-X POST|-X PUT|pr edit|pr create/.test(same.calls), same.out + same.calls);
+      const stale = run(OLDSHA);
+      check('one whose open bump PR proposes an older commit resets the branch and writes the new pin',
+        /-X PATCH repos\/askalf\/x\/git\/refs\/heads\/bot\/redline-pin/.test(stale.calls) && /-X PUT repos\/askalf\/x\/contents\/\.github\/workflows\/redline\.yml/.test(stale.calls), stale.out + stale.calls);
+    }
+  }
+  {
+    // The skip comes before the branch is reset, and needs both the pin and redline-ref at the sha.
+    const skipAt = bump.indexOf('already proposes ${short}');
+    const resetAt = bump.indexOf('-X PATCH "repos/${repo}/git/refs/heads/${BRANCH}"');
+    check('an open bump PR that already carries the picked commit is left alone, before any reset',
+      skipAt > 0 && resetAt > skipAt
+        && /grep -Eq "redline-\(review\|fix-run\)\.yml@\$\{SHA\}" \|\| ! printf '%s\\n' "\$current" \| grep -q "redline-ref: \$\{SHA\}"/.test(bump)
+        && bump.includes('contents/${path}?ref=${BRANCH}'));
+  }
   const selfTest = readFileSync(fileURLToPath(new URL('../../.github/workflows/redline-self-test.yml', import.meta.url)), 'utf8');
   // `test` is a required check, so it must report on every PR: no paths filter, which would leave a
   // PR outside the paths with a check that never runs.
