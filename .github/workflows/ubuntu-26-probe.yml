@@ -1,0 +1,53 @@
+name: ubuntu-26 probe
+on:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  probe:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-26.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - name: Versions of what the workflows use from the image
+        run: |
+          set +e
+          cat /etc/os-release | head -3
+          for c in "date --version" "sudo --version" "shellcheck --version" "python3 --version" "gh --version" "jq --version" "docker --version" "node --version" "git --version" "curl --version" "awk --version" "sed --version" "base64 --version" "sha256sum --version" "sort --version" "stat --version" "timeout --version"; do
+            printf '\n== %s\n' "$c"; $c 2>&1 | head -2
+          done
+          ls -l "$(command -v date)" "$(command -v sudo)" 2>&1
+      - name: The coreutils forms the workflows use
+        run: |
+          set -u
+          fail=0
+          t() { if out="$(eval "$2" 2>&1)" && [ -n "$out" ]; then echo "ok   $1: $out"; else echo "FAIL $1: $out"; fail=1; fi; }
+          t 'date -u -d "24 hours ago"' "date -u -d '24 hours ago' +%Y-%m-%dT%H:%M:%SZ"
+          t 'date -u -d "6 hours ago"' "date -u -d '6 hours ago' +%Y-%m-%dT%H:%M:%SZ"
+          t 'date -d ISO Z' "date -d '2026-10-06T17:00:00Z' +%s"
+          t 'date -u -d ISO Z' "date -u -d '2026-10-06T17:00:00Z' +%s"
+          t 'date -d ISO ms' "date -u -d '2026-10-06T17:00:00.123Z' +%s"
+          t 'date -d date-only' "date -d '2026-11-19' +%s"
+          t 'date -d RFC2822' "date -d 'Tue, 06 Oct 2026 17:00:00 GMT' +%s"
+          t 'date -Iseconds' "date -Iseconds"
+          t 'date -u +%s' "date -u +%s"
+          t 'date +%Y-%m-%d' "date +%Y-%m-%d"
+          t 'sort -V' "printf '1.10.0\n1.9.0\n1.2.3\n' | sort -V | tr '\n' ' '"
+          t 'sort -uV' "printf '1.9\n1.9\n1.10\n' | sort -uV | tr '\n' ' '"
+          t 'stat -L -c' "stat -L -c '%s %a' /etc/hostname"
+          t 'stat -L --format' "stat -L --format=%s /etc/hostname"
+          t 'sha256sum -c' "printf x > f; echo \"\$(sha256sum f | cut -d' ' -f1)  f\" | sha256sum -c -"
+          t 'base64 -w0 / -d' "printf hello | base64 -w0 | base64 -d"
+          t 'readlink -f' "readlink -f /usr/bin/env"
+          t 'mktemp -d' "mktemp -d"
+          t 'timeout' "timeout 5 echo ran"
+          t 'head -c' "printf abcdef | head -c 3"
+          t 'tr -d' "printf 'a\nb' | tr -d '\n'"
+          t 'xargs -I' "printf 'a\n' | xargs -I{} echo got {}"
+          t 'sed -i' "printf old > s; sed -i 's/old/new/' s; cat s"
+          t 'useradd + sudo -n -u' "sudo useradd --system --no-create-home --shell /usr/sbin/nologin probe-run && sudo -n -u probe-run -- id -un"
+          t 'setfacl' "command -v setfacl || { sudo apt-get update -q >/dev/null && sudo apt-get install -y -q acl >/dev/null && command -v setfacl; }"
+          exit $fail
