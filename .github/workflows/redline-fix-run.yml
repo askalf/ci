@@ -7,12 +7,11 @@
 # Nothing here pushes or comments and no token that could is on the runner: forge verifies the
 # artifact (the run came from the pinned redline-fix.yml, the bundle is one fast-forward commit as
 # askalf with no attribution) and pushes it to the PR branch with the token it already holds.
-# The model key is the fix lane's own named dario key in FIX_ENV_FILE, root:gha-exec 640: readable
-# by the exec account that runs this job and by nothing else, in particular never by gha-oss, which
-# runs untrusted upstream candidates' test suites on the same host.
-# The caller's runs-on is [self-hosted, <repo>-exec] (platform deploy/gha-runners, row
-# <repo>-exec-e1); a job that uses a reusable workflow takes no runs-on of its own, so the caller
-# passes the label as runner-label.
+# The model is reached through FIX_ENV_FILE, which only the exec account that runs this job can
+# read: never an account that runs untrusted code, and never the run account the checkout's own
+# commands use (see scripts/redline/README.md).
+# The caller's runs-on is [self-hosted, <repo>-exec]; a job that uses a reusable workflow takes no
+# runs-on of its own, so the caller passes the label as runner-label.
 name: Redline fix run
 
 on:
@@ -160,8 +159,7 @@ jobs:
           REVIEW_URL: ${{ inputs.review }}
           CHECKOUT: ${{ github.workspace }}/pr
           GH_READ_TOKEN: ${{ github.token }}
-          # root:gha-exec 640 on the host; holds the named dario key first-party-fix and nothing
-          # else. Never gha-oss-readable: that account runs untrusted test suites.
+          # Readable by the exec account only; never by an account that runs untrusted code.
           FIX_ENV_FILE: /etc/askalf/fix-exec.env
           # The fixer's brief, on the host next to the env file with the same owner and mode, never
           # in a public repository. The script reads it from this file and has no bundled fallback.

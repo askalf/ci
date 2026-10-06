@@ -121,9 +121,9 @@ console.log('\n  dario: a key or a key socket');
 {
   const key = darioAccess({ DARIO_API_KEY: 'dk_x' });
   check('a key alone: sent as before, at the default URL', key.darioKey === 'dk_x' && key.darioSocket === '' && key.darioUrl === 'http://127.0.0.1:3456' && !key.error && !key.warning);
-  const sock = darioAccess({ DARIO_SOCKET: '/run/dario/fix.sock' });
-  check('a key socket alone: no key needed, none sent', sock.darioKey === '' && sock.darioSocket === '/run/dario/fix.sock' && !sock.error && !sock.warning);
-  const both = darioAccess({ DARIO_SOCKET: '/run/dario/fix.sock', DARIO_API_KEY: 'dk_x' });
+  const sock = darioAccess({ DARIO_SOCKET: '/run/model/key.sock' });
+  check('a key socket alone: no key needed, none sent', sock.darioKey === '' && sock.darioSocket === '/run/model/key.sock' && !sock.error && !sock.warning);
+  const both = darioAccess({ DARIO_SOCKET: '/run/model/key.sock', DARIO_API_KEY: 'dk_x' });
   check('both: the socket wins, the key is not used, and a warning says to remove it', both.darioKey === '' && /remove it/.test(both.warning));
   check('a relative socket path is an error', /absolute/.test(darioAccess({ DARIO_SOCKET: 'run/fix.sock' }).error ?? ''));
   check('neither is an error that names both', /DARIO_API_KEY is not set .*DARIO_SOCKET/.test(darioAccess({}).error ?? ''));
@@ -785,7 +785,7 @@ console.log('\n  pin bump');
   check('this repo\'s caller pins askalf/ci and the same sha as redline-ref',
     /uses: askalf\/ci\/\.github\/workflows\/redline-review\.yml@([0-9a-f]{40})/.exec(own)?.[1] === refs(own)[0] && !own.includes('askalf/askalf/') && own.includes('runner-label: redline\n'));
 
-  // Forge dispatches the caller on the default branch (platform runtime/redline-ci-dispatch.ts) and
+  // Forge dispatches the caller on the default branch and
   // finds its run by this exact title, so the title and the inputs are a contract with forge.
   check('this repo\'s caller takes forge\'s dispatch: pr, head, reread',
     /\n  workflow_dispatch:\n    inputs:\n      pr:\n(?:        .*\n)*?        type: string\n      head:\n(?:        .*\n)*?        type: string\n      reread:\n(?:        .*\n)*?        default: false\n        type: boolean\n/.test(own));
