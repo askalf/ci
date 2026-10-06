@@ -39,6 +39,9 @@
 //     with a reset past the retry budget) is not retried; the turn is sent again on
 //     REDLINE_FALLBACK_MODEL. On 2026-09-28 every seat was out of Fable's included-overage credit
 //     for four days while Opus still served, and each review burned its retries and failed.
+//   - A model dario refuses as unroutable (a 400 marked model_unroutable: no provider lists it) goes
+//     to REDLINE_FALLBACK_MODEL the same way: the same turn is sent again, with the history kept.
+//     A 400 without that marker still fails the run.
 //
 // CLI (the workflow's review step):
 //   REPO=owner/name PR=<n> HEAD_SHA=<sha> CHECKOUT=<dir> GH_READ_TOKEN=... [REDLINE_REREAD=1] \
@@ -458,6 +461,16 @@ export class ModelParked extends Error {
   }
 }
 
+/**
+ * dario's answer when no provider lists the requested model (x-dario-upstream-rejection:
+ * model_unroutable), as when the account that serves it drops out. Nothing was sent upstream.
+ */
+export class ModelUnroutable extends Error {
+  constructor(what, detail) {
+    super(`${what}: HTTP 400 model_unroutable: ${detail}`);
+  }
+}
+
 /** A call that would start, or wait to retry, past the run's deadline. */
 export class OutOfTime extends Error {}
 
@@ -481,6 +494,9 @@ export async function withRetry(ctx, what, fn, deadline = Infinity) {
       const retryAfterMs = (Number(res.headers.get('retry-after')) || 0) * 1000;
       const budget = waits.slice(attempt).reduce((a, b) => a + b, 0);
       if (!(retryAfterMs > 0) || retryAfterMs > budget) throw new ModelParked(what, retryAfterMs, (await res.text()).slice(0, 300));
+    }
+    if (res.status === 400 && res.headers?.get?.('x-dario-upstream-rejection') === 'model_unroutable') {
+      throw new ModelUnroutable(what, (await res.text()).slice(0, 300));
     }
     if ((res.status === 429 || res.status >= 500) && attempt < waits.length) {
       if (left() <= waits[attempt]) throw new OutOfTime(`${what}: HTTP ${res.status}; no time left to retry`);
@@ -692,8 +708,10 @@ export async function runReview(ctx) {
         deadline,
       });
     } catch (e) {
-      if (!(e instanceof ModelParked) || !ctx.fallbackModel || ctx.fallbackModel === ctx.model) throw e;
-      ctx.log?.(`${ctx.model} is parked in dario for ${Math.ceil(e.retryAfterMs / 1000)}s; the review continues on ${ctx.fallbackModel}`);
+      if (!(e instanceof ModelParked || e instanceof ModelUnroutable) || !ctx.fallbackModel || ctx.fallbackModel === ctx.model) throw e;
+      ctx.log?.(e instanceof ModelParked
+        ? `${ctx.model} is parked in dario for ${Math.ceil(e.retryAfterMs / 1000)}s; the review continues on ${ctx.fallbackModel}`
+        : `no provider in dario lists ${ctx.model}; the review continues on ${ctx.fallbackModel}`);
       ctx.model = ctx.fallbackModel;
       turn--;
       continue;
