@@ -40,8 +40,8 @@
 //     REDLINE_FALLBACK_MODEL. On 2026-09-28 every seat was out of Fable's included-overage credit
 //     for four days while Opus still served, and each review burned its retries and failed.
 //   - A model dario refuses as unroutable (a 400 marked model_unroutable: no provider lists it) goes
-//     to REDLINE_FALLBACK_MODEL the same way. On 2026-10-06 dario's codex account dropped out
-//     between turns, so gpt-6-astra answered turn 1 and was refused from turn 2 on every runner.
+//     to REDLINE_FALLBACK_MODEL the same way: the same turn is sent again, with the history kept.
+//     A 400 without that marker still fails the run.
 //
 // CLI (the workflow's review step):
 //   REPO=owner/name PR=<n> HEAD_SHA=<sha> CHECKOUT=<dir> GH_READ_TOKEN=... [REDLINE_REREAD=1] \
