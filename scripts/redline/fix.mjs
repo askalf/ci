@@ -949,7 +949,9 @@ async function answerReview(ctx) {
   const settle = () => {
     if (!runAs || !armed) return;
     for (let round = 0; ; round++) {
-      asRun(['kill', '-KILL', '-1']);
+      // bash's own kill, which calls kill(2) itself: Ubuntu 26.04's /usr/bin/kill does not stop
+      // the account's processes for -1, and a chain that hops to new pids can slip past ps.
+      asRun(['bash', '-c', 'kill -KILL -1']);
       const ps = spawnSync('ps', ['-u', runAs, '-o', 'stat='], { env: sudoEnv, encoding: 'utf8' });
       const live = String(ps.stdout ?? '').split('\n').map((l) => l.trim()).filter((l) => l && !l.startsWith('Z'));
       if ((ps.status === 0 || ps.status === 1) && !live.length) break;
