@@ -2,7 +2,7 @@
 // The model and GitHub are stubbed through ctx.fetch; git is real, on throwaway repositories under
 // the temp directory. Nothing leaves the machine.
 
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, symlinkSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, symlinkSync, chmodSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -886,16 +886,16 @@ if (!gitOk) {
   } else {
     if (process.platform !== 'win32') {
       console.log('\n  runFix: commands as the run account');
-      // A stand-in sudo and setfacl log what they are given; sudo runs the command as this account
-      // (CI cannot make another), reports the guard files unreadable and .git unwritable, and
-      // leaves pkill and find out.
+      // A stand-in sudo and setfacl log what they are given; sudo runs the command as this account,
+      // reports the guard files unreadable and .git unwritable, and leaves kill and find out. The
+      // ps check runs for real and finds no process of an account that does not exist.
       const stub = mkdtempSync(join(tmpdir(), 'redline-runas-'));
       const log = join(stub, 'calls.log');
       const stubs = ({ guardReadable = false, sudoWorks = true } = {}) => {
         writeFileSync(join(stub, 'sudo'), [
           '#!/bin/sh', `echo "sudo $*" >> '${log}'`, ...(sudoWorks ? [] : ['exit 1']),
           'shift 3; [ "$1" = -- ] && shift',
-          `case "$1 $2" in "test -r") exit ${guardReadable ? 0 : 1};; "test -w") case "$3" in */.git) exit 1;; esac;; pkill*|find*) exit 0;; esac`,
+          `case "$1 $2" in "test -r") exit ${guardReadable ? 0 : 1};; "test -w") case "$3" in */.git) exit 1;; esac;; kill*|find*) exit 0;; esac`,
           'exec "$@"', '',
         ].join('\n'), { mode: 0o755 });
         writeFileSync(join(stub, 'setfacl'), `#!/bin/sh\necho "setfacl $*" >> '${log}'\n`, { mode: 0o755 });
@@ -918,7 +918,7 @@ if (!gitOk) {
         check('the install, node <file> and the test script all run as the run account, under timeout, from a clean environment',
           ran.some((l) => /timeout -k 10 \d+ npm install /.test(l)) && ran.some((l) => /timeout -k 10 \d+ node test\.mjs$/.test(l)) && ran.some((l) => /timeout -k 10 \d+ npm test$/.test(l))
             && ran.every((l) => /^sudo -n -u gha-exec-run -- env -i PATH=/.test(l) && !/GH_READ_TOKEN|DARIO_API_KEY/.test(l)));
-        const killAfter = ran.every((l) => { const i = calls.indexOf(l); return /^sudo -n -u gha-exec-run -- pkill -KILL -u gha-exec-run$/.test(calls[i + 1]) && /^sudo -n -u gha-exec-run -- find .* -user gha-exec-run /.test(calls[i + 2]); });
+        const killAfter = ran.every((l) => { const i = calls.indexOf(l); return /^sudo -n -u gha-exec-run -- kill -KILL -1$/.test(calls[i + 1]) && /^sudo -n -u gha-exec-run -- find .* -user gha-exec-run /.test(calls[i + 2]); });
         check('after every command its processes are killed and what it made is readable again', killAfter);
         check('and the fix goes through', r.outcome === 'fixed' && r.files.join() === 'src/b.js' && fixProblem(r) === null);
         rmSync(w.out, { recursive: true, force: true });
@@ -1016,6 +1016,29 @@ if (!gitOk) {
         const run = await realRun(body(mark));
         check(`${name} runs nothing as this account`, !existsSync(mark) && run.r.outcome !== 'refused', run.r.notes);
         rmSync(mark, { force: true });
+        done(run);
+      }
+      {
+        // A detached process that hops: each instance logs, starts the next and exits at once, so a
+        // list of process ids is stale by the time it is signalled (pkill lets it run on). Its
+        // script lives outside the checkout and the commands' HOME, so only the kill can stop it.
+        // After the run its log must have stopped growing, and the run goes on.
+        const hopDir = mkdtempSync(join(tmpdir(), 'redline-hop-'));
+        chmodSync(hopDir, 0o777);
+        const hopLog = join(hopDir, 'hops.log');
+        const forker = "import { spawn } from 'node:child_process';\nimport { writeFileSync } from 'node:fs';\n"
+          + `writeFileSync('${hopDir}/hop.sh', 'echo . >> ${hopLog}\\nsh "$0" &\\nexit 0\\n');\n`
+          + `spawn('sh', ['${hopDir}/hop.sh'], { detached: true, stdio: 'ignore' }).unref();\n`;
+        const run = await realRun(forker);
+        const size = () => { try { return statSync(hopLog).size; } catch { return 0; } };
+        const wait = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+        const first = size();
+        wait(700);
+        const second = size();
+        check('a detached process that keeps hopping to new process ids is stopped before the checkout is read again, and the fix goes through',
+          first > 0 && second === first && run.r.outcome === 'fixed', `${first} -> ${second}: ${run.r.notes}`);
+        for (let i = 0; i < 5; i++) spawnSync('sudo', ['-n', '-u', realRunAs, '--', 'kill', '-KILL', '-1']);
+        rmSync(hopDir, { recursive: true, force: true });
         done(run);
       }
       rmSync(secretDir, { recursive: true, force: true });

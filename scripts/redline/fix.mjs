@@ -916,9 +916,20 @@ async function answerReview(ctx) {
   const asRun = (args) => spawnSync('sudo', ['-n', '-u', runAs, '--', ...args], { env: sudoEnv, encoding: 'utf8', timeout: 120_000 });
   // After every command: no process of the run account outlives it (none can swap a file while
   // this process reads it), and what it created is readable here again, whatever modes it set.
+  // kill -KILL -1, sent as the run account, signals all of its processes while the kernel holds
+  // the task list, so a process that keeps forking cannot slip a child past it (pkill lists, then
+  // signals). The account must then show no live process (a zombie holds no code); anything else,
+  // or a ps that cannot say, throws, and the run is refused rather than read on.
   const settle = () => {
     if (!runAs) return;
-    asRun(['pkill', '-KILL', '-u', runAs]);
+    for (let round = 0; ; round++) {
+      asRun(['kill', '-KILL', '-1']);
+      const ps = spawnSync('ps', ['-u', runAs, '-o', 'stat='], { env: sudoEnv, encoding: 'utf8' });
+      const live = String(ps.stdout ?? '').split('\n').map((l) => l.trim()).filter((l) => l && !l.startsWith('Z'));
+      if ((ps.status === 0 || ps.status === 1) && !live.length) break;
+      if (ps.status !== 0 && ps.status !== 1) throw new Error(`could not confirm that the run account has no process left (ps exited ${ps.status})`);
+      if (round >= 4) throw new Error(`the run account still has ${live.length} process(es) after five kills`);
+    }
     asRun(['find', root, home, '-user', runAs, '!', '-type', 'l', '-exec', 'chmod', 'u+rwX,g+rwX', '{}', '+']);
   };
   // Every command the checkout supplies goes through here.
@@ -1161,7 +1172,7 @@ async function answerReview(ctx) {
     git(root, genv, ['bundle', 'verify', bundle]);
     return { record: fixRecord({ ...base, ...common, outcome: 'fixed', newHead, commits, description: described, notes: notes('fixed') }), description };
   } finally {
-    settle();
+    try { settle(); } catch (e) { ctx.log?.(`::warning::${e.message}`); }
     rmSync(home, { recursive: true, force: true });
     rmSync(gitHome, { recursive: true, force: true });
   }
