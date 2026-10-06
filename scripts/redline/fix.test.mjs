@@ -5,6 +5,7 @@
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, symlinkSync, chmodSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createServer as createNetServer } from 'node:net';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
@@ -896,11 +897,11 @@ if (!gitOk) {
       // process of an account that does not exist.
       const stub = mkdtempSync(join(tmpdir(), 'redline-runas-'));
       const log = join(stub, 'calls.log');
-      const stubs = ({ guardReadable = false, sudoWorks = true, uid = process.getuid() + 1 } = {}) => {
+      const stubs = ({ guardReadable = false, socketWritable = false, sudoWorks = true, uid = process.getuid() + 1 } = {}) => {
         writeFileSync(join(stub, 'sudo'), [
           '#!/bin/sh', `echo "sudo $*" >> '${log}'`, ...(sudoWorks ? [] : ['exit 1']),
           'shift 3; [ "$1" = -- ] && shift',
-          `case "$1 $2" in "id -u") echo ${uid}; exit 0;; "test -r") exit ${guardReadable ? 0 : 1};; "test -w") case "$3" in */.git) exit 1;; esac;; kill*|find*) exit 0;; esac`,
+          `case "$1 $2" in "id -u") echo ${uid}; exit 0;; "test -r") exit ${guardReadable ? 0 : 1};; "test -w") case "$3" in */.git) exit 1;; *.sock) exit ${socketWritable ? 0 : 1};; esac;; kill*|find*) exit 0;; esac`,
           'exec "$@"', '',
         ].join('\n'), { mode: 0o755 });
         writeFileSync(join(stub, 'setfacl'), `#!/bin/sh\necho "setfacl $*" >> '${log}'\n`, { mode: 0o755 });
@@ -911,11 +912,12 @@ if (!gitOk) {
         stubs();
         const repo = repoWithTests();
         const w = world(repo, { turns: [tool('fix_write', { path: 'src/b.js', content: FIXED_B }), tool('fix_run', { command: 'node test.mjs' }), finish()] });
-        const { record: r } = await runFix({ ...w.ctx, env, runAs: 'gha-exec-run', guardFiles: ['/etc/askalf/fix-exec.env'] });
+        const { record: r } = await runFix({ ...w.ctx, env, runAs: 'gha-exec-run', guardFiles: ['/etc/askalf/fix-exec.env'], guardSockets: ['/run/dario/fix.sock'] });
         const calls = readFileSync(log, 'utf8').split('\n');
         const at = (re) => calls.findIndex((l) => re.test(l));
-        check('the run account is proved first: it works, is another account and cannot read the guard files',
-          at(/^sudo -n -u gha-exec-run -- id -u$/) === 0 && at(/^sudo -n -u gha-exec-run -- test -r \/etc\/askalf\/fix-exec\.env$/) === 1);
+        check('the run account is proved first: it works, is another account, cannot read the guard files and cannot connect to the key socket',
+          at(/^sudo -n -u gha-exec-run -- id -u$/) === 0 && at(/^sudo -n -u gha-exec-run -- test -r \/etc\/askalf\/fix-exec\.env$/) === 1
+            && at(/^sudo -n -u gha-exec-run -- test -w \/run\/dario\/fix\.sock$/) === 2);
         check('it may write the checkout, reads .git only, and has a HOME of its own',
           at(new RegExp(`^setfacl -R -m u:gha-exec-run:rwX,d:u:gha-exec-run:rwX,d:u:[^ ]+:rwX ${repo.dir}$`)) > 1
             && at(new RegExp(`^setfacl -R -m u:gha-exec-run:rX,d:u:gha-exec-run:rX ${repo.dir}/\\.git$`)) > 1 && at(/^setfacl -m u:gha-exec-run:rwx,.* \/.*redline-fix-home-/) > 1);
@@ -942,6 +944,18 @@ if (!gitOk) {
         const calls = readFileSync(log, 'utf8');
         check('a run account that can read the key file is refused before anything runs, and is never sent kill -1',
           r.outcome === 'refused' && /can read fix-exec\.env/.test(r.notes) && w.calls.model.length === 0 && !calls.includes(' -- env -i ') && !calls.includes(' -- kill '));
+        rmSync(w.out, { recursive: true, force: true });
+        rmSync(repo.dir, { recursive: true, force: true });
+        rmSync(log, { force: true });
+      }
+      {
+        stubs({ socketWritable: true });
+        const repo = repoWithTests();
+        const w = world(repo, { turns: [tool('fix_write', { path: 'src/b.js', content: FIXED_B }), finish()] });
+        const { record: r } = await runFix({ ...w.ctx, env, runAs: 'gha-exec-run', guardFiles: ['/etc/askalf/fix-exec.env'], guardSockets: ['/run/dario/fix.sock'] });
+        const calls = readFileSync(log, 'utf8');
+        check('a run account that can connect to dario\'s key socket is refused before anything runs, and is never sent kill -1',
+          r.outcome === 'refused' && /can connect to fix\.sock, dario's key socket/.test(r.notes) && w.calls.model.length === 0 && !calls.includes(' -- env -i ') && !calls.includes(' -- kill '));
         rmSync(w.out, { recursive: true, force: true });
         rmSync(repo.dir, { recursive: true, force: true });
         rmSync(log, { force: true });
@@ -977,6 +991,14 @@ if (!gitOk) {
         const { record: r } = await runFix({ ...w.ctx, log: (l) => lines.push(l) });
         check('without FIX_RUN_AS the fix still runs, and the log warns that commands could read the key',
           r.outcome === 'fixed' && lines.some((l) => /^::warning::FIX_RUN_AS is not set/.test(l)));
+        const socketLines = [];
+        const repo2 = repoWithTests();
+        const w2 = world(repo2, { turns: [finish()] });
+        await runFix({ ...w2.ctx, guardSockets: ['/run/dario/fix.sock'], log: (l) => socketLines.push(l) });
+        check('with a key socket and no FIX_RUN_AS, the warning says commands could spend the key through it',
+          socketLines.some((l) => /^::warning::FIX_RUN_AS is not set: .*spend the model key through dario's key socket/.test(l)));
+        rmSync(w2.out, { recursive: true, force: true });
+        rmSync(repo2.dir, { recursive: true, force: true });
         check('a FIX_RUN_AS that is not a user name is refused', (await runFix({ ...world(repo, { turns: [finish()] }).ctx, runAs: 'a b' })).record.outcome === 'refused');
         rmSync(w.out, { recursive: true, force: true });
         rmSync(repo.dir, { recursive: true, force: true });
@@ -995,12 +1017,12 @@ if (!gitOk) {
       const secretDir = mkdtempSync(join(tmpdir(), 'redline-secret-'));
       const secret = join(secretDir, 'fix-exec.env');
       writeFileSync(secret, 'DARIO_API_KEY=dk_live_0123456789\n', { mode: 0o600 });
-      const realRun = async (testBody, inspect = () => {}) => {
+      const realRun = async (testBody, inspect = () => {}, extra = {}) => {
         const repo = makeRepo({ pkg: { name: 'r', private: true, scripts: { test: 'node test.mjs' } }, testBody });
         const w = world(repo, { turns: [tool('fix_write', { path: 'src/b.js', content: FIXED_B }), finish()] });
         // A throw is a refusal, as the CLI makes it.
         let r;
-        try { ({ record: r } = await runFix({ ...w.ctx, runAs: realRunAs, guardFiles: [secret] })); } catch (e) { r = { outcome: 'refused', notes: e.message }; }
+        try { ({ record: r } = await runFix({ ...w.ctx, runAs: realRunAs, guardFiles: [secret], ...extra })); } catch (e) { r = { outcome: 'refused', notes: e.message }; }
         inspect(repo.dir);
         return { r, repo, w };
       };
@@ -1076,6 +1098,30 @@ if (!gitOk) {
         for (let i = 0; i < 5; i++) spawnSync('sudo', ['-n', '-u', realRunAs, '--', 'kill', '-KILL', '-1']);
         rmSync(hopDir, { recursive: true, force: true });
         done(run);
+      }
+      {
+        // dario's key socket: in a directory only this account can enter, the run account cannot
+        // connect and the run goes on; where it can connect, the run is refused before anything runs.
+        const sockDir = mkdtempSync(join(tmpdir(), 'redline-sock-'));
+        chmodSync(sockDir, 0o700);
+        const sock = join(sockDir, 'fix.sock');
+        const server = createNetServer((c) => c.destroy());
+        await new Promise((r) => server.listen(sock, r));
+        let connected = null;
+        const probe = "import { connect } from 'node:net';\nimport { writeFileSync } from 'node:fs';\n"
+          + `const c = connect(${JSON.stringify(sock)});\nc.on('connect', () => { writeFileSync('sock.txt', 'connected'); c.destroy(); });\nc.on('error', (e) => writeFileSync('sock.txt', e.code));\n`;
+        const closed = await realRun(probe, (dir) => { try { connected = readFileSync(join(dir, 'sock.txt'), 'utf8'); } catch { /* none */ } }, { guardSockets: [sock] });
+        check('a key socket the run account cannot reach: the run goes on, and its tests cannot connect',
+          closed.r.outcome === 'fixed' && connected !== null && connected !== 'connected', `${connected} ${closed.r.notes}`);
+        done(closed);
+        chmodSync(sockDir, 0o755);
+        chmodSync(sock, 0o666);
+        const open = await realRun('', () => {}, { guardSockets: [sock] });
+        check('a key socket the run account can connect to: refused before anything runs',
+          open.r.outcome === 'refused' && /can connect to fix\.sock, dario's key socket/.test(open.r.notes) && open.w.calls.model.length === 0, open.r.notes);
+        done(open);
+        await new Promise((r) => server.close(r));
+        rmSync(sockDir, { recursive: true, force: true });
       }
       rmSync(secretDir, { recursive: true, force: true });
     }
@@ -1231,7 +1277,11 @@ console.log('\n  CLI');
   const empty = spawnSync(process.execPath, [script], { env: { ...base, FIX_PROMPT_FILE: join(dir, 'empty.md') }, encoding: 'utf8' });
   check('an empty prompt file: exit 2, the error names the variable', empty.status === 2 && /::error::FIX_PROMPT_FILE: .*empty\.md is empty/.test(empty.stderr));
   const s = spawnSync(process.execPath, [script], { env: { ...base, FIX_PROMPT_FILE: PROMPT_FIXTURE }, encoding: 'utf8' });
-  check('the model key is required from the env file, never from the environment', s.status === 2 && s.stderr.includes('::error::DARIO_API_KEY is not set'));
+  check('the model key is required from the env file, never from the environment, unless there is a key socket', s.status === 2 && s.stderr.includes('::error::DARIO_API_KEY is not set (or set DARIO_SOCKET'));
+  writeFileSync(envFile, 'DARIO_SOCKET=run/dario.sock\n');
+  const rel = spawnSync(process.execPath, [script], { env: { ...base, FIX_PROMPT_FILE: PROMPT_FIXTURE }, encoding: 'utf8' });
+  check('a DARIO_SOCKET that is not absolute: exit 2, the error names it', rel.status === 2 && rel.stderr.includes('::error::DARIO_SOCKET must be an absolute path'));
+  writeFileSync(envFile, 'DARIO_URL=http://127.0.0.1:9\n');
   check('an earlier run\'s output is removed before anything starts', !existsSync(join(outDir, 'fix.json')));
   if (gitOk) {
     const repo = makeRepo();

@@ -43,7 +43,8 @@
 // CLI (the workflow's review step):
 //   REPO=owner/name PR=<n> HEAD_SHA=<sha> CHECKOUT=<dir> GH_READ_TOKEN=... [REDLINE_REREAD=1] \
 //   REDLINE_ENV_FILE=/etc/askalf/redline.env REDLINE_PROMPT_FILE=/etc/askalf/redline-prompt.md node review.mjs
-// The env file holds DARIO_API_KEY, and optionally REDLINE_GITHUB_TOKEN (or GITHUB_PAT_REVIEWER),
+// The env file holds DARIO_API_KEY, or DARIO_SOCKET (a dario key socket: the socket is the key, and
+// no key is stored or sent), and optionally REDLINE_GITHUB_TOKEN (or GITHUB_PAT_REVIEWER),
 // DARIO_URL (default http://127.0.0.1:3456), REDLINE_MODEL and REDLINE_FALLBACK_MODEL (default
 // claude-opus-5-5; set it empty for no fallback). REDLINE_PROMPT_FILE names the system
 // prompt, installed on the runner host: this repository is public and carries no prompt, so there is
@@ -54,6 +55,7 @@ import { readFileSync, readdirSync, lstatSync, realpathSync, appendFileSync, ope
 import { join, resolve, relative, isAbsolute, sep, dirname } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
+import { request as httpRequest } from 'node:http';
 
 export const REVIEWER_LOGIN = 'sprayberry-redline';
 
@@ -502,11 +504,78 @@ export async function ghAll(ctx, path, max = 30) {
   return out;
 }
 
-/** One Messages call through dario. The key travels in a header, never in argv or a URL. */
+/**
+ * A fetch over dario's key socket (DARIO_SOCKET): a unix socket dario binds to one named key, so
+ * the request carries no secret and the host holds none. Only what callModelWith sends is needed:
+ * a method, string headers, a string body and a signal.
+ */
+export function socketFetch(socketPath) {
+  return (url, init = {}) => new Promise((resolvePromise, reject) => {
+    const signal = init.signal;
+    if (signal?.aborted) { reject(signal.reason); return; }
+    const u = new URL(String(url));
+    const body = init.body == null ? null : Buffer.from(String(init.body));
+    const req = httpRequest({
+      socketPath, method: init.method ?? 'GET', path: `${u.pathname}${u.search}`,
+      headers: { host: u.host, ...(init.headers ?? {}), ...(body ? { 'content-length': String(body.length) } : {}) },
+    }, (res) => {
+      const chunks = [];
+      res.on('data', (c) => chunks.push(c));
+      res.on('error', reject);
+      res.on('end', () => {
+        signal?.removeEventListener('abort', onAbort);
+        const headers = new Headers();
+        for (const [k, v] of Object.entries(res.headers)) for (const one of [v].flat()) if (one !== undefined) headers.append(k, one);
+        const status = res.statusCode ?? 502;
+        // A null-body status takes no body, and a status Response cannot hold rejects the fetch:
+        // a throw here, in an event listener, would end the process instead.
+        try { resolvePromise(new Response([101, 103, 204, 205, 304].includes(status) ? null : Buffer.concat(chunks), { status, headers })); } catch (e) { reject(e); }
+      });
+    });
+    const onAbort = () => { req.destroy(); reject(signal.reason); };
+    signal?.addEventListener('abort', onAbort, { once: true });
+    req.on('error', (e) => { signal?.removeEventListener('abort', onAbort); reject(e); });
+    if (body) req.write(body);
+    req.end();
+  });
+}
+
+/** fetchFn, except that requests for darioUrl's origin go over the key socket when there is one. */
+export function withDarioSocket(fetchFn, darioUrl, socketPath) {
+  if (!socketPath) return fetchFn;
+  const origin = new URL(darioUrl).origin;
+  const viaSocket = socketFetch(socketPath);
+  return (url, init) => {
+    let o = '';
+    try { o = new URL(String(url)).origin; } catch { o = ''; }
+    return o === origin ? viaSocket(url, init) : fetchFn(url, init);
+  };
+}
+
+/**
+ * dario's address and credential from an env file: DARIO_SOCKET, a key socket, needs no key and
+ * sends none (the socket is the key); otherwise DARIO_API_KEY is required. Returns null and says
+ * why when neither is set.
+ */
+export function darioAccess(secrets) {
+  const darioUrl = secrets.DARIO_URL || 'http://127.0.0.1:3456';
+  const darioSocket = secrets.DARIO_SOCKET || '';
+  if (darioSocket) {
+    if (!isAbsolute(darioSocket)) return { error: 'DARIO_SOCKET must be an absolute path' };
+    return { darioUrl, darioSocket, darioKey: '', warning: secrets.DARIO_API_KEY ? 'DARIO_API_KEY is set next to DARIO_SOCKET: the socket is the credential, so the key is not used; remove it from the env file' : '' };
+  }
+  if (!secrets.DARIO_API_KEY) return { error: 'DARIO_API_KEY is not set (or set DARIO_SOCKET to a dario key socket)' };
+  return { darioUrl, darioSocket: '', darioKey: secrets.DARIO_API_KEY, warning: '' };
+}
+
+/**
+ * One Messages call through dario. The key travels in a header, never in argv or a URL; over a
+ * key socket there is no key to send.
+ */
 export async function callModelWith(ctx, { system, messages, tools, toolChoice, maxTokens = LIMITS.maxTokens, timeoutMs = LIMITS.modelTimeoutMs, deadline = Infinity }) {
   const res = await withRetry(ctx, 'model', (leftMs) => ctx.fetch(`${ctx.darioUrl.replace(/\/+$/, '')}/v1/messages`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json', 'x-api-key': ctx.darioKey, 'anthropic-version': '2023-06-01' },
+    headers: { 'content-type': 'application/json', ...(ctx.darioKey ? { 'x-api-key': ctx.darioKey } : {}), 'anthropic-version': '2023-06-01' },
     body: JSON.stringify({
       model: ctx.model, max_tokens: maxTokens, system, messages, tools,
       ...(toolChoice ? { tool_choice: toolChoice } : {}),
@@ -688,15 +757,18 @@ async function main() {
   // one can leave it to be uploaded.
   const verdictFile = env.REDLINE_VERDICT_FILE || '';
   if (verdictFile) rmSync(verdictFile, { force: true });
+  const dario = darioAccess(secrets);
+  if (dario.error) { console.error(`::error::${dario.error}`); process.exit(2); }
+  if (dario.warning) console.log(`::warning::${dario.warning}`);
   const ctx = {
     repo: need('REPO'), pr: Number(need('PR')), headSha: need('HEAD_SHA'), checkout: need('CHECKOUT'),
     readToken: need('GH_READ_TOKEN'),
     reviewToken: secrets.REDLINE_GITHUB_TOKEN || secrets.GITHUB_PAT_REVIEWER || '',
-    darioUrl: secrets.DARIO_URL || 'http://127.0.0.1:3456', darioKey: need('DARIO_API_KEY', secrets),
+    darioUrl: dario.darioUrl, darioKey: dario.darioKey,
     model: secrets.REDLINE_MODEL || DEFAULT_MODEL,
     fallbackModel: secrets.REDLINE_FALLBACK_MODEL ?? DEFAULT_FALLBACK_MODEL,
     system,
-    fetch: globalThis.fetch, sleep: (ms) => new Promise((r) => setTimeout(r, ms)), now: () => Date.now(),
+    fetch: withDarioSocket(globalThis.fetch, dario.darioUrl, dario.darioSocket), sleep: (ms) => new Promise((r) => setTimeout(r, ms)), now: () => Date.now(),
     dryRun: env.REDLINE_DRY_RUN === '1',
     reread: env.REDLINE_REREAD === '1',
     log: (line) => console.log(line),
