@@ -65,16 +65,72 @@ forge verifies the artifact and pushes the commit to the PR branch with its own 
 comments with the notes. The model key is the named dario key `first-party-fix` in
 `/etc/askalf/fix-exec.env`, root:gha-exec 640, readable by the exec account and by no other
 (never by gha-oss, which runs untrusted upstream candidates' suites on the same host).
-The PR's tests and the model's `node <file>` run as that same exec account, so they could read the
-key. The script checks everything that leaves the runner for the key and the read token: the diff,
+The commands the checkout supplies (the install, the PR's tests, the model's `node <file>`) run
+as a separate run account, named by `FIX_RUN_AS` in the env file; see the host setup below. The
+script also checks everything that leaves the runner for the key and the read token: the diff,
 the staged blobs (a clean filter can stage bytes the working tree lacks; each is sized first,
 refused past 1 MB, and an unreadable one is a refusal), `fix.json` and `notes.md`; one carrying
 a secret is refused with nothing kept, and the job log masks them.
-Keeping the key out of the children's reach entirely is the host's part: run them as a separate
-account, or deny them the network.
 The fixer's brief is `/etc/askalf/fix-prompt.md` on the same host, named by `FIX_PROMPT_FILE`, with
 the env file's owner and mode; `fix.test.mjs` covers the parsing, the sandbox, the allowlist, the
 limits, the commit and bundle on a real repository, and both workflows.
+
+## Host setup for the fix lane
+
+The exec account reads the model key, so nothing the checkout supplies may run as it. Each exec
+runner gets a run account of its own: one per runner, so a kill or a write never reaches another
+repository's job. Below, `gha-exec` stands for the exec runner's account and `gha-exec-run` for its
+run account.
+
+1. **The run account.** No login, no home secrets, and not in the group that reads
+   `fix-exec.env` and `fix-prompt.md`:
+   ```
+   useradd --system --no-create-home --shell /usr/sbin/nologin gha-exec-run
+   ```
+2. **sudo, to that account only.** In `/etc/sudoers.d/redline-fix` (check with `visudo -c`):
+   ```
+   gha-exec ALL=(gha-exec-run) NOPASSWD: ALL
+   ```
+   `fix.mjs` runs `sudo -n -u gha-exec-run -- env -i ...` for each command, then `pkill` and a
+   `find ... chmod` as the same account.
+3. **ACLs and paths.** The `acl` package, for `setfacl`, on a filesystem mounted with ACL support.
+   Every directory above the runner's work directory must be searchable by the run account (`x`),
+   and the tool cache setup-node installs into must be readable and searchable by it, since the
+   tests run that node. The run account cannot write `.git`, so a test that writes there (a commit,
+   an index refresh) fails in this lane.
+4. **Egress.** The run account reaches a forward proxy and nothing else; dario and every other
+   local service included. With nftables:
+   ```
+   table inet redline_fix {
+     chain out {
+       type filter hook output priority 0; policy accept;
+       meta skuid "gha-exec-run" ip daddr 127.0.0.1 tcp dport 3128 accept
+       meta skuid "gha-exec-run" drop
+     }
+   }
+   ```
+   The proxy (Squid, for example) allows the package registries the repositories use, such as
+   `registry.npmjs.org`, `registry.yarnpkg.com` and `codeload.github.com`, and denies the rest.
+   A repository whose tests need the internet fails in this lane.
+5. **The env file.** Next to `DARIO_API_KEY` in `/etc/askalf/fix-exec.env`:
+   ```
+   FIX_RUN_AS=gha-exec-run
+   FIX_PROXY=http://127.0.0.1:3128
+   ```
+
+Each run proves the setup before it runs anything: sudo to the run account works, the run account
+cannot read the env file or the brief, it can write the checkout, and it cannot write `.git`. A run
+that fails any of these is `refused`, and its notes say which. Without `FIX_RUN_AS` the commands
+run as the exec account, and the job log warns that they could read the key.
+
+To check a host by hand, as the exec account:
+```
+sudo -n -u gha-exec-run -- cat /etc/askalf/fix-exec.env           # Permission denied
+sudo -n -u gha-exec-run -- curl -sS -m 5 http://127.0.0.1:3456/   # fails: dario is not reachable
+sudo -n -u gha-exec-run -- curl -sS -m 5 https://example.com/      # fails: no direct egress
+sudo -n -u gha-exec-run -- env HTTPS_PROXY=http://127.0.0.1:3128 \
+  curl -sS -m 10 -o /dev/null -w '%{http_code}\n' https://registry.npmjs.org/   # 200
+```
 
 ## The pin: `pin.mjs` and `redline-pin-bump.yml`
 

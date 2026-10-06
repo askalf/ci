@@ -11,7 +11,7 @@ import {
   parseReviewUrl, parseReviewBody, inlineItems, formatFinding, detectRunner, allowedCommands, allowedArgv, safeWritePath, stageable,
   protectedFromCheckAttr, protectedPaths, PROTECTED_ATTR, descriptionProblem,
   commitSubject, hasAttributionTrailer, neutraliseRefs, cleanNotes, summariseTests, renderNotes, fixRecord, fixProblem, saveFix,
-  failingTests, FAILING_NAMES_MAX, runSecrets, leaksSecret, maskSecrets, berryInstall,
+  failingTests, FAILING_NAMES_MAX, runSecrets, leaksSecret, maskSecrets, berryInstall, runAccount, asRunAccount, proxyEnv,
   TOOLS, FINISH_REQUIRED, askForFinish, checkFinish, runLoop, buildBrief, childEnv, onlyOrigins, runFix,
   LIMITS, OUTCOMES, AUTHOR, FIX_VERSION, DEFAULT_MODEL, SUBJECT_BANNED,
 } from './fix.mjs';
@@ -378,6 +378,22 @@ function loopWorld(turns, { canForce = true } = {}) {
   const brief = buildBrief({ pr: { number: 7, title: 't', body: 'b', head: { ref: 'f' }, base: { ref: 'main', repo: { full_name: 'askalf/r' } } }, files: [{ status: 'modified', additions: 1, deletions: 0, filename: 'src/b.js' }], headSha: HEAD,
     review: parseReviewBody(BODY), items: inlineItems([{ path: 'src/b.js', line: 1, body: 'c' }]), plan: { pm: 'npm', scripts: ['test'] }, installNote: 'ok', diff: '+x' });
   check('the brief carries the PR, the findings, the inline comments, the allowlist and the test script', /PR #7: t/.test(brief) && /\[1\] blocking `src\/b\.js:1`/.test(brief) && /\[1\] src\/b\.js:1\nc/.test(brief) && /run accepts: npm test, node <file>/.test(brief) && /Test script: `npm test`/.test(brief) && /PR diff:\n\+x/.test(brief));
+}
+
+console.log('\n  the run account and the proxy');
+{
+  const rejects = (n) => { try { runAccount(n); return false; } catch { return true; } };
+  check('FIX_RUN_AS: a plain user name or nothing; anything else throws',
+    runAccount('gha-exec-run') === 'gha-exec-run' && runAccount(' gha_run ') === 'gha_run' && runAccount('') === '' && runAccount(undefined) === ''
+      && ['Bad Name', 'a;b', '-u', '../x', 'Root', 'x'.repeat(33), 'a$(id)'].every(rejects));
+  const argv = asRunAccount('gha-exec-run', { PATH: '/bin', HOME: '/h' }, ['timeout', '-k', '10', '5', 'npm', 'test']);
+  check('a command runs through sudo as the run account, from an empty environment holding only its own variables',
+    argv.join(' ') === 'sudo -n -u gha-exec-run -- env -i PATH=/bin HOME=/h timeout -k 10 5 npm test');
+  const p = proxyEnv('http://127.0.0.1:3128');
+  check('FIX_PROXY reaches every package manager, and nothing is exempt from it',
+    ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy', 'npm_config_proxy', 'npm_config_https_proxy', 'YARN_HTTP_PROXY', 'YARN_HTTPS_PROXY'].every((k) => p[k] === 'http://127.0.0.1:3128')
+      && p.NO_PROXY === '' && p.no_proxy === '' && Object.keys(proxyEnv('')).length === 0);
+  check('the children\'s environment carries the proxy when there is one', childEnv({ PATH: '/bin' }, '/h', 'http://p:1').HTTPS_PROXY === 'http://p:1' && !('HTTPS_PROXY' in childEnv({ PATH: '/bin' }, '/h')));
 }
 
 console.log('\n  credentials');
@@ -868,6 +884,80 @@ if (!gitOk) {
   if (!npmOk) {
     console.log('\n  skip the test-script runs: no npm on PATH here (they run in CI)');
   } else {
+    if (process.platform !== 'win32') {
+      console.log('\n  runFix: commands as the run account');
+      // A stand-in sudo and setfacl log what they are given; sudo runs the command as this account
+      // (CI cannot make another), reports the guard files unreadable and .git unwritable, and
+      // leaves pkill and find out.
+      const stub = mkdtempSync(join(tmpdir(), 'redline-runas-'));
+      const log = join(stub, 'calls.log');
+      const stubs = ({ guardReadable = false, sudoWorks = true } = {}) => {
+        writeFileSync(join(stub, 'sudo'), [
+          '#!/bin/sh', `echo "sudo $*" >> '${log}'`, ...(sudoWorks ? [] : ['exit 1']),
+          'shift 3; [ "$1" = -- ] && shift',
+          `case "$1 $2" in "test -r") exit ${guardReadable ? 0 : 1};; "test -w") case "$3" in */.git) exit 1;; esac;; pkill*|find*) exit 0;; esac`,
+          'exec "$@"', '',
+        ].join('\n'), { mode: 0o755 });
+        writeFileSync(join(stub, 'setfacl'), `#!/bin/sh\necho "setfacl $*" >> '${log}'\n`, { mode: 0o755 });
+      };
+      const env = { ...process.env, PATH: `${stub}:${process.env.PATH}` };
+      const repoWithTests = () => makeRepo({ pkg: { name: 'r', private: true, scripts: { test: 'node test.mjs' } } });
+      {
+        stubs();
+        const repo = repoWithTests();
+        const w = world(repo, { turns: [tool('fix_write', { path: 'src/b.js', content: FIXED_B }), tool('fix_run', { command: 'node test.mjs' }), finish()] });
+        const { record: r } = await runFix({ ...w.ctx, env, runAs: 'gha-exec-run', guardFiles: ['/etc/askalf/fix-exec.env'] });
+        const calls = readFileSync(log, 'utf8').split('\n');
+        const at = (re) => calls.findIndex((l) => re.test(l));
+        check('the run account is proved first: it works and cannot read the guard files',
+          at(/^sudo -n -u gha-exec-run -- true$/) === 0 && at(/^sudo -n -u gha-exec-run -- test -r \/etc\/askalf\/fix-exec\.env$/) === 1);
+        check('it may write the checkout, reads .git only, and has a HOME of its own',
+          at(new RegExp(`^setfacl -R -m u:gha-exec-run:rwX,d:u:gha-exec-run:rwX,d:u:[^ ]+:rwX ${repo.dir}$`)) > 1
+            && at(new RegExp(`^setfacl -R -m u:gha-exec-run:rX,d:u:gha-exec-run:rX ${repo.dir}/\\.git$`)) > 1 && at(/^setfacl -m u:gha-exec-run:rwx,.* \/.*redline-fix-home-/) > 1);
+        const ran = calls.filter((l) => / -- env -i /.test(l));
+        check('the install, node <file> and the test script all run as the run account, under timeout, from a clean environment',
+          ran.some((l) => /timeout -k 10 \d+ npm install /.test(l)) && ran.some((l) => /timeout -k 10 \d+ node test\.mjs$/.test(l)) && ran.some((l) => /timeout -k 10 \d+ npm test$/.test(l))
+            && ran.every((l) => /^sudo -n -u gha-exec-run -- env -i PATH=/.test(l) && !/GH_READ_TOKEN|DARIO_API_KEY/.test(l)));
+        const killAfter = ran.every((l) => { const i = calls.indexOf(l); return /^sudo -n -u gha-exec-run -- pkill -KILL -u gha-exec-run$/.test(calls[i + 1]) && /^sudo -n -u gha-exec-run -- find .* -user gha-exec-run /.test(calls[i + 2]); });
+        check('after every command its processes are killed and what it made is readable again', killAfter);
+        check('and the fix goes through', r.outcome === 'fixed' && r.files.join() === 'src/b.js' && fixProblem(r) === null);
+        rmSync(w.out, { recursive: true, force: true });
+        rmSync(repo.dir, { recursive: true, force: true });
+        rmSync(log, { force: true });
+      }
+      {
+        stubs({ guardReadable: true });
+        const repo = repoWithTests();
+        const w = world(repo, { turns: [tool('fix_write', { path: 'src/b.js', content: FIXED_B }), finish()] });
+        const { record: r } = await runFix({ ...w.ctx, env, runAs: 'gha-exec-run', guardFiles: ['/etc/askalf/fix-exec.env'] });
+        check('a run account that can read the key file is refused before anything runs',
+          r.outcome === 'refused' && /can read fix-exec\.env/.test(r.notes) && w.calls.model.length === 0 && !readFileSync(log, 'utf8').includes(' -- env -i '));
+        rmSync(w.out, { recursive: true, force: true });
+        rmSync(repo.dir, { recursive: true, force: true });
+        rmSync(log, { force: true });
+      }
+      {
+        stubs({ sudoWorks: false });
+        const repo = repoWithTests();
+        const w = world(repo, { turns: [finish()] });
+        const { record: r } = await runFix({ ...w.ctx, env, runAs: 'gha-exec-run' });
+        check('a run account sudo cannot reach is refused', r.outcome === 'refused' && /cannot run as the run account/.test(r.notes) && w.calls.model.length === 0);
+        rmSync(w.out, { recursive: true, force: true });
+        rmSync(repo.dir, { recursive: true, force: true });
+      }
+      {
+        const repo = repoWithTests();
+        const lines = [];
+        const w = world(repo, { turns: [tool('fix_write', { path: 'src/b.js', content: FIXED_B }), finish()] });
+        const { record: r } = await runFix({ ...w.ctx, log: (l) => lines.push(l) });
+        check('without FIX_RUN_AS the fix still runs, and the log warns that commands could read the key',
+          r.outcome === 'fixed' && lines.some((l) => /^::warning::FIX_RUN_AS is not set/.test(l)));
+        check('a FIX_RUN_AS that is not a user name is refused', (await runFix({ ...world(repo, { turns: [finish()] }).ctx, runAs: 'a b' })).record.outcome === 'refused');
+        rmSync(w.out, { recursive: true, force: true });
+        rmSync(repo.dir, { recursive: true, force: true });
+      }
+      rmSync(stub, { recursive: true, force: true });
+    }
     console.log('\n  runFix: the test script');
     {
       const repo = makeRepo({ pkg: { name: 'r', private: true, scripts: { test: 'node test.mjs' } } });
