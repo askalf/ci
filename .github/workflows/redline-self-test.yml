@@ -28,7 +28,15 @@ jobs:
         with:
           node-version: 22
       - run: node scripts/redline/review.test.mjs
+      # A second account, so the fix tests run the checkout's commands as a real run account and
+      # try the boundary for real. The runner's own account has passwordless sudo.
+      - name: Make a run account for the fix tests
+        run: |
+          sudo useradd --system --no-create-home --shell /usr/sbin/nologin redline-run
+          command -v setfacl >/dev/null || { sudo apt-get update -q && sudo apt-get install -y -q acl; }
       - run: node scripts/redline/fix.test.mjs
+        env:
+          REDLINE_TEST_RUN_AS: redline-run
       # tools.json and fix-tools.json are TOOLS as files; this fails when review.mjs or fix.mjs
       # changed a tool without them.
       - run: node scripts/redline/dump-tools.mjs --check

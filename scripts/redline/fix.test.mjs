@@ -2,7 +2,7 @@
 // The model and GitHub are stubbed through ctx.fetch; git is real, on throwaway repositories under
 // the temp directory. Nothing leaves the machine.
 
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, symlinkSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, symlinkSync, chmodSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -11,8 +11,8 @@ import {
   parseReviewUrl, parseReviewBody, inlineItems, formatFinding, detectRunner, allowedCommands, allowedArgv, safeWritePath, stageable,
   protectedFromCheckAttr, protectedPaths, PROTECTED_ATTR, descriptionProblem,
   commitSubject, hasAttributionTrailer, neutraliseRefs, cleanNotes, summariseTests, renderNotes, fixRecord, fixProblem, saveFix,
-  failingTests, FAILING_NAMES_MAX, runSecrets, leaksSecret, maskSecrets, berryInstall,
-  TOOLS, FINISH_REQUIRED, askForFinish, checkFinish, runLoop, buildBrief, childEnv, onlyOrigins, runFix,
+  failingTests, FAILING_NAMES_MAX, runSecrets, leaksSecret, maskSecrets, berryInstall, runAccount, asRunAccount, proxyEnv,
+  runAccountUidProblem, TOOLS, FINISH_REQUIRED, askForFinish, checkFinish, runLoop, buildBrief, childEnv, onlyOrigins, runFix,
   LIMITS, OUTCOMES, AUTHOR, FIX_VERSION, DEFAULT_MODEL, SUBJECT_BANNED,
 } from './fix.mjs';
 import { bumpCaller, fixCallerYaml, REVIEW_WORKFLOW, FIX_WORKFLOW, CALLERS } from './pin.mjs';
@@ -378,6 +378,26 @@ function loopWorld(turns, { canForce = true } = {}) {
   const brief = buildBrief({ pr: { number: 7, title: 't', body: 'b', head: { ref: 'f' }, base: { ref: 'main', repo: { full_name: 'askalf/r' } } }, files: [{ status: 'modified', additions: 1, deletions: 0, filename: 'src/b.js' }], headSha: HEAD,
     review: parseReviewBody(BODY), items: inlineItems([{ path: 'src/b.js', line: 1, body: 'c' }]), plan: { pm: 'npm', scripts: ['test'] }, installNote: 'ok', diff: '+x' });
   check('the brief carries the PR, the findings, the inline comments, the allowlist and the test script', /PR #7: t/.test(brief) && /\[1\] blocking `src\/b\.js:1`/.test(brief) && /\[1\] src\/b\.js:1\nc/.test(brief) && /run accepts: npm test, node <file>/.test(brief) && /Test script: `npm test`/.test(brief) && /PR diff:\n\+x/.test(brief));
+}
+
+console.log('\n  the run account and the proxy');
+{
+  const rejects = (n) => { try { runAccount(n); return false; } catch { return true; } };
+  check('FIX_RUN_AS: a plain user name or nothing; anything else throws',
+    runAccount('gha-exec-run') === 'gha-exec-run' && runAccount(' gha_run ') === 'gha_run' && runAccount('') === '' && runAccount(undefined) === ''
+      && ['Bad Name', 'a;b', '-u', '../x', 'Root', 'x'.repeat(33), 'a$(id)'].every(rejects));
+  const argv = asRunAccount('gha-exec-run', { PATH: '/bin', HOME: '/h' }, ['timeout', '-k', '10', '5', 'npm', 'test']);
+  check('a command runs through sudo as the run account, from an empty environment holding only its own variables',
+    argv.join(' ') === 'sudo -n -u gha-exec-run -- env -i PATH=/bin HOME=/h timeout -k 10 5 npm test');
+  check('the run account is never root or this account, and a uid id -u did not print is no uid',
+    runAccountUidProblem('1002\n', 1001) === null && /is root/.test(runAccountUidProblem('0\n', 1001))
+      && /is this account/.test(runAccountUidProblem('1001\n', 1001)) && /could not be read/.test(runAccountUidProblem('', 1001))
+      && /could not be read/.test(runAccountUidProblem('uid=0(root)', 1001)) && /could not be read/.test(runAccountUidProblem(undefined, 1001)));
+  const p = proxyEnv('http://127.0.0.1:3128');
+  check('FIX_PROXY reaches every package manager, and nothing is exempt from it',
+    ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy', 'npm_config_proxy', 'npm_config_https_proxy', 'YARN_HTTP_PROXY', 'YARN_HTTPS_PROXY'].every((k) => p[k] === 'http://127.0.0.1:3128')
+      && p.NO_PROXY === '' && p.no_proxy === '' && Object.keys(proxyEnv('')).length === 0);
+  check('the children\'s environment carries the proxy when there is one', childEnv({ PATH: '/bin' }, '/h', 'http://p:1').HTTPS_PROXY === 'http://p:1' && !('HTTPS_PROXY' in childEnv({ PATH: '/bin' }, '/h')));
 }
 
 console.log('\n  credentials');
@@ -868,6 +888,197 @@ if (!gitOk) {
   if (!npmOk) {
     console.log('\n  skip the test-script runs: no npm on PATH here (they run in CI)');
   } else {
+    if (process.platform !== 'win32') {
+      console.log('\n  runFix: commands as the run account');
+      // A stand-in sudo and setfacl log what they are given; sudo runs the command as this account,
+      // answers id -u with `uid` (another account's by default), reports the guard files unreadable
+      // and .git unwritable, and leaves kill and find out. The ps check runs for real and finds no
+      // process of an account that does not exist.
+      const stub = mkdtempSync(join(tmpdir(), 'redline-runas-'));
+      const log = join(stub, 'calls.log');
+      const stubs = ({ guardReadable = false, sudoWorks = true, uid = process.getuid() + 1 } = {}) => {
+        writeFileSync(join(stub, 'sudo'), [
+          '#!/bin/sh', `echo "sudo $*" >> '${log}'`, ...(sudoWorks ? [] : ['exit 1']),
+          'shift 3; [ "$1" = -- ] && shift',
+          `case "$1 $2" in "id -u") echo ${uid}; exit 0;; "test -r") exit ${guardReadable ? 0 : 1};; "test -w") case "$3" in */.git) exit 1;; esac;; kill*|find*) exit 0;; esac`,
+          'exec "$@"', '',
+        ].join('\n'), { mode: 0o755 });
+        writeFileSync(join(stub, 'setfacl'), `#!/bin/sh\necho "setfacl $*" >> '${log}'\n`, { mode: 0o755 });
+      };
+      const env = { ...process.env, PATH: `${stub}:${process.env.PATH}` };
+      const repoWithTests = () => makeRepo({ pkg: { name: 'r', private: true, scripts: { test: 'node test.mjs' } } });
+      {
+        stubs();
+        const repo = repoWithTests();
+        const w = world(repo, { turns: [tool('fix_write', { path: 'src/b.js', content: FIXED_B }), tool('fix_run', { command: 'node test.mjs' }), finish()] });
+        const { record: r } = await runFix({ ...w.ctx, env, runAs: 'gha-exec-run', guardFiles: ['/etc/askalf/fix-exec.env'] });
+        const calls = readFileSync(log, 'utf8').split('\n');
+        const at = (re) => calls.findIndex((l) => re.test(l));
+        check('the run account is proved first: it works, is another account and cannot read the guard files',
+          at(/^sudo -n -u gha-exec-run -- id -u$/) === 0 && at(/^sudo -n -u gha-exec-run -- test -r \/etc\/askalf\/fix-exec\.env$/) === 1);
+        check('it may write the checkout, reads .git only, and has a HOME of its own',
+          at(new RegExp(`^setfacl -R -m u:gha-exec-run:rwX,d:u:gha-exec-run:rwX,d:u:[^ ]+:rwX ${repo.dir}$`)) > 1
+            && at(new RegExp(`^setfacl -R -m u:gha-exec-run:rX,d:u:gha-exec-run:rX ${repo.dir}/\\.git$`)) > 1 && at(/^setfacl -m u:gha-exec-run:rwx,.* \/.*redline-fix-home-/) > 1);
+        const ran = calls.filter((l) => / -- env -i /.test(l));
+        check('the install, node <file> and the test script all run as the run account, under timeout, from a clean environment',
+          ran.some((l) => /timeout -k 10 \d+ npm install /.test(l)) && ran.some((l) => /timeout -k 10 \d+ node test\.mjs$/.test(l)) && ran.some((l) => /timeout -k 10 \d+ npm test$/.test(l))
+            && ran.every((l) => /^sudo -n -u gha-exec-run -- env -i PATH=/.test(l) && !/GH_READ_TOKEN|DARIO_API_KEY/.test(l)));
+        const killAfter = ran.every((l) => {
+          const i = calls.indexOf(l);
+          return /^sudo -n -u gha-exec-run -- kill -KILL -1$/.test(calls[i + 1]) && /^sudo -n -u gha-exec-run -- chmod -R u\+rwX /.test(calls[i + 2])
+            && /^sudo -n -u gha-exec-run -- setfacl -R -m u:[^:]+:rwX,d:u:[^:]+:rwX /.test(calls[i + 3]);
+        });
+        check('after every command its processes are killed and what it made is readable again', killAfter);
+        check('and the fix goes through', r.outcome === 'fixed' && r.files.join() === 'src/b.js' && fixProblem(r) === null);
+        rmSync(w.out, { recursive: true, force: true });
+        rmSync(repo.dir, { recursive: true, force: true });
+        rmSync(log, { force: true });
+      }
+      {
+        stubs({ guardReadable: true });
+        const repo = repoWithTests();
+        const w = world(repo, { turns: [tool('fix_write', { path: 'src/b.js', content: FIXED_B }), finish()] });
+        const { record: r } = await runFix({ ...w.ctx, env, runAs: 'gha-exec-run', guardFiles: ['/etc/askalf/fix-exec.env'] });
+        const calls = readFileSync(log, 'utf8');
+        check('a run account that can read the key file is refused before anything runs, and is never sent kill -1',
+          r.outcome === 'refused' && /can read fix-exec\.env/.test(r.notes) && w.calls.model.length === 0 && !calls.includes(' -- env -i ') && !calls.includes(' -- kill '));
+        rmSync(w.out, { recursive: true, force: true });
+        rmSync(repo.dir, { recursive: true, force: true });
+        rmSync(log, { force: true });
+      }
+      // Run as root, this account is root, which the root check names first.
+      for (const [who, uid, re] of [['root', 0, /is root/], ['this account', process.getuid(), process.getuid() === 0 ? /is root/ : /is this account/], ['an account id -u cannot name', 'x', /could not be read/]]) {
+        stubs({ uid });
+        const repo = repoWithTests();
+        const w = world(repo, { turns: [finish()] });
+        const { record: r } = await runFix({ ...w.ctx, env, runAs: 'gha-exec-run', guardFiles: ['/etc/askalf/fix-exec.env'] });
+        const calls = readFileSync(log, 'utf8');
+        check(`a run account that is ${who} is refused before anything runs, and is never sent kill -1`,
+          r.outcome === 'refused' && re.test(r.notes) && w.calls.model.length === 0 && !calls.includes(' -- env -i ') && !calls.includes(' -- kill '));
+        rmSync(w.out, { recursive: true, force: true });
+        rmSync(repo.dir, { recursive: true, force: true });
+        rmSync(log, { force: true });
+      }
+      {
+        stubs({ sudoWorks: false });
+        const repo = repoWithTests();
+        const w = world(repo, { turns: [finish()] });
+        const { record: r } = await runFix({ ...w.ctx, env, runAs: 'gha-exec-run' });
+        check('a run account sudo cannot reach is refused, and is never sent kill -1',
+          r.outcome === 'refused' && /cannot run as the run account/.test(r.notes) && w.calls.model.length === 0 && !readFileSync(log, 'utf8').includes(' -- kill '));
+        rmSync(w.out, { recursive: true, force: true });
+        rmSync(repo.dir, { recursive: true, force: true });
+        rmSync(log, { force: true });
+      }
+      {
+        const repo = repoWithTests();
+        const lines = [];
+        const w = world(repo, { turns: [tool('fix_write', { path: 'src/b.js', content: FIXED_B }), finish()] });
+        const { record: r } = await runFix({ ...w.ctx, log: (l) => lines.push(l) });
+        check('without FIX_RUN_AS the fix still runs, and the log warns that commands could read the key',
+          r.outcome === 'fixed' && lines.some((l) => /^::warning::FIX_RUN_AS is not set/.test(l)));
+        check('a FIX_RUN_AS that is not a user name is refused', (await runFix({ ...world(repo, { turns: [finish()] }).ctx, runAs: 'a b' })).record.outcome === 'refused');
+        rmSync(w.out, { recursive: true, force: true });
+        rmSync(repo.dir, { recursive: true, force: true });
+      }
+      rmSync(stub, { recursive: true, force: true });
+    }
+    // With REDLINE_TEST_RUN_AS (the self-test makes the account), the checkout's commands run as a
+    // real second account and try the boundary: the key file, .git, and the git configuration
+    // this process's own git might read. Set but unusable is a failure, never a skip.
+    const realRunAs = process.env.REDLINE_TEST_RUN_AS ?? '';
+    if (!realRunAs) {
+      console.log('\n  skip the real run-account tests: REDLINE_TEST_RUN_AS is not set (the self-test sets it)');
+    } else {
+      console.log(`\n  runFix: a real run account (${realRunAs})`);
+      check('sudo reaches the run account', spawnSync('sudo', ['-n', '-u', realRunAs, '--', 'true']).status === 0);
+      const secretDir = mkdtempSync(join(tmpdir(), 'redline-secret-'));
+      const secret = join(secretDir, 'fix-exec.env');
+      writeFileSync(secret, 'DARIO_API_KEY=dk_live_0123456789\n', { mode: 0o600 });
+      const realRun = async (testBody, inspect = () => {}) => {
+        const repo = makeRepo({ pkg: { name: 'r', private: true, scripts: { test: 'node test.mjs' } }, testBody });
+        const w = world(repo, { turns: [tool('fix_write', { path: 'src/b.js', content: FIXED_B }), finish()] });
+        // A throw is a refusal, as the CLI makes it.
+        let r;
+        try { ({ record: r } = await runFix({ ...w.ctx, runAs: realRunAs, guardFiles: [secret] })); } catch (e) { r = { outcome: 'refused', notes: e.message }; }
+        inspect(repo.dir);
+        return { r, repo, w };
+      };
+      const done = ({ repo, w }) => { rmSync(w.out, { recursive: true, force: true }); rmSync(repo.dir, { recursive: true, force: true }); };
+      {
+        // The report goes into the checkout: /tmp is sticky, and this account could not remove a
+        // file the run account made there.
+        const body = [
+          "import { readFileSync, writeFileSync, appendFileSync } from 'node:fs';",
+          'const r = { uid: process.getuid(), env: Object.keys(process.env) };',
+          `try { readFileSync(${JSON.stringify(secret)}); r.key = 'read'; } catch (e) { r.key = e.code; }`,
+          "try { appendFileSync('.git/config', '#'); r.git = 'written'; } catch (e) { r.git = e.code; }",
+          "try { writeFileSync('scratch.txt', 'x'); r.checkout = 'written'; } catch (e) { r.checkout = e.code; }",
+          "writeFileSync('report.json', JSON.stringify(r));", '',
+        ].join('\n');
+        let seen = {};
+        const run = await realRun(body, (dir) => { try { seen = JSON.parse(readFileSync(join(dir, 'report.json'), 'utf8')); } catch { /* no report */ } });
+        check('the tests run as the run account and cannot read the key file or write .git, but can write the checkout',
+          seen.uid !== process.getuid() && seen.key === 'EACCES' && seen.git === 'EACCES' && seen.checkout === 'written' && !seen.env.includes('GH_READ_TOKEN'));
+        check('and the fix goes through', run.r.outcome === 'fixed' && fixProblem(run.r) === null, run.r.notes);
+        done(run);
+      }
+      for (const [name, body] of [
+        // .git is read-only but its directory entry is not: rename it and put a writable copy,
+        // with a command in its config, in its place.
+        ['a replaced .git', (mark) => "import { renameSync, cpSync, appendFileSync } from 'node:fs';\nrenameSync('.git', '.git-old');\ncpSync('.git-old', '.git', { recursive: true });\nappendFileSync('.gitignore', '.git-old/\\n');\n"
+          + `appendFileSync('.git/config', '[core]\\n\\tfsmonitor = touch ${mark}\\n[safe]\\n\\tdirectory = *\\n');\n`],
+        // The commands' HOME: a global git config there, which a git run with that HOME would read.
+        ['a .gitconfig in the commands\' HOME', (mark) => "import { writeFileSync } from 'node:fs';\n"
+          + `writeFileSync(process.env.HOME + '/.gitconfig', '[core]\\n\\tfsmonitor = touch ${mark}\\n[safe]\\n\\tdirectory = *\\n');\n`],
+        // prepare-commit-msg and post-commit hooks (--no-verify skips neither) where the commit's
+        // hooks directory would be if it lived in the commands' HOME.
+        ['commit hooks planted in the commands\' HOME', (mark) => "import { mkdirSync, writeFileSync } from 'node:fs';\n"
+          + "mkdirSync(process.env.HOME + '/no-hooks', { recursive: true });\n"
+          + `for (const h of ['prepare-commit-msg', 'post-commit']) writeFileSync(process.env.HOME + '/no-hooks/' + h, '#!/bin/sh\\ntouch ${mark}\\n', { mode: 0o755 });\n`],
+      ]) {
+        const mark = join(tmpdir(), `redline-pwned-${process.pid}-${Math.random().toString(36).slice(2)}`);
+        const run = await realRun(body(mark));
+        check(`${name} runs nothing as this account`, !existsSync(mark) && run.r.outcome !== 'refused', run.r.notes);
+        rmSync(mark, { force: true });
+        done(run);
+      }
+      {
+        // The test strips the inherited ACL from a directory and a file it made and locks them to
+        // itself (700, 600, and a 000 directory inside). This account still reaches and commits them.
+        const lock = "import { mkdirSync, writeFileSync, chmodSync } from 'node:fs';\nimport { spawnSync } from 'node:child_process';\n"
+          + "mkdirSync('locked/inner', { recursive: true });\nwriteFileSync('locked/f.txt', 'x\\n');\nwriteFileSync('locked/inner/g.txt', 'y\\n');\n"
+          + "spawnSync('setfacl', ['-R', '-b', 'locked']);\nchmodSync('locked/f.txt', 0o600);\nchmodSync('locked/inner/g.txt', 0o600);\nchmodSync('locked/inner', 0o000);\nchmodSync('locked', 0o700);\n";
+        const run = await realRun(lock);
+        check('files the run account locked to itself are reached and committed, and nothing is left this account cannot remove',
+          run.r.outcome === 'fixed' && ['locked/f.txt', 'locked/inner/g.txt'].every((f) => run.r.files.includes(f)), run.r.notes);
+        done(run);
+      }
+      {
+        // A detached process that hops: each instance logs, starts the next and exits at once, so a
+        // list of process ids is stale by the time it is signalled (pkill lets it run on). Its
+        // script lives outside the checkout and the commands' HOME, so only the kill can stop it.
+        // After the run its log must have stopped growing, and the run goes on.
+        const hopDir = mkdtempSync(join(tmpdir(), 'redline-hop-'));
+        chmodSync(hopDir, 0o777);
+        const hopLog = join(hopDir, 'hops.log');
+        const forker = "import { spawn } from 'node:child_process';\nimport { writeFileSync } from 'node:fs';\n"
+          + `writeFileSync('${hopDir}/hop.sh', 'echo . >> ${hopLog}\\nsh "$0" &\\nexit 0\\n');\n`
+          + `spawn('sh', ['${hopDir}/hop.sh'], { detached: true, stdio: 'ignore' }).unref();\n`;
+        const run = await realRun(forker);
+        const size = () => { try { return statSync(hopLog).size; } catch { return 0; } };
+        const wait = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+        const first = size();
+        wait(700);
+        const second = size();
+        check('a detached process that keeps hopping to new process ids is stopped before the checkout is read again, and the fix goes through',
+          first > 0 && second === first && run.r.outcome === 'fixed', `${first} -> ${second}: ${run.r.notes}`);
+        for (let i = 0; i < 5; i++) spawnSync('sudo', ['-n', '-u', realRunAs, '--', 'kill', '-KILL', '-1']);
+        rmSync(hopDir, { recursive: true, force: true });
+        done(run);
+      }
+      rmSync(secretDir, { recursive: true, force: true });
+    }
     console.log('\n  runFix: the test script');
     {
       const repo = makeRepo({ pkg: { name: 'r', private: true, scripts: { test: 'node test.mjs' } } });
@@ -1147,6 +1358,8 @@ console.log('\n  pin bump, both callers');
   const selfTest = readFileSync(fileURLToPath(new URL('../../.github/workflows/redline-self-test.yml', import.meta.url)), 'utf8');
   // `test` is a required check, so it must report on every PR: no paths filter, which would leave a
   // PR outside the paths with a check that never runs.
+  check('the self-test makes a second account and runs the real run-account tests with it',
+    /sudo useradd [^\n]* redline-run\n/.test(selfTest) && /- run: node scripts\/redline\/fix\.test\.mjs\n\s+env:\n\s+REDLINE_TEST_RUN_AS: redline-run\n/.test(selfTest));
   check('the self-test runs these tests on every pull request', selfTest.includes('node scripts/redline/fix.test.mjs')
     && /^on:\n {2}pull_request:\n\n/m.test(selfTest.replace(/\r\n/g, '\n')) && !/^\s+paths(-ignore)?:/m.test(selfTest));
 }
