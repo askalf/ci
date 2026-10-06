@@ -392,6 +392,32 @@ console.log('\n  runReview');
     check('with no fallback a park fails the run at once', e instanceof reviewModule.ModelParked && calls.model.length === 1 && calls.sleeps === 0);
   }
   {
+    const unroutable = [400, { 'x-dario-upstream-rejection': 'model_unroutable' }];
+    {
+      const { ctx, calls } = world({ modelStatus: [200, unroutable], turns: [use('redline_list', {}), submit(APPROVE)] });
+      ctx.model = 'gpt-6-astra'; ctx.fallbackModel = 'claude-opus-5-5';
+      const lines = [];
+      ctx.log = (l) => lines.push(l);
+      const r = await runReview(ctx);
+      check('a model dario stops listing mid-review is not retried: the turn goes again on the fallback',
+        r.verdict === 'APPROVE' && calls.sleeps === 0 && calls.model.map((b) => b.model).join() === 'gpt-6-astra,gpt-6-astra,claude-opus-5-5'
+          && JSON.stringify(calls.model[2].messages) === JSON.stringify(calls.model[1].messages));
+      check('the switch is logged with the reason', lines.some((l) => l.includes('no provider in dario lists gpt-6-astra; the review continues on claude-opus-5-5')));
+    }
+    {
+      const { ctx, calls } = world({ modelStatus: [unroutable], turns: [submit(APPROVE)] });
+      ctx.model = 'gpt-6-astra'; ctx.fallbackModel = '';
+      const e = await throws(() => runReview(ctx));
+      check('with no fallback an unroutable model fails the run at once', e instanceof reviewModule.ModelUnroutable && /model_unroutable/.test(e.message) && calls.model.length === 1 && calls.sleeps === 0);
+    }
+    {
+      const { ctx, calls } = world({ modelStatus: [400], turns: [submit(APPROVE)] });
+      ctx.fallbackModel = 'claude-opus-5-5';
+      const e = await throws(() => runReview(ctx));
+      check('a plain 400 is not a fallback: it fails the run on the same model', !(e instanceof reviewModule.ModelUnroutable) && /HTTP 400/.test(e.message) && calls.model.length === 1);
+    }
+  }
+  {
     const { ctx, calls } = world({ modelStatus: [parked(10)], turns: [submit(APPROVE)] });
     ctx.fallbackModel = 'claude-opus-5-5';
     const r = await runReview(ctx);
