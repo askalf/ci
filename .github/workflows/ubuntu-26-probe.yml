@@ -50,4 +50,13 @@ jobs:
           t 'sed -i' "printf old > s; sed -i 's/old/new/' s; cat s"
           t 'useradd + sudo -n -u' "sudo useradd --system --no-create-home --shell /usr/sbin/nologin probe-run && sudo -n -u probe-run -- id -un"
           t 'setfacl' "command -v setfacl || { sudo apt-get update -q >/dev/null && sudo apt-get install -y -q acl >/dev/null && command -v setfacl; }"
+          # ACLs: a 0700 directory the run account reaches only through an ACL entry.
+          d="$(mktemp -d)"; chmod 0755 "$(dirname "$d")" 2>/dev/null || true; chmod 0700 "$d"
+          sudo setfacl -m u:probe-run:rwx "$d"; getfacl -p "$d" | sed 's/^/     /'
+          if sudo -n -u probe-run -- /usr/bin/test -w "$d"; then echo "ok   /usr/bin/test -w honours the ACL"; else echo "DIFF /usr/bin/test -w ignores the ACL"; fi
+          if sudo -n -u probe-run -- bash -c 'test -w "$1"' _ "$d"; then echo "ok   bash builtin test -w honours the ACL"; else echo "FAIL bash builtin test -w ignores the ACL"; fail=1; fi
+          if sudo -n -u probe-run -- touch "$d/x"; then echo "ok   the account can really write it"; else echo "FAIL the account cannot really write it"; fi
+          f="$(mktemp)"; chmod 0600 "$f"; sudo setfacl -m u:probe-run:r "$f"
+          if sudo -n -u probe-run -- /usr/bin/test -r "$f"; then echo "ok   /usr/bin/test -r honours the ACL"; else echo "DIFF /usr/bin/test -r ignores the ACL (a guard would miss a readable key file)"; fi
+          if sudo -n -u probe-run -- bash -c 'test -r "$1"' _ "$f"; then echo "ok   bash builtin test -r honours the ACL"; else echo "FAIL bash builtin test -r ignores the ACL"; fail=1; fi
           exit $fail
