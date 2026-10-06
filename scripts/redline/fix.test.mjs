@@ -970,28 +970,29 @@ if (!gitOk) {
       const secretDir = mkdtempSync(join(tmpdir(), 'redline-secret-'));
       const secret = join(secretDir, 'fix-exec.env');
       writeFileSync(secret, 'DARIO_API_KEY=dk_live_0123456789\n', { mode: 0o600 });
-      const realRun = async (testBody) => {
+      const realRun = async (testBody, inspect = () => {}) => {
         const repo = makeRepo({ pkg: { name: 'r', private: true, scripts: { test: 'node test.mjs' } }, testBody });
         const w = world(repo, { turns: [tool('fix_write', { path: 'src/b.js', content: FIXED_B }), finish()] });
         // A throw is a refusal, as the CLI makes it.
         let r;
         try { ({ record: r } = await runFix({ ...w.ctx, runAs: realRunAs, guardFiles: [secret] })); } catch (e) { r = { outcome: 'refused', notes: e.message }; }
+        inspect(repo.dir);
         return { r, repo, w };
       };
       const done = ({ repo, w }) => { rmSync(w.out, { recursive: true, force: true }); rmSync(repo.dir, { recursive: true, force: true }); };
       {
-        const report = join(tmpdir(), `redline-runas-${process.pid}.json`);
+        // The report goes into the checkout: /tmp is sticky, and this account could not remove a
+        // file the run account made there.
         const body = [
           "import { readFileSync, writeFileSync, appendFileSync } from 'node:fs';",
           'const r = { uid: process.getuid(), env: Object.keys(process.env) };',
           `try { readFileSync(${JSON.stringify(secret)}); r.key = 'read'; } catch (e) { r.key = e.code; }`,
           "try { appendFileSync('.git/config', '#'); r.git = 'written'; } catch (e) { r.git = e.code; }",
           "try { writeFileSync('scratch.txt', 'x'); r.checkout = 'written'; } catch (e) { r.checkout = e.code; }",
-          `writeFileSync(${JSON.stringify(report)}, JSON.stringify(r));`, '',
+          "writeFileSync('report.json', JSON.stringify(r));", '',
         ].join('\n');
-        const run = await realRun(body);
-        const seen = existsSync(report) ? JSON.parse(readFileSync(report, 'utf8')) : {};
-        rmSync(report, { force: true });
+        let seen = {};
+        const run = await realRun(body, (dir) => { try { seen = JSON.parse(readFileSync(join(dir, 'report.json'), 'utf8')); } catch { /* no report */ } });
         check('the tests run as the run account and cannot read the key file or write .git, but can write the checkout',
           seen.uid !== process.getuid() && seen.key === 'EACCES' && seen.git === 'EACCES' && seen.checkout === 'written' && !seen.env.includes('GH_READ_TOKEN'));
         check('and the fix goes through', run.r.outcome === 'fixed' && fixProblem(run.r) === null, run.r.notes);
