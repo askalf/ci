@@ -64,13 +64,16 @@
 //   - The commit is authored and committed as askalf; its message is one sanitised subject line
 //     and a body naming the review, checked for trailers before the bundle is written.
 //   - The model key is read from FIX_ENV_FILE and sent in a header; it is never printed and never
-//     in argv. The only HTTP made is to api.github.com (reads) and to dario.
+//     in argv. With DARIO_SOCKET there is no key: dario's key socket is the credential, and the run
+//     account must not be able to connect to it. The only HTTP made is to api.github.com (reads)
+//     and to dario.
 //
 // CLI (the workflow's fix step):
 //   REPO=owner/name PR=<n> HEAD_SHA=<sha> REVIEW_URL=<review html_url> CHECKOUT=<dir> \
 //   GH_READ_TOKEN=... FIX_ENV_FILE=/etc/askalf/fix-exec.env FIX_PROMPT_FILE=/etc/askalf/fix-prompt.md \
 //   FIX_OUT=<dir> [DRY_RUN=1] node fix.mjs
-// The env file holds DARIO_API_KEY (the named key first-party-fix), and optionally DARIO_URL
+// The env file holds DARIO_SOCKET (dario's key socket for the named key first-party-fix) or
+// DARIO_API_KEY (that key itself), and optionally DARIO_URL
 // (default http://127.0.0.1:3456) and FIX_MODEL (default claude-opus-5-5). FIX_PROMPT_FILE names the
 // system prompt, installed on the runner host: this repository is public and carries no prompt, so
 // there is no bundled fallback, and a variable that is unset, a file that cannot be read or an empty
@@ -82,7 +85,7 @@ import { tmpdir, userInfo } from 'node:os';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
-import { parseEnvFile, readPrompt, safePath, runTool as readTool, rejectsForcedToolChoice, metaPhrase, gh, ghAll, callModelWith, buildDiff, OutOfTime } from './review.mjs';
+import { parseEnvFile, readPrompt, safePath, runTool as readTool, rejectsForcedToolChoice, metaPhrase, gh, ghAll, callModelWith, buildDiff, OutOfTime, darioAccess, withDarioSocket } from './review.mjs';
 
 export const AUTHOR = { name: 'askalf', email: '263217947+askalf@users.noreply.github.com' };
 export const DEFAULT_MODEL = 'claude-opus-5-5';
@@ -978,6 +981,9 @@ async function answerReview(ctx) {
       for (const f of (ctx.guardFiles ?? []).filter(Boolean)) {
         if (asRun(['test', '-r', f]).status === 0) return refuse(`the run account can read ${basename(f)}, which holds what it must never see`);
       }
+      for (const s of (ctx.guardSockets ?? []).filter(Boolean)) {
+        if (asRun(['test', '-w', s]).status === 0) return refuse(`the run account can connect to ${basename(s)}, dario's key socket, and spend its key`);
+      }
       // This account's git works on a private copy of .git that the run account cannot reach: the
       // checkout's own .git, which a command could rename and replace (its directory is writable),
       // is never read by this process again.
@@ -996,7 +1002,7 @@ async function answerReview(ctx) {
       if (asRun(['test', '-w', join(root, '.git')]).status === 0) return refuse('the run account can write the checkout\'s .git');
       armed = true;
     } else {
-      ctx.log?.('::warning::FIX_RUN_AS is not set: the checkout\'s commands run as this account, which can read the model key');
+      ctx.log?.(`::warning::FIX_RUN_AS is not set: the checkout's commands run as this account, which can ${(ctx.guardSockets ?? []).some(Boolean) ? 'spend the model key through dario\'s key socket' : 'read the model key'}`);
     }
 
     // Toolchain: detected once, installed once, before the model sees anything.
@@ -1226,17 +1232,22 @@ async function main() {
   const out = resolve(need('FIX_OUT'));
   rmSync(out, { recursive: true, force: true });
   mkdirSync(out, { recursive: true });
-  const darioUrl = secrets.DARIO_URL || 'http://127.0.0.1:3456';
+  const dario = darioAccess(secrets);
+  if (dario.error) { console.error(`::error::${dario.error}`); process.exit(2); }
+  if (dario.warning) console.log(`::warning::${dario.warning}`);
+  const { darioUrl, darioKey, darioSocket } = dario;
   const ctx = {
     repo: need('REPO'), pr: Number(need('PR')), headSha: need('HEAD_SHA'), reviewUrl: need('REVIEW_URL'), checkout: need('CHECKOUT'), out,
-    readToken: need('GH_READ_TOKEN'), darioUrl, darioKey: need('DARIO_API_KEY', secrets), model: secrets.FIX_MODEL || DEFAULT_MODEL,
+    readToken: need('GH_READ_TOKEN'), darioUrl, darioKey, model: secrets.FIX_MODEL || DEFAULT_MODEL,
     system,
-    fetch: onlyOrigins(globalThis.fetch, ['https://api.github.com', darioUrl]),
+    fetch: onlyOrigins(withDarioSocket(globalThis.fetch, darioUrl, darioSocket), ['https://api.github.com', darioUrl]),
     sleep: (ms) => new Promise((r) => setTimeout(r, ms)), now: () => Date.now(),
     dryRun: env.DRY_RUN === '1' || env.DRY_RUN === 'true',
     // The run account and the proxy are host settings, from the same env file as the key.
     runAs: secrets.FIX_RUN_AS || '', proxy: secrets.FIX_PROXY || '',
     guardFiles: [env.FIX_ENV_FILE, env.FIX_PROMPT_FILE],
+    // A key socket is a credential the run account must not be able to use.
+    guardSockets: [darioSocket],
   };
   // The job log of a public repository is public: no line in it carries the key or the token.
   const hidden = runSecrets(ctx);
