@@ -901,6 +901,9 @@ if (!gitOk) {
         writeFileSync(join(stub, 'sudo'), [
           '#!/bin/sh', `echo "sudo $*" >> '${log}'`, ...(sudoWorks ? [] : ['exit 1']),
           'shift 3; [ "$1" = -- ] && shift',
+          // The access checks reach the account as `bash -c 'test "$1" "$2"' redline-access <flag> <path>`.
+          '[ "$1" = bash ] && [ "$4" = redline-access ] && set -- test "$5" "$6"',
+          '[ "$1" = bash ] && [ "$3" = "kill -KILL -1" ] && exit 0',
           `case "$1 $2" in "id -u") echo ${uid}; exit 0;; "test -r") exit ${guardReadable ? 0 : 1};; "test -w") case "$3" in */.git) exit 1;; *.sock) exit ${socketWritable ? 0 : 1};; esac;; kill*|find*) exit 0;; esac`,
           'exec "$@"', '',
         ].join('\n'), { mode: 0o755 });
@@ -916,8 +919,8 @@ if (!gitOk) {
         const calls = readFileSync(log, 'utf8').split('\n');
         const at = (re) => calls.findIndex((l) => re.test(l));
         check('the run account is proved first: it works, is another account, cannot read the guard files and cannot connect to the key socket',
-          at(/^sudo -n -u redline-run -- id -u$/) === 0 && at(/^sudo -n -u redline-run -- test -r \/etc\/askalf\/fix-exec\.env$/) === 1
-            && at(/^sudo -n -u redline-run -- test -w \/run\/model\/key\.sock$/) === 2);
+          at(/^sudo -n -u redline-run -- id -u$/) === 0 && at(/^sudo -n -u redline-run -- bash -c test "\$1" "\$2" redline-access -r \/etc\/askalf\/fix-exec\.env$/) === 1
+            && at(/^sudo -n -u redline-run -- bash -c test "\$1" "\$2" redline-access -w \/run\/model\/key\.sock$/) === 2);
         check('it may write the checkout, reads .git only, and has a HOME of its own',
           at(new RegExp(`^setfacl -R -m u:redline-run:rwX,d:u:redline-run:rwX,d:u:[^ ]+:rwX ${repo.dir}$`)) > 1
             && at(new RegExp(`^setfacl -R -m u:redline-run:rX,d:u:redline-run:rX ${repo.dir}/\\.git$`)) > 1 && at(/^setfacl -m u:redline-run:rwx,.* \/.*redline-fix-home-/) > 1);
@@ -927,7 +930,7 @@ if (!gitOk) {
             && ran.every((l) => /^sudo -n -u redline-run -- env -i PATH=/.test(l) && !/GH_READ_TOKEN|DARIO_API_KEY/.test(l)));
         const killAfter = ran.every((l) => {
           const i = calls.indexOf(l);
-          return /^sudo -n -u redline-run -- kill -KILL -1$/.test(calls[i + 1]) && /^sudo -n -u redline-run -- chmod -R u\+rwX /.test(calls[i + 2])
+          return /^sudo -n -u redline-run -- bash -c kill -KILL -1$/.test(calls[i + 1]) && /^sudo -n -u redline-run -- chmod -R u\+rwX /.test(calls[i + 2])
             && /^sudo -n -u redline-run -- setfacl -R -m u:[^:]+:rwX,d:u:[^:]+:rwX /.test(calls[i + 3]);
         });
         check('after every command its processes are killed and what it made is readable again', killAfter);
@@ -943,7 +946,7 @@ if (!gitOk) {
         const { record: r } = await runFix({ ...w.ctx, env, runAs: 'redline-run', guardFiles: ['/etc/askalf/fix-exec.env'] });
         const calls = readFileSync(log, 'utf8');
         check('a run account that can read the key file is refused before anything runs, and is never sent kill -1',
-          r.outcome === 'refused' && /can read fix-exec\.env/.test(r.notes) && w.calls.model.length === 0 && !calls.includes(' -- env -i ') && !calls.includes(' -- kill '));
+          r.outcome === 'refused' && /can read fix-exec\.env/.test(r.notes) && w.calls.model.length === 0 && !calls.includes(' -- env -i ') && !calls.includes(' -- bash -c kill '));
         rmSync(w.out, { recursive: true, force: true });
         rmSync(repo.dir, { recursive: true, force: true });
         rmSync(log, { force: true });
@@ -955,7 +958,7 @@ if (!gitOk) {
         const { record: r } = await runFix({ ...w.ctx, env, runAs: 'redline-run', guardFiles: ['/etc/askalf/fix-exec.env'], guardSockets: ['/run/model/key.sock'] });
         const calls = readFileSync(log, 'utf8');
         check('a run account that can connect to dario\'s key socket is refused before anything runs, and is never sent kill -1',
-          r.outcome === 'refused' && /can connect to key\.sock, dario's key socket/.test(r.notes) && w.calls.model.length === 0 && !calls.includes(' -- env -i ') && !calls.includes(' -- kill '));
+          r.outcome === 'refused' && /can connect to key\.sock, dario's key socket/.test(r.notes) && w.calls.model.length === 0 && !calls.includes(' -- env -i ') && !calls.includes(' -- bash -c kill '));
         rmSync(w.out, { recursive: true, force: true });
         rmSync(repo.dir, { recursive: true, force: true });
         rmSync(log, { force: true });
@@ -968,7 +971,7 @@ if (!gitOk) {
         const { record: r } = await runFix({ ...w.ctx, env, runAs: 'redline-run', guardFiles: ['/etc/askalf/fix-exec.env'] });
         const calls = readFileSync(log, 'utf8');
         check(`a run account that is ${who} is refused before anything runs, and is never sent kill -1`,
-          r.outcome === 'refused' && re.test(r.notes) && w.calls.model.length === 0 && !calls.includes(' -- env -i ') && !calls.includes(' -- kill '));
+          r.outcome === 'refused' && re.test(r.notes) && w.calls.model.length === 0 && !calls.includes(' -- env -i ') && !calls.includes(' -- bash -c kill '));
         rmSync(w.out, { recursive: true, force: true });
         rmSync(repo.dir, { recursive: true, force: true });
         rmSync(log, { force: true });
@@ -979,7 +982,7 @@ if (!gitOk) {
         const w = world(repo, { turns: [finish()] });
         const { record: r } = await runFix({ ...w.ctx, env, runAs: 'redline-run' });
         check('a run account sudo cannot reach is refused, and is never sent kill -1',
-          r.outcome === 'refused' && /cannot run as the run account/.test(r.notes) && w.calls.model.length === 0 && !readFileSync(log, 'utf8').includes(' -- kill '));
+          r.outcome === 'refused' && /cannot run as the run account/.test(r.notes) && w.calls.model.length === 0 && !readFileSync(log, 'utf8').includes(' -- bash -c kill '));
         rmSync(w.out, { recursive: true, force: true });
         rmSync(repo.dir, { recursive: true, force: true });
         rmSync(log, { force: true });

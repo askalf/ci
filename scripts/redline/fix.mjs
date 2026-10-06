@@ -932,6 +932,11 @@ async function answerReview(ctx) {
   const genv = { ...cenv, HOME: gitHome, TMPDIR: gitHome, XDG_CONFIG_HOME: gitHome, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: process.platform === 'win32' ? 'NUL' : '/dev/null',
     ...(process.platform === 'win32' ? { USERPROFILE: gitHome } : {}) };
   const asRun = (args) => spawnSync('sudo', ['-n', '-u', runAs, '--', ...args], { env: sudoEnv, encoding: 'utf8', timeout: 120_000 });
+  // Whether the run account may read (-r) or write (-w) a path, as the kernel decides it: bash's
+  // own test calls faccessat, which honours ACLs. /usr/bin/test does not everywhere: Ubuntu 26.04's
+  // (uutils) reads the mode bits only, so an ACL grant would read as no access, and a guard that
+  // must find the key file unreadable would pass while an ACL lets the account read it.
+  const runCan = (flag, path) => asRun(['bash', '-c', 'test "$1" "$2"', 'redline-access', flag, path]).status === 0;
   // After every command: no process of the run account outlives it (none can swap a file while
   // this process reads it), and what it created is readable here again, whatever modes it set.
   // kill -KILL -1, sent as the run account, signals all of its processes while the kernel holds
@@ -944,7 +949,9 @@ async function answerReview(ctx) {
   const settle = () => {
     if (!runAs || !armed) return;
     for (let round = 0; ; round++) {
-      asRun(['kill', '-KILL', '-1']);
+      // bash's own kill, which calls kill(2) itself: Ubuntu 26.04's /usr/bin/kill does not stop
+      // the account's processes for -1, and a chain that hops to new pids can slip past ps.
+      asRun(['bash', '-c', 'kill -KILL -1']);
       const ps = spawnSync('ps', ['-u', runAs, '-o', 'stat='], { env: sudoEnv, encoding: 'utf8' });
       const live = String(ps.stdout ?? '').split('\n').map((l) => l.trim()).filter((l) => l && !l.startsWith('Z'));
       if ((ps.status === 0 || ps.status === 1) && !live.length) break;
@@ -979,10 +986,10 @@ async function answerReview(ctx) {
       const uidProblem = runAccountUidProblem(id.stdout, process.getuid?.());
       if (uidProblem) return refuse(uidProblem);
       for (const f of (ctx.guardFiles ?? []).filter(Boolean)) {
-        if (asRun(['test', '-r', f]).status === 0) return refuse(`the run account can read ${basename(f)}, which holds what it must never see`);
+        if (runCan('-r', f)) return refuse(`the run account can read ${basename(f)}, which holds what it must never see`);
       }
       for (const s of (ctx.guardSockets ?? []).filter(Boolean)) {
-        if (asRun(['test', '-w', s]).status === 0) return refuse(`the run account can connect to ${basename(s)}, dario's key socket, and spend its key`);
+        if (runCan('-w', s)) return refuse(`the run account can connect to ${basename(s)}, dario's key socket, and spend its key`);
       }
       // This account's git works on a private copy of .git that the run account cannot reach: the
       // checkout's own .git, which a command could rename and replace (its directory is writable),
@@ -998,8 +1005,8 @@ async function answerReview(ctx) {
         acl(['-R', '-m', `u:${runAs}:rX,d:u:${runAs}:rX`, join(root, '.git')]);
         acl(['-m', `u:${runAs}:rwx,d:u:${runAs}:rwX,d:u:${me}:rwX`, home]);
       } catch (e) { return refuse(e.message); }
-      if (asRun(['test', '-w', root]).status !== 0) return refuse('the run account cannot write the checkout (check that every directory above it is searchable)');
-      if (asRun(['test', '-w', join(root, '.git')]).status === 0) return refuse('the run account can write the checkout\'s .git');
+      if (!runCan('-w', root)) return refuse('the run account cannot write the checkout (check that every directory above it is searchable)');
+      if (runCan('-w', join(root, '.git'))) return refuse('the run account can write the checkout\'s .git');
       armed = true;
     } else {
       ctx.log?.(`::warning::FIX_RUN_AS is not set: the checkout's commands run as this account, which can ${(ctx.guardSockets ?? []).some(Boolean) ? 'spend the model key through dario\'s key socket' : 'read the model key'}`);
