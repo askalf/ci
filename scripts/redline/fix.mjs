@@ -42,12 +42,21 @@
 //   - Turns, files changed and diff size are bounded; past those the run is refused, never trimmed
 //     into a partial fix. Wall time is counted from the start, install included: at timeMs the
 //     model must finish, and no command or test runs past hardMs, inside the job's timeout.
-//   - The PR's tests and the model's node <file> run as the same account that reads FIX_ENV_FILE,
-//     so they could read the key. Whatever would leave the runner (the diff, the bundle, fix.json,
-//     notes.md and the job log) is checked for the key and the read token: a diff or record that
-//     carries one is refused with nothing kept, and the log masks them. Keeping the key out of
-//     the children's reach entirely is the host's part: a separate account for the children, or
-//     an egress rule.
+//   - Every command the checkout supplies (the install, the tests, node <file>) runs as the run
+//     account FIX_RUN_AS names in the env file, through sudo, from an empty environment: not the
+//     account that reads FIX_ENV_FILE. Before anything runs, the run account is proved to work,
+//     to be neither root nor this account, and to read neither the env file nor the brief; its
+//     processes are killed only once it has passed. It gets the checkout to write, its .git
+//     read-only, and a HOME of its own. This process's git reads nothing the run account can
+//     write: it has a HOME of its own with no global or system config, and works on a private
+//     copy of .git, so a command that replaces the checkout's .git (its directory is writable) or
+//     writes a .gitconfig cannot make this process's git run its code. After every command the
+//     run account's processes are killed, so none can swap a file while this process reads it. FIX_PROXY sends the package managers through the host's proxy; the host's
+//     egress rule keeps the run account to that proxy. Without FIX_RUN_AS the commands run as this
+//     account, with a warning in the log (README: host setup).
+//   - Whatever would leave the runner (the diff, the bundle, fix.json, notes.md and the job log)
+//     is checked for the key and the read token: a diff or record that carries one is refused
+//     with nothing kept, and the log masks them.
 //   - When the repository has a test script it runs at least once after the last edit; a failing
 //     suite is bounced to the model once, then reported as tests_failed with no bundle. The bounce,
 //     fix.json (tests.failing) and the notes name the failed tests the output reports (TAP
@@ -67,9 +76,9 @@
 // there is no bundled fallback, and a variable that is unset, a file that cannot be read or an empty
 // file ends the run.
 
-import { readFileSync, writeFileSync, mkdirSync, rmSync, existsSync, lstatSync, realpathSync, statSync, readdirSync, appendFileSync, mkdtempSync, readlinkSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, rmSync, existsSync, lstatSync, realpathSync, statSync, readdirSync, appendFileSync, mkdtempSync, readlinkSync, cpSync } from 'node:fs';
 import { join, resolve, relative, dirname, basename, sep, posix } from 'node:path';
-import { tmpdir } from 'node:os';
+import { tmpdir, userInfo } from 'node:os';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
@@ -722,8 +731,8 @@ export function buildBrief({ pr, files, headSha, review, items, plan, installNot
  * model chose. DARIO_IGNORE_CC_CREDENTIALS keeps dario's own suite from touching the runner's
  * credentials. On Windows the system variables a process needs to start are kept.
  */
-export function childEnv(env, home) {
-  const out = { PATH: env.PATH ?? env.Path ?? '', HOME: home, TMPDIR: home, LANG: 'C.UTF-8', CI: '1', NO_COLOR: '1', DARIO_IGNORE_CC_CREDENTIALS: '1' };
+export function childEnv(env, home, proxy = '') {
+  const out = { PATH: env.PATH ?? env.Path ?? '', HOME: home, TMPDIR: home, LANG: 'C.UTF-8', CI: '1', NO_COLOR: '1', DARIO_IGNORE_CC_CREDENTIALS: '1', ...proxyEnv(proxy) };
   if (process.platform === 'win32') {
     for (const k of ['SYSTEMROOT', 'SystemRoot', 'PATHEXT', 'COMSPEC', 'ComSpec']) if (env[k]) out[k] = env[k];
     Object.assign(out, { TEMP: home, TMP: home, USERPROFILE: home });
@@ -732,14 +741,64 @@ export function childEnv(env, home) {
 }
 
 /**
- * Run argv in cwd with a hard time cap: coreutils timeout on the runner, node's own elsewhere.
- * argv is already allowlisted, so on Windows (a developer box, never the runner) a package
- * manager's .cmd shim may go through the shell node requires for it.
+ * The variables that send every package manager through the host's forward proxy (FIX_PROXY),
+ * which allows the package registries and nothing else. A proxy, not a registry mirror: lockfiles
+ * carry full registry URLs, and some installers fetch those as written. Empty without a proxy.
  */
-function run(cwd, env, argv, seconds) {
+export function proxyEnv(proxy) {
+  const p = String(proxy ?? '').trim();
+  if (!p) return {};
+  return {
+    HTTP_PROXY: p, HTTPS_PROXY: p, http_proxy: p, https_proxy: p, NO_PROXY: '', no_proxy: '',
+    npm_config_proxy: p, npm_config_https_proxy: p, YARN_HTTP_PROXY: p, YARN_HTTPS_PROXY: p,
+  };
+}
+
+/**
+ * The account that runs every command the checkout supplies (the install, the tests, node <file>):
+ * FIX_RUN_AS from the host's env file, a plain user name, or '' to run them as this account.
+ * Throws on anything that is not a user name.
+ */
+export function runAccount(name) {
+  const s = String(name ?? '').trim();
+  if (!s) return '';
+  if (!/^[a-z_][a-z0-9_-]{0,31}$/.test(s)) throw new Error(`FIX_RUN_AS is not a user name: ${s.slice(0, 40)}`);
+  return s;
+}
+
+/**
+ * argv run as `runAs` through sudo with exactly `env` and nothing inherited: sudo resets the
+ * environment, and env -i starts from empty. Pure.
+ */
+export function asRunAccount(runAs, env, argv) {
+  return ['sudo', '-n', '-u', runAs, '--', 'env', '-i', ...Object.entries(env).map(([k, v]) => `${k}=${v}`), ...argv];
+}
+
+/**
+ * Why the account sudo reaches, whose `id -u` printed `uid`, cannot be the run account; null when
+ * it can. Every process of the run account is killed with kill -1, so it is never root and never
+ * this account (ownUid). Pure.
+ */
+export function runAccountUidProblem(uid, ownUid) {
+  const s = String(uid ?? '').trim();
+  if (!/^\d+$/.test(s)) return `the run account's uid could not be read (\`id -u\` printed ${JSON.stringify(s.slice(0, 40))})`;
+  if (Number(s) === 0) return 'the run account is root, and its processes are all killed after every command';
+  if (Number(s) === ownUid) return 'the run account is this account, and its processes are all killed after every command';
+  return null;
+}
+
+/**
+ * Run argv in cwd with a hard time cap: coreutils timeout on the runner, node's own elsewhere.
+ * With runAs, the command runs as that account (asRunAccount). argv is already allowlisted, so on
+ * Windows (a developer box, never the runner) a package manager's .cmd shim may go through the
+ * shell node requires for it.
+ */
+function run(cwd, env, argv, seconds, runAs = '') {
   const win = process.platform === 'win32';
-  const wrapped = win ? argv : ['timeout', '-k', '10', String(seconds), ...argv];
-  const r = spawnSync(wrapped[0], wrapped.slice(1), { cwd, env, encoding: 'utf8', timeout: (seconds + 30) * 1000, killSignal: 'SIGKILL', maxBuffer: 64 * 1024 * 1024, shell: win && PACKAGE_MANAGERS.includes(argv[0]) });
+  const timed = win ? argv : ['timeout', '-k', '10', String(seconds), ...argv];
+  const wrapped = runAs && !win ? asRunAccount(runAs, env, timed) : timed;
+  const spawnEnv = runAs && !win ? { PATH: env.PATH ?? '' } : env;
+  const r = spawnSync(wrapped[0], wrapped.slice(1), { cwd, env: spawnEnv, encoding: 'utf8', timeout: (seconds + 30) * 1000, killSignal: 'SIGKILL', maxBuffer: 64 * 1024 * 1024, shell: win && PACKAGE_MANAGERS.includes(argv[0]) });
   const timedOut = r.status === 124 || r.error?.code === 'ETIMEDOUT';
   const exit = r.status ?? (timedOut ? 124 : r.signal ? 128 : -1);
   return { exit, out: `${r.stdout ?? ''}${r.stderr ?? ''}${r.error && !timedOut ? `\n${r.error.message}` : ''}`, timedOut };
@@ -858,13 +917,87 @@ async function answerReview(ctx) {
   const items = inlineItems(comments);
   if (!review.findings.length && !items.length) return refuse('the review has no finding to answer');
 
+  let runAs;
+  try { runAs = runAccount(ctx.runAs); } catch (e) { return refuse(e.message); }
   const home = mkdtempSync(join(tmpdir(), 'redline-fix-home-'));
-  const cenv = childEnv(ctx.env ?? process.env, home);
+  const cenv = childEnv(ctx.env ?? process.env, home, ctx.proxy);
+  const sudoEnv = { PATH: cenv.PATH };
+  const me = userInfo().username;
+  // git as this account reads no configuration the checkout's commands can write: a HOME of its
+  // own, no global or system config, and with a run account a private copy of .git (below).
+  const gitHome = mkdtempSync(join(tmpdir(), 'redline-fix-git-'));
+  const genv = { ...cenv, HOME: gitHome, TMPDIR: gitHome, XDG_CONFIG_HOME: gitHome, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: process.platform === 'win32' ? 'NUL' : '/dev/null',
+    ...(process.platform === 'win32' ? { USERPROFILE: gitHome } : {}) };
+  const asRun = (args) => spawnSync('sudo', ['-n', '-u', runAs, '--', ...args], { env: sudoEnv, encoding: 'utf8', timeout: 120_000 });
+  // After every command: no process of the run account outlives it (none can swap a file while
+  // this process reads it), and what it created is readable here again, whatever modes it set.
+  // kill -KILL -1, sent as the run account, signals all of its processes while the kernel holds
+  // the task list, so a process that keeps forking cannot slip a child past it (pkill lists, then
+  // signals). The account must then show no live process (a zombie holds no code); anything else,
+  // or a ps that cannot say, throws, and the run is refused rather than read on.
+  // Off until the run account has passed every check below, so a refused account (root, this
+  // account, one that can read the key) is never sent kill -1, not even by the cleanup in finally.
+  let armed = false;
+  const settle = () => {
+    if (!runAs || !armed) return;
+    for (let round = 0; ; round++) {
+      asRun(['kill', '-KILL', '-1']);
+      const ps = spawnSync('ps', ['-u', runAs, '-o', 'stat='], { env: sudoEnv, encoding: 'utf8' });
+      const live = String(ps.stdout ?? '').split('\n').map((l) => l.trim()).filter((l) => l && !l.startsWith('Z'));
+      if ((ps.status === 0 || ps.status === 1) && !live.length) break;
+      if (ps.status !== 0 && ps.status !== 1) throw new Error(`could not confirm that the run account has no process left (ps exited ${ps.status})`);
+      if (round >= 4) throw new Error(`the run account still has ${live.length} process(es) after five kills`);
+    }
+    // What it made is reachable here again, whatever it did to its own modes and ACLs (a command
+    // can strip the inherited ACL and set 700): as owner, it gives itself traversal first, then
+    // this account an explicit ACL entry, recursively. Then this account must reach every path;
+    // a path it cannot is a refusal, never a file git silently skips.
+    asRun(['chmod', '-R', 'u+rwX', root, home]);
+    asRun(['setfacl', '-R', '-m', `u:${me}:rwX,d:u:${me}:rwX`, root, home]);
+    const blocked = spawnSync('find', [root, home, '!', '-type', 'l', '(', '!', '-readable', '-o', '-type', 'd', '!', '-executable', ')', '-print', '-quit'],
+      { env: sudoEnv, encoding: 'utf8' });
+    const stuck = String(blocked.stdout ?? '').trim();
+    if (stuck) throw new Error(`the run account left a path this account cannot reach: ${relative(root, stuck).slice(0, 200)}`);
+  };
+  // Every command the checkout supplies goes through here.
+  const exec = (argv, seconds, extraEnv = {}) => { const r = run(root, { ...cenv, ...extraEnv }, argv, seconds, runAs); settle(); return r; };
   try {
-    if (git(root, cenv, ['rev-parse', 'HEAD'], { allowFail: true }) !== headSha) return refuse('the checkout is not at the reviewed head');
-    if (changedPaths(root, cenv).length) return refuse('the checkout is not clean');
+    if (git(root, genv, ['rev-parse', 'HEAD'], { allowFail: true }) !== headSha) return refuse('the checkout is not at the reviewed head');
+    if (changedPaths(root, genv).length) return refuse('the checkout is not clean');
     // The marks as the reviewed head has them, before any command can touch the checkout.
-    const attrs = headAttributes(root, cenv, headSha);
+    const attrs = headAttributes(root, genv, headSha);
+
+    if (runAs) {
+      // The run account must work, must not read the key or the brief, may write the checkout
+      // but not its .git (whose config a command could otherwise point git at its own code), and
+      // gets a scratch HOME of its own. Default ACLs keep what it creates manageable here.
+      const id = asRun(['id', '-u']);
+      if (id.status !== 0) return refuse(`commands cannot run as the run account: \`sudo -n -u ${runAs}\` failed`);
+      const uidProblem = runAccountUidProblem(id.stdout, process.getuid?.());
+      if (uidProblem) return refuse(uidProblem);
+      for (const f of (ctx.guardFiles ?? []).filter(Boolean)) {
+        if (asRun(['test', '-r', f]).status === 0) return refuse(`the run account can read ${basename(f)}, which holds what it must never see`);
+      }
+      // This account's git works on a private copy of .git that the run account cannot reach: the
+      // checkout's own .git, which a command could rename and replace (its directory is writable),
+      // is never read by this process again.
+      try {
+        const privateGit = join(gitHome, 'git');
+        cpSync(git(root, genv, ['rev-parse', '--absolute-git-dir']), privateGit, { recursive: true });
+        Object.assign(genv, { GIT_DIR: privateGit, GIT_WORK_TREE: realpathSync(root) });
+      } catch (e) { return refuse(`the checkout's .git could not be copied aside: ${String(e.message).slice(0, 200)}`); }
+      const acl = (args) => { const r = spawnSync('setfacl', args, { env: sudoEnv, encoding: 'utf8' }); if (r.status !== 0) throw new Error(`setfacl failed: ${String(r.stderr || r.error?.message || '').trim().slice(0, 200)}`); };
+      try {
+        acl(['-R', '-m', `u:${runAs}:rwX,d:u:${runAs}:rwX,d:u:${me}:rwX`, root]);
+        acl(['-R', '-m', `u:${runAs}:rX,d:u:${runAs}:rX`, join(root, '.git')]);
+        acl(['-m', `u:${runAs}:rwx,d:u:${runAs}:rwX,d:u:${me}:rwX`, home]);
+      } catch (e) { return refuse(e.message); }
+      if (asRun(['test', '-w', root]).status !== 0) return refuse('the run account cannot write the checkout (check that every directory above it is searchable)');
+      if (asRun(['test', '-w', join(root, '.git')]).status === 0) return refuse('the run account can write the checkout\'s .git');
+      armed = true;
+    } else {
+      ctx.log?.('::warning::FIX_RUN_AS is not set: the checkout\'s commands run as this account, which can read the model key');
+    }
 
     // Toolchain: detected once, installed once, before the model sees anything.
     const rootFiles = readdirSync(root);
@@ -873,17 +1006,17 @@ async function answerReview(ctx) {
     const plan = detectRunner(rootFiles, pkg);
     let installNote = 'no package.json, nothing installed';
     if (plan.berry) {
-      const v = run(root, { ...cenv, ...plan.installEnv }, ['yarn', '--version'], 60);
+      const v = exec(['yarn', '--version'], 60, plan.installEnv);
       plan.install = v.exit === 0 ? berryInstall(v.out) : null;
       if (!plan.install) installNote = `nothing installed: \`yarn --version\` gave no yarn 2+ version (exit ${v.exit}), so no install could skip dependencies' builds`;
     }
     if (plan.install) {
-      const r = run(root, { ...cenv, ...plan.installEnv }, plan.install, LIMITS.installS);
+      const r = exec(plan.install, LIMITS.installS, plan.installEnv);
       installNote = `\`${plan.install.join(' ')}\` exited ${r.exit}${r.exit ? ` (tail: ${r.out.slice(-600).replace(/\s+/g, ' ')})` : ''}`
         + '; dependency install scripts were skipped, so run the build script first if the tests need its output';
       ctx.log?.(`install: ${installNote.slice(0, 200)}`);
     }
-    const installDirty = changedPaths(root, cenv);
+    const installDirty = changedPaths(root, genv);
 
     const written = new Set();
     let description = null; // fix_describe's text, set as the PR body by forge
@@ -893,8 +1026,8 @@ async function answerReview(ctx) {
     // included, sees all of the change against the reviewed head, and the commit is the whole of it.
     const sizeOf = (p) => { try { return statSync(join(root, p)).size; } catch { return 0; } };
     const staged = () => {
-      git(root, cenv, ['reset', '-q', headSha]);
-      const changed = changedPaths(root, cenv);
+      git(root, genv, ['reset', '-q', headSha]);
+      const changed = changedPaths(root, genv);
       return stageable(changed, { installDirty, written, sizeOf, protectedSet: protectedPaths(attrs, changed) });
     };
     const runs = [];
@@ -905,9 +1038,9 @@ async function answerReview(ctx) {
     // Measured against the reviewed head, as staged() measures, so a command's own commit cannot
     // hide a change from it.
     const stamp = () => {
-      git(root, cenv, ['reset', '-q', headSha]);
+      git(root, genv, ['reset', '-q', headSha]);
       const h = createHash('sha256');
-      for (const p of changedPaths(root, cenv).sort()) {
+      for (const p of changedPaths(root, genv).sort()) {
         h.update(`${p}\0`);
         try {
           const abs = join(root, p);
@@ -961,7 +1094,7 @@ async function answerReview(ctx) {
         if (a.error) return `error: ${a.error}`;
         const s = secondsLeft(Math.min(LIMITS.runMaxS, Math.max(1, Number(input.timeout_seconds) || LIMITS.runDefaultS)));
         if (!s) return 'error: the time budget is spent; call finish_fix now';
-        const r = record(a.argv, run(root, cenv, a.argv, s));
+        const r = record(a.argv, exec(a.argv, s));
         return `exit ${r.exit}${r.timedOut ? ' (timed out)' : ''}\n${capOutput(r.out)}`;
       }
       return `error: unknown tool ${name}`;
@@ -981,7 +1114,7 @@ async function answerReview(ctx) {
           const s = secondsLeft(LIMITS.runMaxS);
           ctx.log?.(s ? '  no test run after the last edit: running the test script' : '  no test run after the last edit, and no time left to run one');
           // No time to run the suite is a failed suite: a fix is never reported without its tests.
-          t = record(testArgv, s ? run(root, cenv, testArgv, s) : { exit: 124, out: 'not run: the time budget was spent', timedOut: true });
+          t = record(testArgv, s ? exec(testArgv, s) : { exit: 124, out: 'not run: the time budget was spent', timedOut: true });
         }
         tests = t;
         if (t.exit !== 0 && bounces < LIMITS.testBounces) {
@@ -1024,8 +1157,8 @@ async function answerReview(ctx) {
     }
     if (st.keep.length > LIMITS.files) return refuse(`the fix changes ${st.keep.length} files; the limit is ${LIMITS.files}`, { turns, tests: testsRecord });
     // Literal pathspecs: a file a command named `*` must not stage everything.
-    git(root, cenv, ['--literal-pathspecs', 'add', '-A', '--', ...st.keep]);
-    const diff = git(root, cenv, ['diff', '--cached', '--binary', headSha]) ?? '';
+    git(root, genv, ['--literal-pathspecs', 'add', '-A', '--', ...st.keep]);
+    const diff = git(root, genv, ['diff', '--cached', '--binary', headSha]) ?? '';
     const diffBytes = Buffer.byteLength(diff);
     if (diffBytes > LIMITS.diffBytes) return refuse(`the diff is ${diffBytes} bytes; the limit is ${LIMITS.diffBytes}`, { turns, tests: testsRecord });
     // The index is what the bundle carries: a clean filter (a .gitattributes rule and a .git/config
@@ -1033,7 +1166,7 @@ async function answerReview(ctx) {
     if (leaksSecret(diff, runSecrets(ctx)) || fileWithSecret(root, st.keep, runSecrets(ctx))) {
       return refuse('The change carried a credential of this run, so nothing is committed.', { turns });
     }
-    const blobIssue = stagedProblem(root, cenv, st.keep, runSecrets(ctx));
+    const blobIssue = stagedProblem(root, genv, st.keep, runSecrets(ctx));
     if (blobIssue) return refuse(blobIssue, { turns });
     const common = { turns, tests: testsRecord, files: st.keep };
     const notes = (outcome) => renderNotes({ outcome, summary: sub.summary, files: st.keep, skipped: st.skipped, tests: testsRecord, described: described && outcome === 'fixed' });
@@ -1048,26 +1181,32 @@ async function answerReview(ctx) {
     }
 
     // One commit as askalf, hooks off, then the message is checked and the bundle written.
-    const hooks = join(home, 'no-hooks');
+    // An empty hooks directory where the run account cannot reach: its HOME is writable to it, and
+    // --no-verify does not skip post-commit.
+    const hooks = join(gitHome, 'no-hooks');
     mkdirSync(hooks, { recursive: true });
-    git(root, cenv, ['-c', `user.name=${AUTHOR.name}`, '-c', `user.email=${AUTHOR.email}`, '-c', `core.hooksPath=${hooks}`,
+    git(root, genv, ['-c', `user.name=${AUTHOR.name}`, '-c', `user.email=${AUTHOR.email}`, '-c', `core.hooksPath=${hooks}`,
       'commit', '--quiet', '--no-verify', '-m', sub.subject, '-m', `Answers the review at ${ctx.reviewUrl}.`]);
-    const message = git(root, cenv, ['log', '-1', '--format=%B']) ?? '';
+    const message = git(root, genv, ['log', '-1', '--format=%B']) ?? '';
     if (hasAttributionTrailer(message)) throw new Error('the commit message carries an attribution trailer');
-    const newHead = git(root, cenv, ['rev-parse', 'HEAD']);
+    const newHead = git(root, genv, ['rev-parse', 'HEAD']);
     // The commit holds the kept paths and nothing protected, checked on the commit itself.
-    const landed = (git(root, cenv, ['diff', '--name-only', '-z', '--no-renames', headSha, 'HEAD']) ?? '').split('\0').filter(Boolean);
+    const landed = (git(root, genv, ['diff', '--name-only', '-z', '--no-renames', headSha, 'HEAD']) ?? '').split('\0').filter(Boolean);
     const stray = landed.filter((p) => !st.keep.includes(p) || /(?:^|\/)\.gitattributes$/.test(p) || /^\.github(?:\/|$)/.test(p));
     const marked = protectedPaths(attrs, landed);
     if (stray.length || marked.size) throw new Error(`the commit carries a path the fix lane leaves out: ${[...new Set([...stray, ...marked])].join(', ').slice(0, 300)}`);
-    const commits = (git(root, cenv, ['log', '--format=%H%x00%s', `${headSha}..HEAD`]) ?? '').split('\n').filter(Boolean)
+    const commits = (git(root, genv, ['log', '--format=%H%x00%s', `${headSha}..HEAD`]) ?? '').split('\n').filter(Boolean)
       .map((l) => { const [sha, subject] = l.split('\0'); return { sha, subject }; }).reverse();
     const bundle = join(out, 'fix.bundle');
-    git(root, cenv, ['bundle', 'create', bundle, `${headSha}..HEAD`]);
-    git(root, cenv, ['bundle', 'verify', bundle]);
+    git(root, genv, ['bundle', 'create', bundle, `${headSha}..HEAD`]);
+    git(root, genv, ['bundle', 'verify', bundle]);
     return { record: fixRecord({ ...base, ...common, outcome: 'fixed', newHead, commits, description: described, notes: notes('fixed') }), description };
   } finally {
-    rmSync(home, { recursive: true, force: true });
+    // Cleanup never replaces the result: a failure here is a warning.
+    try { settle(); } catch (e) { ctx.log?.(`::warning::${e.message}`); }
+    for (const dir of [home, gitHome]) {
+      try { rmSync(dir, { recursive: true, force: true }); } catch (e) { ctx.log?.(`::warning::could not remove ${dir}: ${e.code ?? e.message}`); }
+    }
   }
 }
 
@@ -1095,6 +1234,9 @@ async function main() {
     fetch: onlyOrigins(globalThis.fetch, ['https://api.github.com', darioUrl]),
     sleep: (ms) => new Promise((r) => setTimeout(r, ms)), now: () => Date.now(),
     dryRun: env.DRY_RUN === '1' || env.DRY_RUN === 'true',
+    // The run account and the proxy are host settings, from the same env file as the key.
+    runAs: secrets.FIX_RUN_AS || '', proxy: secrets.FIX_PROXY || '',
+    guardFiles: [env.FIX_ENV_FILE, env.FIX_PROMPT_FILE],
   };
   // The job log of a public repository is public: no line in it carries the key or the token.
   const hidden = runSecrets(ctx);
