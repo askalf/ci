@@ -1006,11 +1006,11 @@ if (!gitOk) {
         // The commands' HOME: a global git config there, which a git run with that HOME would read.
         ['a .gitconfig in the commands\' HOME', (mark) => "import { writeFileSync } from 'node:fs';\n"
           + `writeFileSync(process.env.HOME + '/.gitconfig', '[core]\\n\\tfsmonitor = touch ${mark}\\n[safe]\\n\\tdirectory = *\\n');\n`],
-        // A post-commit hook (which --no-verify does not skip) where the commit's hooks directory
-        // would be if it lived in the commands' HOME.
-        ['a post-commit hook planted in the commands\' HOME', (mark) => "import { mkdirSync, writeFileSync } from 'node:fs';\n"
+        // prepare-commit-msg and post-commit hooks (--no-verify skips neither) where the commit's
+        // hooks directory would be if it lived in the commands' HOME.
+        ['commit hooks planted in the commands\' HOME', (mark) => "import { mkdirSync, writeFileSync } from 'node:fs';\n"
           + "mkdirSync(process.env.HOME + '/no-hooks', { recursive: true });\n"
-          + `writeFileSync(process.env.HOME + '/no-hooks/post-commit', '#!/bin/sh\\ntouch ${mark}\\n', { mode: 0o755 });\n`],
+          + `for (const h of ['prepare-commit-msg', 'post-commit']) writeFileSync(process.env.HOME + '/no-hooks/' + h, '#!/bin/sh\\ntouch ${mark}\\n', { mode: 0o755 });\n`],
       ]) {
         const mark = join(tmpdir(), `redline-pwned-${process.pid}-${Math.random().toString(36).slice(2)}`);
         const run = await realRun(body(mark));
