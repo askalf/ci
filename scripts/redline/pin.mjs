@@ -68,8 +68,7 @@ export function bumpCaller(yaml, sha, note = '') {
 
 /**
  * A repository's redline-fix.yml: the workflow_dispatch caller forge runs when Redline requests
- * changes. `runnerLabel` is the repo's exec runner label (`<repo>-exec`, platform
- * deploy/gha-runners). The caller job cannot carry runs-on itself (a job that uses a reusable
+ * changes. `runnerLabel` is the repo's exec runner label (`<repo>-exec`). The caller job cannot carry runs-on itself (a job that uses a reusable
  * workflow takes no runner), so the label travels as an input.
  */
 export function fixCallerYaml(sha, runnerLabel, note = '') {

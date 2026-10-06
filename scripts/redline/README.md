@@ -62,11 +62,10 @@ job killed at its 60-minute timeout still uploads a `fix.json` that says so. The
 for `fixed`. `fix-tools.json` is the fixer's `TOOLS` as a file, pinned in `truecopy.lock` like the
 reviewer's. The artifact is `redline-fix`. Nothing on the runner can push:
 forge verifies the artifact and pushes the commit to the PR branch with its own token, then
-comments with the notes. The model key is the named dario key `first-party-fix`, reached through
-a dario key socket named by `DARIO_SOCKET` in `/etc/askalf/fix-exec.env` (root:gha-exec 640), so
-no runner holds the key itself: the socket is the credential, and only the exec accounts can
-connect to it (never gha-oss, which runs untrusted upstream candidates' suites on the same host).
-`DARIO_API_KEY` in the same file still works, and is what a host without the socket uses.
+comments with the notes. The model is reached through a dario key socket named by `DARIO_SOCKET`
+in the env file, so no runner holds the key itself: the socket is the credential, and only the
+exec accounts can connect to it, never an account that runs untrusted code. `DARIO_API_KEY` in
+the same file still works, and is what a host without the socket uses.
 The commands the checkout supplies (the install, the PR's tests, the model's `node <file>`) run
 as a separate run account, named by `FIX_RUN_AS` in the env file; see the host setup below. The
 script also checks everything that leaves the runner for the key and the read token: the diff,
@@ -80,85 +79,38 @@ limits, the commit and bundle on a real repository, and both workflows.
 ## Host setup for the fix lane
 
 The exec account can spend the model key, so nothing the checkout supplies may run as it. Each exec
-runner gets a run account of its own: one per runner, so a kill or a write never reaches another
-repository's job. Below, `gha-exec` stands for the exec runner's account and `gha-exec-run` for its
-run account.
+runner needs, on its host:
 
-1. **The run account.** No login, no home secrets, and not in the group that reads
-   `fix-exec.env` and `fix-prompt.md`:
-   ```
-   useradd --system --no-create-home --shell /usr/sbin/nologin gha-exec-run
-   ```
-2. **sudo, to that account only.** In `/etc/sudoers.d/redline-fix` (check with `visudo -c`):
-   ```
-   gha-exec ALL=(gha-exec-run) NOPASSWD: ALL
-   ```
-   `fix.mjs` runs `sudo -n -u gha-exec-run -- env -i ...` for each command, then, as the same
-   account, `kill -KILL -1`, `chmod -R u+rwX` and `setfacl -R -m u:<exec account>:rwX,...`.
-   `kill -1` signals all of the account's processes at once, so one that keeps forking cannot
-   escape it, and `ps` must then show none alive. The `chmod` and `setfacl` give the exec account
-   back whatever the run account locked to itself, and every path must then be reachable. Either
-   check failing refuses the run.
-3. **ACLs and paths.** The `acl` package, for `setfacl`, on a filesystem mounted with ACL support.
-   Every directory above the runner's work directory must be searchable by the run account (`x`),
-   and the tool cache setup-node installs into must be readable and searchable by it, since the
-   tests run that node. The run account cannot write `.git` and does not own it, so a test that
-   runs git in the checkout fails in this lane.
-4. **Egress.** The run account reaches a forward proxy and nothing else; dario and every other
-   local service included. With nftables:
-   ```
-   table inet redline_fix {
-     chain out {
-       type filter hook output priority 0; policy accept;
-       meta skuid "gha-exec-run" ip daddr 127.0.0.1 tcp dport 3128 accept
-       meta skuid "gha-exec-run" drop
-     }
-   }
-   ```
-   The proxy (Squid, for example) allows the package registries the repositories use, such as
-   `registry.npmjs.org`, `registry.yarnpkg.com` and `codeload.github.com`, and denies the rest.
-   A repository whose tests need the internet fails in this lane.
-5. **dario's key socket.** A dario with `--key-socket` binds the fix key to a unix socket, so no
-   file on the host holds it. As root, with dario running as `dario`:
-   ```
-   install -d -o dario -g gha-exec -m 2750 /run/dario     # setgid: the socket's group is gha-exec
-   dario proxy --key-socket=/run/dario/fix.sock=first-party-fix
-   ```
-   The socket is created `0660`; the setgid directory gives it the `gha-exec` group, so the exec
-   accounts can connect and the run accounts, outside that group, cannot even reach it. nftables
-   does not see unix sockets: the directory is the guard. `/run` is a tmpfs, so the directory
-   goes in a tmpfiles.d line or the dario unit's `RuntimeDirectory=` (with `Group=gha-exec` and
-   `RuntimeDirectoryMode=2750`).
-6. **The env file.** `/etc/askalf/fix-exec.env`, with no secret in it:
-   ```
-   DARIO_SOCKET=/run/dario/fix.sock
-   FIX_RUN_AS=gha-exec-run
-   FIX_PROXY=http://127.0.0.1:3128
-   ```
-   A host without the socket keeps `DARIO_API_KEY=<the key>` in place of `DARIO_SOCKET`. Once no
-   host's env file holds the key, `dario keys rotate first-party-fix`: the old secret sat in those
-   files, and nothing needs the new one.
+- **A run account of its own**, one per runner, so a kill or a write never reaches another
+  repository's job. No login, no secrets, and not in the group that reads the env file and the
+  brief. The exec account may `sudo -n` to it and to nothing else. `fix.mjs` runs each command as
+  `sudo -n -u <run account> -- env -i ...`, then, as the same account, kills every process it has
+  (`kill -KILL -1`; `ps` must then show none) and gives the exec account back whatever it locked
+  (`chmod`, `setfacl`). Either check failing refuses the run.
+- **ACLs**, for `setfacl`, on a filesystem mounted with ACL support. Every directory above the
+  runner's work directory, and the tool cache setup-node installs into, must be searchable by the
+  run account. The run account cannot write `.git`, so a test that runs git in the checkout fails
+  in this lane.
+- **Egress through a forward proxy only.** The run account reaches the proxy (`FIX_PROXY`) and
+  nothing else, dario and every other local service included. The proxy allows the package
+  registries the repositories use and denies the rest; a repository whose tests need the internet
+  fails in this lane.
+- **dario's key socket**, in a directory the exec accounts can reach and the run accounts cannot.
+  Firewall rules do not see unix sockets, so the directory's mode is the guard.
+- **The env file**, holding `DARIO_SOCKET` (or `DARIO_API_KEY` on a host without the socket),
+  `FIX_RUN_AS` and `FIX_PROXY`.
+
+The concrete accounts, paths, rules and hand checks are kept with the hosts, not here.
 
 Each run proves the setup before it runs anything: sudo to the run account works, the run account
 is neither root nor the exec account (`id -u`), it cannot read the env file or the brief or
-connect to the key socket, it can write the checkout, and it cannot write `.git`. Its processes are killed only after it has passed
-all of these, so a refused account is never sent `kill -1`. The
+connect to the key socket, it can write the checkout, and it cannot write `.git`. Its processes are
+killed only after it has passed all of these, so a refused account is never sent `kill -1`. The
 script's own git then works on a private copy of `.git`, with a HOME of its own and no global or
-system config, so nothing the run account writes (a replaced `.git`, a `.gitconfig`) reaches it. A run
-that fails any of these is `refused`, and its notes say which. Without `FIX_RUN_AS` the commands
+system config, so nothing the run account writes (a replaced `.git`, a `.gitconfig`) reaches it. A
+run that fails any of these is `refused`, and its notes say which. Without `FIX_RUN_AS` the commands
 run as the exec account, and the job log warns that they could read the key (or, with the socket,
 spend it).
-
-To check a host by hand, as the exec account:
-```
-sudo -n -u gha-exec-run -- cat /etc/askalf/fix-exec.env           # Permission denied
-sudo -n -u gha-exec-run -- curl -sS -m 5 --unix-socket /run/dario/fix.sock http://dario/   # fails: Permission denied
-curl -sS -m 5 --unix-socket /run/dario/fix.sock -o /dev/null -w '%{http_code}\n' http://dario/v1/models   # 200, as gha-exec
-sudo -n -u gha-exec-run -- curl -sS -m 5 http://127.0.0.1:3456/   # fails: dario is not reachable
-sudo -n -u gha-exec-run -- curl -sS -m 5 https://example.com/      # fails: no direct egress
-sudo -n -u gha-exec-run -- env HTTPS_PROXY=http://127.0.0.1:3128 \
-  curl -sS -m 10 -o /dev/null -w '%{http_code}\n' https://registry.npmjs.org/   # 200
-```
 
 ## The pin: `pin.mjs` and `redline-pin-bump.yml`
 

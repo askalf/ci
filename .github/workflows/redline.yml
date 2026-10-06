@@ -4,7 +4,7 @@
 # changes CI, a verdict forge refused, a re-read after a description edit); that run executes the
 # default branch's workflow files, not the PR's, and reviews the head it is given.
 name: Redline
-# Forge finds its dispatch by this title (platform runtime/redline-ci-dispatch.ts); keep it exact.
+# Forge finds its dispatch by this title; keep it exact.
 run-name: ${{ github.event_name == 'workflow_dispatch' && format('Redline review {0}#{1} @ {2}{3}', github.repository, inputs.pr, inputs.head, inputs.reread && ' (re-read)' || '') || github.event.pull_request.title }}
 
 on:

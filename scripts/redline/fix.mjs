@@ -72,7 +72,7 @@
 //   REPO=owner/name PR=<n> HEAD_SHA=<sha> REVIEW_URL=<review html_url> CHECKOUT=<dir> \
 //   GH_READ_TOKEN=... FIX_ENV_FILE=/etc/askalf/fix-exec.env FIX_PROMPT_FILE=/etc/askalf/fix-prompt.md \
 //   FIX_OUT=<dir> [DRY_RUN=1] node fix.mjs
-// The env file holds DARIO_SOCKET (dario's key socket for the named key first-party-fix) or
+// The env file holds DARIO_SOCKET (dario's key socket for the fix lane's named key) or
 // DARIO_API_KEY (that key itself), and optionally DARIO_URL
 // (default http://127.0.0.1:3456) and FIX_MODEL (default claude-opus-5-5). FIX_PROMPT_FILE names the
 // system prompt, installed on the runner host: this repository is public and carries no prompt, so

@@ -35,8 +35,8 @@ files, and the workflows hand the scripts their paths:
 
 | file | read by | env | owner and mode |
 |---|---|---|---|
-| `/etc/askalf/redline-prompt.md` | `review.mjs` | `REDLINE_PROMPT_FILE` | `root:<runner group> 640`, the group of the account that runs the `redline` runner |
-| `/etc/askalf/fix-prompt.md` | `fix.mjs` | `FIX_PROMPT_FILE` | `root:gha-exec 640`, like `fix-exec.env`; never readable by `gha-oss` |
+| `/etc/askalf/redline-prompt.md` | `review.mjs` | `REDLINE_PROMPT_FILE` | readable by the account that runs the `redline` runner |
+| `/etc/askalf/fix-prompt.md` | `fix.mjs` | `FIX_PROMPT_FILE` | readable by the exec runner's account only, like `fix-exec.env`; never by an account that runs untrusted code |
 
 The scripts have no bundled fallback: a variable that is unset, a file that cannot be read or an empty
 file fails the job with an error naming the variable. The tests use the three-line stand-ins in
