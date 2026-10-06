@@ -92,10 +92,12 @@ jobs:
         run: |
           set -euo pipefail
           # Unquoted on purpose: PIN_PATHS is a list of pathspecs, none with a space; set -f keeps
-          # the shell from globbing them, so git reads each pattern itself.
+          # the shell from globbing them, so git reads each pattern itself. --first-parent walks
+          # main's own history, so a merge is picked with the time it landed, not the time of the
+          # merged branch's last commit.
           set -f
           # shellcheck disable=SC2086
-          read -r sha at < <(git log -1 --format='%H %ct' HEAD -- $PIN_PATHS)
+          read -r sha at < <(git log -1 --first-parent --format='%H %ct' HEAD -- $PIN_PATHS)
           set +f
           age=$(( ( $(date +%s) - at ) / 60 ))
           echo "newest change a caller runs: ${sha:0:7}, ${age} minutes ago"

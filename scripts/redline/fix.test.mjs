@@ -1416,8 +1416,44 @@ console.log('\n  pin bump, both callers');
   check('the bump runs hourly and on dispatch, never per push', /^  schedule:\n    - cron: '\d+ \* \* \* \*'\n  workflow_dispatch:\n$/.test(on));
   check('a scheduled bump waits for the newest change to be quiet; a dispatch does not',
     /QUIET_MINUTES: \d+/.test(bump) && bump.includes('if [ "$EVENT" = schedule ] && [ "$age" -lt "$QUIET_MINUTES" ]; then')
-      && bump.includes("git log -1 --format='%H %ct' HEAD -- $PIN_PATHS") && bump.includes('SHA: ${{ steps.pick.outputs.sha }}')
+      && bump.includes("git log -1 --first-parent --format='%H %ct' HEAD -- $PIN_PATHS") && bump.includes('SHA: ${{ steps.pick.outputs.sha }}')
       && bump.includes('fetch-depth: 0'));
+  {
+    // The pick step itself, in a scratch history: a branch whose runtime change is hours old,
+    // merged into main a minute ago, is picked as the merge and waits out the quiet window.
+    const lines = bump.split('\n');
+    const at = lines.findIndex((l) => l.includes('- name: Pick the commit to pin'));
+    const runAt = lines.findIndex((l, i) => i > at && l.trim() === 'run: |');
+    const script = [];
+    for (const l of lines.slice(runAt + 1)) { if (l.trim() && !l.startsWith('          ')) break; script.push(l.slice(10)); }
+    const pinPaths = (/\n      PIN_PATHS: >-\n((?: {8}\S.*\n)+)/.exec(bump)?.[1] ?? '').split(/\s+/).filter(Boolean).join(' ');
+    if (!gitOk || process.platform === 'win32' || spawnSync('bash', ['-c', 'true']).status !== 0) {
+      console.log('  skip the pick step run: no POSIX bash and git here');
+    } else {
+      const d = mkdtempSync(join(tmpdir(), 'pick-'));
+      const now = Math.floor(Date.now() / 1000);
+      const git = (args, when) => spawnSync('git', args, { cwd: d, encoding: 'utf8', env: { ...process.env,
+        GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@x', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@x',
+        GIT_AUTHOR_DATE: `${when} +0000`, GIT_COMMITTER_DATE: `${when} +0000` } });
+      const put = (f, x) => { mkdirSync(join(d, f, '..'), { recursive: true }); writeFileSync(join(d, f), x); };
+      git(['init', '-q', '-b', 'main'], now);
+      put('scripts/redline/review.mjs', 'v1\n'); git(['add', '-A'], now - 86400); git(['commit', '-qm', 'base'], now - 86400);
+      git(['checkout', '-qb', 'topic'], now);
+      put('scripts/redline/review.mjs', 'v2\n'); git(['commit', '-qam', 'runtime change, hours old'], now - 5 * 3600);
+      git(['checkout', '-q', 'main'], now);
+      put('README.md', 'x\n'); git(['add', '-A'], now - 3600); git(['commit', '-qm', 'docs on main'], now - 3600);
+      git(['merge', '-q', '--no-ff', '-m', 'merge topic', 'topic'], now - 60);
+      const merge = git(['rev-parse', 'HEAD'], now).stdout.trim();
+      const out = join(d, 'out');
+      writeFileSync(out, '');
+      const r = spawnSync('bash', ['-c', script.join('\n')], { cwd: d, encoding: 'utf8',
+        env: { ...process.env, EVENT: 'schedule', PIN_PATHS: pinPaths, QUIET_MINUTES: '60', GITHUB_OUTPUT: out } });
+      const got = readFileSync(out, 'utf8');
+      check('a branch merged a minute ago is picked as the merge and waits for the quiet window',
+        r.status === 0 && got.includes('ok=false') && r.stdout.includes(`newest change a caller runs: ${merge.slice(0, 7)}`));
+      rmSync(d, { recursive: true, force: true });
+    }
+  }
   {
     // The bump step itself, run twice against a fake gh: an hourly run that finds its bump PR
     // already proposing the picked commit changes nothing; one that finds an older proposal resets it.
