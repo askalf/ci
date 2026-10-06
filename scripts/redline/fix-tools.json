@@ -1,0 +1,136 @@
+{
+  "name": "redline-fix",
+  "tools": [
+    {
+      "name": "finish_fix",
+      "description": "Finish. Call exactly once, last, after the tests have run on your edits.",
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "outcome",
+          "summary"
+        ],
+        "properties": {
+          "outcome": {
+            "type": "string",
+            "enum": [
+              "fixed",
+              "refused"
+            ],
+            "description": "fixed when the findings are answered in code; refused when none can be."
+          },
+          "subject": {
+            "type": "string",
+            "description": "fixed: one line for the commit, imperative, under 60 characters, no prefix, no issue numbers, no trailers."
+          },
+          "summary": {
+            "type": "string",
+            "description": "Markdown for the PR comment: per finding, what changed, where, and why it answers it. Plain sentences."
+          },
+          "tests_run": {
+            "type": "string",
+            "description": "The test command you ran last and its result."
+          },
+          "reason": {
+            "type": "string",
+            "description": "refused: why no finding can be fixed in this PR."
+          }
+        }
+      }
+    },
+    {
+      "name": "fix_list",
+      "description": "List a directory of the checkout (directories end with /).",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Directory relative to the repo root; default the root."
+          }
+        }
+      }
+    },
+    {
+      "name": "fix_read",
+      "description": "Read numbered lines of a file in the checkout. At most 400 lines per call.",
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "path"
+        ],
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "start_line": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "end_line": {
+            "type": "integer",
+            "minimum": 1
+          }
+        }
+      }
+    },
+    {
+      "name": "fix_run",
+      "description": "Run one allowed command in the checkout, without a shell; stdout and stderr together, capped. Default timeout 600s, at most 900s. The allowed commands are listed in the brief.",
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "command"
+        ],
+        "properties": {
+          "command": {
+            "type": "string"
+          },
+          "timeout_seconds": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 900
+          }
+        }
+      }
+    },
+    {
+      "name": "fix_search",
+      "description": "Search the checkout with a JavaScript regular expression. At most 80 matches.",
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "pattern"
+        ],
+        "properties": {
+          "pattern": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string",
+            "description": "Directory or file to search; default the root."
+          }
+        }
+      }
+    },
+    {
+      "name": "fix_write",
+      "description": "Write a whole file in the checkout (created if absent). Read it first and write it back complete. Never under .github/, .git/ or node_modules/.",
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "path",
+          "content"
+        ],
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "content": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  ]
+}

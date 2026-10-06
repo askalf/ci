@@ -25,5 +25,6 @@ jobs:
           node-version: 22
       - run: node scripts/redline/review.test.mjs
       - run: node scripts/redline/fix.test.mjs
-      # tools.json is TOOLS as a file; it fails here when review.mjs changed a tool without it.
+      # tools.json and fix-tools.json are TOOLS as files; this fails when review.mjs or fix.mjs
+      # changed a tool without them.
       - run: node scripts/redline/dump-tools.mjs --check
