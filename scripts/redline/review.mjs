@@ -527,7 +527,9 @@ export function socketFetch(socketPath) {
         const headers = new Headers();
         for (const [k, v] of Object.entries(res.headers)) for (const one of [v].flat()) if (one !== undefined) headers.append(k, one);
         const status = res.statusCode ?? 502;
-        resolvePromise(new Response([204, 304].includes(status) ? null : Buffer.concat(chunks), { status, headers }));
+        // A null-body status takes no body, and a status Response cannot hold rejects the fetch:
+        // a throw here, in an event listener, would end the process instead.
+        try { resolvePromise(new Response([101, 103, 204, 205, 304].includes(status) ? null : Buffer.concat(chunks), { status, headers })); } catch (e) { reject(e); }
       });
     });
     const onAbort = () => { req.destroy(); reject(signal.reason); };

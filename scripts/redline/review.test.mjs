@@ -138,8 +138,8 @@ if (process.platform !== 'win32') {
     req.on('end', () => {
       seen.push({ method: req.method, url: req.url, headers: req.headers, body });
       if (req.url === '/hang') return;
-      res.writeHead(req.url === '/gone' ? 204 : 200, { 'content-type': 'application/json', 'x-dario-upstream-rejection': 'none' });
-      res.end(req.url === '/gone' ? undefined : JSON.stringify({ content: [{ type: 'text', text: 'PONG' }] }));
+      res.writeHead(req.url === '/gone' ? 204 : req.url === '/reset' ? 205 : 200, { 'content-type': 'application/json', 'x-dario-upstream-rejection': 'none' });
+      res.end(['/gone', '/reset'].includes(req.url) ? undefined : JSON.stringify({ content: [{ type: 'text', text: 'PONG' }] }));
     });
   });
   await new Promise((r) => server.listen(sock, r));
@@ -149,6 +149,8 @@ if (process.platform !== 'win32') {
   check('socketFetch: a Response with status, headers and body', r.ok && r.status === 200 && r.headers.get('x-dario-upstream-rejection') === 'none' && (await r.json()).content[0].text === 'PONG');
   const empty = await f('http://127.0.0.1:3456/gone');
   check('socketFetch: a 204 has no body', empty.status === 204 && (await empty.text()) === '');
+  const reset = await throws(async () => { const r205 = await f('http://127.0.0.1:3456/reset'); if (r205.status !== 205 || (await r205.text()) !== '') throw new Error(`got ${r205.status}`); });
+  check('socketFetch: a 205 resolves with no body instead of throwing in a listener', reset === null);
   const hung = await throws(() => f('http://127.0.0.1:3456/hang', { signal: AbortSignal.timeout(100) }));
   check('socketFetch: a timeout aborts the request', hung?.name === 'TimeoutError');
   const elsewhere = [];
