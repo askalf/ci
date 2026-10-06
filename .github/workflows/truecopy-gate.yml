@@ -1,8 +1,9 @@
-# Gates what the Redline reviewer reads with truecopy: its tools (scripts/redline/tools.json, written
-# from TOOLS in review.mjs), pinned in truecopy.lock. The chain is code -> manifest (--check) -> lock
+# Gates the tools Redline's models read with truecopy: the reviewer's (scripts/redline/tools.json,
+# written from TOOLS in review.mjs) and the fixer's (scripts/redline/fix-tools.json, from TOOLS in
+# fix.mjs), both pinned in truecopy.lock. The chain is code -> manifest (--check) -> lock
 # (truecopy verify): a change to a tool fails until it is re-pinned with `truecopy add`, which
-# poison-scans it first. The system prompt is not in the lock: it is a file on the runner host
-# (/etc/askalf/redline-prompt.md), never in this repository, so there is nothing here to pin.
+# poison-scans it first. The system prompts are not in the lock: they are installed on the runner
+# hosts, never in this repository, so there is nothing here to pin.
 name: truecopy gate
 
 on:
@@ -29,7 +30,7 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
-      - name: tools.json matches TOOLS
+      - name: tools.json and fix-tools.json match TOOLS
         run: node scripts/redline/dump-tools.mjs --check
       - name: truecopy verify
         uses: askalf/truecopy-action@1c751a921d3bacb73f30c66054c7fe293ca6743d # v1.1.2

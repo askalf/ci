@@ -133,8 +133,9 @@ jobs:
           path: pr
           persist-credentials: false
 
-      # The checkout must be the reviewed head exactly: a PR that moved gets a new dispatch from
-      # forge at its new head, never a fix computed against the old one.
+      # The checkout was asked for the head sha, so this proves only that it landed nowhere else.
+      # Whether the PR is still at that head is read from the API by fix.mjs before the model is
+      # called: a PR that moved is refused, and forge dispatches again at its new head.
       - name: Check the checkout is at the head
         env:
           HEAD_SHA: ${{ inputs.head }}

@@ -11,7 +11,7 @@ import {
   parseReviewUrl, parseReviewBody, inlineItems, formatFinding, detectRunner, allowedCommands, allowedArgv, safeWritePath, stageable,
   protectedFromCheckAttr, protectedPaths, PROTECTED_ATTR, descriptionProblem,
   commitSubject, hasAttributionTrailer, neutraliseRefs, cleanNotes, summariseTests, renderNotes, fixRecord, fixProblem, saveFix,
-  failingTests, FAILING_NAMES_MAX,
+  failingTests, FAILING_NAMES_MAX, runSecrets, leaksSecret, maskSecrets, berryInstall,
   TOOLS, FINISH_REQUIRED, askForFinish, checkFinish, runLoop, buildBrief, childEnv, onlyOrigins, runFix,
   LIMITS, OUTCOMES, AUTHOR, FIX_VERSION, DEFAULT_MODEL, SUBJECT_BANNED,
 } from './fix.mjs';
@@ -114,8 +114,26 @@ let symlinked = true;
 try { symlinkSync(join(outside, 'secret.txt'), join(root, 'leak.txt')); } catch { symlinked = false; }
 {
   const npm = detectRunner(['package.json', 'package-lock.json'], { scripts: { test: 'node --test', build: 'tsc', lint: '', release: 'x' } });
-  check('npm with a lockfile: npm ci, and only the four scripts that exist and are not empty', npm.pm === 'npm' && npm.install.join(' ') === 'npm ci --no-audit --no-fund' && npm.scripts.join() === 'test,build');
-  check('npm without a lockfile installs', detectRunner(['package.json'], { scripts: {} }).install.join(' ') === 'npm install --no-audit --no-fund');
+  check('npm with a lockfile: npm ci, and only the four scripts that exist and are not empty', npm.pm === 'npm' && npm.install.join(' ') === 'npm ci --no-audit --no-fund --ignore-scripts' && npm.scripts.join() === 'test,build');
+  check('npm without a lockfile installs', detectRunner(['package.json'], { scripts: {} }).install.join(' ') === 'npm install --no-audit --no-fund --ignore-scripts');
+  check('no install runs dependencies\' lifecycle scripts', [['pnpm-lock.yaml'], ['yarn.lock'], ['bun.lock']].every((f) => detectRunner(f, {}).install.includes('--ignore-scripts')));
+  // Yarn 2 rejects --mode=skip-build and Yarn 3+ dropped --skip-builds; both read YARN_ENABLE_SCRIPTS.
+  const berry = (files, pkg) => { const r = detectRunner(files, pkg); return r.install.join(' ') === 'yarn install --immutable' && r.installEnv.YARN_ENABLE_SCRIPTS === 'false'; };
+  check('yarn 2+ installs immutable with scripts off by variable, by .yarnrc.yml or packageManager, any Berry version',
+    berry(['yarn.lock', '.yarnrc.yml'], {}) && berry(['yarn.lock'], { packageManager: 'yarn@2.4.2' }) && berry(['yarn.lock'], { packageManager: 'yarn@4.5.0' })
+      && detectRunner(['yarn.lock'], { packageManager: 'yarn@4.5.0' }).install.every((a) => !/skip-build/.test(a)));
+  check('yarn 2+ is marked for a version check before the install, yarn 1 is not',
+    detectRunner(['yarn.lock', '.yarnrc.yml'], {}).berry === true && detectRunner(['yarn.lock'], { packageManager: 'yarn@1.22.22' }).berry === false);
+  // A dependenciesMeta `built: true` overrides YARN_ENABLE_SCRIPTS, so the flag that skips builds is
+  // always passed: --skip-builds in yarn 2, --mode=skip-build from 3 (checked against 2.4.2 and 4.5.0).
+  check('berryInstall: the build-skipping flag of each major, nothing for an unknown version',
+    berryInstall('2.4.2\n').join(' ') === 'yarn install --immutable --skip-builds'
+      && berryInstall('4.5.0').join(' ') === 'yarn install --immutable --mode=skip-build'
+      && berryInstall('warning: something\n3.6.4\n').join(' ') === 'yarn install --immutable --mode=skip-build'
+      && berryInstall('1.22.22') === null && berryInstall('') === null && berryInstall('command not found') === null);
+  check('yarn 1 keeps its flags and sets no variable',
+    detectRunner(['yarn.lock'], { packageManager: 'yarn@1.22.22' }).install.join(' ') === 'yarn install --frozen-lockfile --ignore-scripts'
+      && Object.keys(detectRunner(['yarn.lock'], { packageManager: 'yarn@1.22.22' }).installEnv).length === 0);
   check('pnpm, yarn and bun are read from their lockfiles', detectRunner(['pnpm-lock.yaml'], {}).pm === 'pnpm' && detectRunner(['yarn.lock'], {}).pm === 'yarn' && detectRunner(['bun.lockb'], {}).pm === 'bun' && detectRunner(['bun.lock'], {}).pm === 'bun');
   check('packageManager wins over a lockfile', detectRunner(['package-lock.json'], { packageManager: 'pnpm@9.1.0' }).pm === 'pnpm');
   check('no package.json: nothing to install, no scripts', detectRunner(['README.md'], null).pm === null && detectRunner(['README.md'], null).install === null);
@@ -357,6 +375,14 @@ function loopWorld(turns, { canForce = true } = {}) {
   check('the brief carries the PR, the findings, the inline comments, the allowlist and the test script', /PR #7: t/.test(brief) && /\[1\] blocking `src\/b\.js:1`/.test(brief) && /\[1\] src\/b\.js:1\nc/.test(brief) && /run accepts: npm test, node <file>/.test(brief) && /Test script: `npm test`/.test(brief) && /PR diff:\n\+x/.test(brief));
 }
 
+console.log('\n  credentials');
+{
+  const secrets = runSecrets({ darioKey: 'dk_live_0123456789', readToken: 'ghs_abcdefghij', other: 'x' });
+  check('the run\'s secrets are the key and the read token; short stand-ins are not secrets', secrets.join() === 'dk_live_0123456789,ghs_abcdefghij' && runSecrets({ darioKey: 'k', readToken: 'read' }).length === 0);
+  check('a secret anywhere in the text is found', leaksSecret('+const k = "dk_live_0123456789";', secrets) && !leaksSecret('nothing here', secrets));
+  check('the log masks every occurrence', maskSecrets('a dk_live_0123456789 b dk_live_0123456789 ghs_abcdefghij', secrets) === 'a *** b *** ***');
+}
+
 // ---------- end to end: a fake GitHub, a fake model, a real repository ----------
 
 function sh(cwd, args) {
@@ -478,6 +504,18 @@ if (!gitOk) {
     rmSync(repo.dir, { recursive: true, force: true });
   }
 
+  console.log('\n  runFix: a credential never leaves');
+  {
+    const KEY = 'dk_live_0123456789';
+    const repo = makeRepo();
+    const w = world(repo, { turns: [tool('fix_write', { path: 'src/b.js', content: `export const token = '${KEY}';\n` }), finish()] });
+    const { record: r } = await runFix({ ...w.ctx, darioKey: KEY });
+    check('a change that carries the model key is refused with no bundle and no patch', r.outcome === 'refused' && /credential/.test(r.notes) && !existsSync(join(w.out, 'fix.bundle')) && !existsSync(join(w.out, 'diff.patch')) && !JSON.stringify(r).includes(KEY) && fixProblem(r) === null);
+    check('the repository head did not move', sh(repo.dir, ['rev-parse', 'HEAD']) === repo.head);
+    rmSync(w.out, { recursive: true, force: true });
+    rmSync(repo.dir, { recursive: true, force: true });
+  }
+
   console.log('\n  runFix: a file the repository marks redline-protected');
   {
     const repo = makeRepo();
@@ -496,6 +534,16 @@ if (!gitOk) {
     check('a write to .gitattributes is refused, so the mark cannot be lifted first', /gitattributes is never written/.test(result(2)));
     check('the protected file is unchanged on disk', readFileSync(join(repo.dir, 'src', 'b.js'), 'utf8') === 'export const token = process.env.X;\nconst y = 2;\n');
     check('the fix commits the other file only', r.outcome === 'fixed' && r.files.join() === 'src/c.js' && fixProblem(r) === null);
+    rmSync(w.out, { recursive: true, force: true });
+    rmSync(repo.dir, { recursive: true, force: true });
+  }
+  {
+    // A NUL makes the file binary, so the diff carries it base85-encoded; the file's own bytes are checked.
+    const KEY = 'dk_live_0123456789';
+    const repo = makeRepo();
+    const w = world(repo, { turns: [tool('fix_write', { path: 'src/blob.bin', content: `\u0000${KEY}\u0000` }), finish()] });
+    const { record: r } = await runFix({ ...w.ctx, darioKey: KEY });
+    check('a binary file that carries the key is refused, with no bundle', r.outcome === 'refused' && /credential/.test(r.notes) && !existsSync(join(w.out, 'fix.bundle')) && fixProblem(r) === null);
     rmSync(w.out, { recursive: true, force: true });
     rmSync(repo.dir, { recursive: true, force: true });
   }
@@ -543,6 +591,15 @@ if (!gitOk) {
     check('the payload in the commit is the reviewed one',
       spawnSync('git', ['show', `${r.new_head}:data/payload.json`], { cwd: repo.dir, encoding: 'utf8' }).stdout === '{"captured":true}\n');
     check('the notes say why the payload was left out', new RegExp(`data/payload.json.*${PROTECTED_ATTR}`).test(r.notes), r.notes);
+    rmSync(w.out, { recursive: true, force: true });
+    rmSync(repo.dir, { recursive: true, force: true });
+  }
+  {
+    const KEY = 'dk_live_0123456789';
+    const repo = makeRepo();
+    const w = world(repo, { turns: [tool('fix_write', { path: 'src/b.js', content: FIXED_B }), finish({ summary: `Used ${KEY} to check it.` })] });
+    const { record: r } = await runFix({ ...w.ctx, darioKey: KEY });
+    check('notes that carry the key: refused, and the bundle already written is removed', r.outcome === 'refused' && !JSON.stringify(r).includes(KEY) && !existsSync(join(w.out, 'fix.bundle')) && fixProblem(r) === null);
     rmSync(w.out, { recursive: true, force: true });
     rmSync(repo.dir, { recursive: true, force: true });
   }
@@ -601,6 +658,95 @@ if (!gitOk) {
     check('fix.json refuses a description on a refusal', /carries no description/.test(fixProblem({ ...r, outcome: 'refused', description: true })));
     rmSync(w.out, { recursive: true, force: true });
     rmSync(repo.dir, { recursive: true, force: true });
+  }
+  {
+    // A clean filter (written by a command: a .gitattributes rule and a .git/config entry) stages a
+    // binary blob with the key while the working-tree file stays harmless. The index is checked.
+    const KEY = 'dk_live_0123456789';
+    const repo = makeRepo();
+    const lift = [
+      "import { writeFileSync } from 'node:fs';",
+      "import { spawnSync } from 'node:child_process';",
+      "writeFileSync('leak.sh', \"printf '\\\\000dk_live_%s\\\\000' 0123456789\\n\");",
+      "writeFileSync('.gitattributes', 'harmless.txt filter=leak\\n');",
+      "spawnSync('git', ['config', 'filter.leak.clean', 'sh leak.sh']);",
+      "writeFileSync('harmless.txt', 'harmless\\n');",
+      '',
+    ].join('\n');
+    const w = world(repo, { turns: [tool('fix_write', { path: 'lift.mjs', content: lift }), tool('fix_run', { command: 'node lift.mjs' }), finish()] });
+    const { record: r } = await runFix({ ...w.ctx, darioKey: KEY });
+    check('the command did set up the filter, and the working tree carries no key', readFileSync(join(repo.dir, 'harmless.txt'), 'utf8') === 'harmless\n' && !readFileSync(join(repo.dir, 'leak.sh'), 'utf8').includes(KEY));
+    check('a key that a clean filter put into the staged blob is refused, with no bundle', r.outcome === 'refused' && /credential/.test(r.notes) && !existsSync(join(w.out, 'fix.bundle')) && fixProblem(r) === null);
+    rmSync(w.out, { recursive: true, force: true });
+    rmSync(repo.dir, { recursive: true, force: true });
+  }
+  if (process.platform !== 'win32') {
+    // The filter turns a small working-tree file into a staged blob of the key and 70 MB of zeros:
+    // past any read buffer, small as a compressed patch. It is refused by its staged size.
+    const KEY = 'dk_live_0123456789';
+    const repo = makeRepo();
+    const lift = [
+      "import { writeFileSync } from 'node:fs';",
+      "import { spawnSync } from 'node:child_process';",
+      "writeFileSync('leak.sh', \"printf 'dk_live_%s' 0123456789; head -c 70000000 /dev/zero\\n\");",
+      "writeFileSync('.gitattributes', 'harmless.txt filter=leak\\n');",
+      "spawnSync('git', ['config', 'filter.leak.clean', 'sh leak.sh']);",
+      "writeFileSync('harmless.txt', 'harmless\\n');",
+      '',
+    ].join('\n');
+    const w = world(repo, { turns: [tool('fix_write', { path: 'lift.mjs', content: lift }), tool('fix_run', { command: 'node lift.mjs' }), finish()] });
+    const { record: r } = await runFix({ ...w.ctx, darioKey: KEY });
+    check('a staged blob past the size limit is refused before it is read, with no bundle or patch',
+      r.outcome === 'refused' && /harmless\.txt is \d+ bytes; the limit is/.test(r.notes) && !existsSync(join(w.out, 'fix.bundle')) && !existsSync(join(w.out, 'diff.patch')) && fixProblem(r) === null);
+    rmSync(w.out, { recursive: true, force: true });
+    rmSync(repo.dir, { recursive: true, force: true });
+  }
+  if (process.platform !== 'win32') {
+    // The reviewed head tracks a file named `*`; a command deletes it and writes under .github.
+    // With no file of that name left, a plain pathspec `*` is a pattern that would also stage
+    // .github; taken literally it stages the deletion alone.
+    const repo = makeRepo();
+    writeFileSync(join(repo.dir, '*'), 'star\n');
+    sh(repo.dir, ['add', '-A']);
+    sh(repo.dir, ['-c', 'user.name=t', '-c', 'user.email=t@x', 'commit', '-q', '-m', 'chore: a file named star']);
+    repo.head = sh(repo.dir, ['rev-parse', 'HEAD']);
+    const star = "import { writeFileSync, mkdirSync, unlinkSync } from 'node:fs';\nunlinkSync('*');\nmkdirSync('.github', { recursive: true });\nwriteFileSync('.github/x.yml', 'x\\n');\n";
+    const w = world(repo, { turns: [tool('fix_write', { path: 'star.mjs', content: star }), tool('fix_run', { command: 'node star.mjs' }), finish()] });
+    const { record: r } = await runFix(w.ctx);
+    check('a deleted file named * is staged literally: the commit holds its deletion and nothing under .github',
+      r.outcome === 'fixed' && r.files.sort().join() === '*,star.mjs' && sh(repo.dir, ['diff', '--name-only', repo.head, 'HEAD']).split('\n').sort().join() === '*,star.mjs' && fixProblem(r) === null);
+    rmSync(w.out, { recursive: true, force: true });
+    rmSync(repo.dir, { recursive: true, force: true });
+  }
+  if (process.platform !== 'win32') {
+    // A stub yarn stands in for Berry: it reports a version and logs the install it is given.
+    const stub = mkdtempSync(join(tmpdir(), 'redline-yarn-'));
+    const log = join(stub, 'calls.log');
+    const yarnStub = (version) => writeFileSync(join(stub, 'yarn'), `#!/bin/sh\necho "$YARN_ENABLE_SCRIPTS $*" >> '${log}'\ncase "$1" in --version) ${version} ;; install) exit 0 ;; test) exec node test.mjs ;; esac\n`, { mode: 0o755 });
+    const env = { ...process.env, PATH: `${stub}:${process.env.PATH}` };
+    const yarnRepo = () => makeRepo({ pkg: { name: 'r', private: true, packageManager: 'yarn@2.4.2', scripts: { test: 'node test.mjs' } } });
+    {
+      yarnStub('echo 2.4.2');
+      const repo = yarnRepo();
+      const w = world(repo, { turns: [tool('fix_write', { path: 'src/b.js', content: FIXED_B }), finish()] });
+      const { record: r } = await runFix({ ...w.ctx, env });
+      const calls = readFileSync(log, 'utf8');
+      check('yarn 2: the version is read, then the install skips builds by flag and by variable', calls.includes('false --version\n') && calls.includes('false install --immutable --skip-builds\n') && r.outcome === 'fixed');
+      rmSync(w.out, { recursive: true, force: true });
+      rmSync(repo.dir, { recursive: true, force: true });
+      rmSync(log, { force: true });
+    }
+    {
+      yarnStub('exit 1');
+      const repo = yarnRepo();
+      const w = world(repo, { turns: [tool('fix_write', { path: 'src/b.js', content: FIXED_B }), finish()] });
+      await runFix({ ...w.ctx, env });
+      const calls = readFileSync(log, 'utf8');
+      check('a yarn version that cannot be read installs nothing, and the brief says so', !/ install/.test(calls) && w.calls.model[0].messages[0].content.includes('nothing installed'));
+      rmSync(w.out, { recursive: true, force: true });
+      rmSync(repo.dir, { recursive: true, force: true });
+    }
+    rmSync(stub, { recursive: true, force: true });
   }
 
   console.log('\n  runFix: limits');
@@ -720,6 +866,42 @@ if (!gitOk) {
       rmSync(repo.dir, { recursive: true, force: true });
     }
     {
+      // The root package's own postinstall stands in for a dependency's: --ignore-scripts skips both.
+      const postinstall = 'node -e "require(\'fs\').writeFileSync(\'ran.txt\', \'x\')"';
+      const repo = makeRepo({ pkg: { name: 'r', private: true, scripts: { test: 'node test.mjs', postinstall } } });
+      const w = world(repo, { turns: [tool('fix_write', { path: 'src/b.js', content: FIXED_B }), finish()] });
+      const { record: r } = await runFix(w.ctx);
+      check('the install runs no lifecycle script, and the brief says so', r.outcome === 'fixed' && !existsSync(join(repo.dir, 'ran.txt')) && w.calls.model[0].messages[0].content.includes('install scripts were skipped'));
+      rmSync(w.out, { recursive: true, force: true });
+      rmSync(repo.dir, { recursive: true, force: true });
+    }
+    {
+      // The clock jumps past hardMs after the edit: the suite is not started (the bounce says why),
+      // no model call starts after it, and the run is refused, never fixed.
+      let late = false;
+      let t = 0;
+      const repo = makeRepo({ pkg: { name: 'r', private: true, scripts: { test: 'node test.mjs' } } });
+      const w = world(repo, { turns: [tool('fix_write', { path: 'src/b.js', content: FIXED_B }), () => { late = true; return finish(); }] });
+      const { record: r } = await runFix({ ...w.ctx, now: () => (late ? LIMITS.hardMs + 60_000 : 0) + (t += 1) });
+      check('no time left for the suite, nor for another model call: refused, never fixed', r.outcome === 'refused' && /time budget/.test(r.notes) && w.calls.model.length === 2 && !existsSync(join(w.out, 'fix.bundle')) && !existsSync(join(w.out, 'diff.patch')) && fixProblem(r) === null);
+      rmSync(w.out, { recursive: true, force: true });
+      rmSync(repo.dir, { recursive: true, force: true });
+    }
+    {
+      // A file changed by a node <file> after the passing run makes that run stale: the suite runs
+      // again on the files as they are, and fails.
+      const repo = makeRepo({ pkg: { name: 'r', private: true, scripts: { test: 'node test.mjs' } } });
+      const w = world(repo, { turns: [
+        tool('fix_write', { path: 'src/b.js', content: FIXED_B }),
+        tool('fix_write', { path: 'mutate.mjs', content: "import { writeFileSync } from 'node:fs';\nwriteFileSync('test.mjs', 'process.exit(1);\\n');\n" }),
+        tool('fix_run', { command: 'npm test' }), tool('fix_run', { command: 'node mutate.mjs' }), finish(), finish(),
+      ] });
+      const { record: r } = await runFix(w.ctx);
+      check('a change made by node <file> after the tests is tested again, never passed on the old run', r.outcome === 'tests_failed' && r.tests.exit_code === 1 && !existsSync(join(w.out, 'fix.bundle')) && fixProblem(r) === null);
+      rmSync(w.out, { recursive: true, force: true });
+      rmSync(repo.dir, { recursive: true, force: true });
+    }
+    {
       // A command commits every change on its own: the test gate still sees the change and runs the
       // suite, and a failing suite keeps it from being a fix.
       const repo = makeRepo({ pkg: { name: 'r', private: true, scripts: { test: 'node test.mjs' } }, testExit: 1 });
@@ -731,6 +913,25 @@ if (!gitOk) {
       check('a change a command committed on its own still goes through the test gate',
         r.outcome === 'tests_failed' && r.tests?.command === 'npm test' && r.tests.exit_code === 1 && fixProblem(r) === null, JSON.stringify({ outcome: r.outcome, tests: r.tests }));
       check('and no bundle is written for it', !existsSync(join(w.out, 'fix.bundle')) && r.new_head === null);
+      rmSync(w.out, { recursive: true, force: true });
+      rmSync(repo.dir, { recursive: true, force: true });
+    }
+    if (process.platform !== 'win32') {
+      // Same bytes, executable bit gone: the passing run is stale, and the suite that runs the
+      // script now fails.
+      const repo = makeRepo({ pkg: { name: 'r', private: true, scripts: { test: './check.sh' } } });
+      writeFileSync(join(repo.dir, 'check.sh'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+      sh(repo.dir, ['add', '-A']);
+      sh(repo.dir, ['-c', 'user.name=t', '-c', 'user.email=t@x', 'commit', '-q', '-m', 'test: a script the suite runs']);
+      repo.head = sh(repo.dir, ['rev-parse', 'HEAD']);
+      const w = world(repo, { turns: [
+        tool('fix_write', { path: 'check.sh', content: '#!/bin/sh\n# checked\nexit 0\n' }),
+        tool('fix_write', { path: 'chmod.mjs', content: "import { chmodSync } from 'node:fs';\nchmodSync('check.sh', 0o644);\n" }),
+        tool('fix_run', { command: 'npm test' }), tool('fix_run', { command: 'node chmod.mjs' }), finish(), finish(),
+      ] });
+      const { record: r } = await runFix(w.ctx);
+      check('a script that lost its executable bit after the tests is tested again, never passed on the old run',
+        JSON.stringify(w.calls.model[3].messages.at(-1)).includes('exit 0') && r.outcome === 'tests_failed' && r.tests.exit_code !== 0 && !existsSync(join(w.out, 'fix.bundle')) && fixProblem(r) === null);
       rmSync(w.out, { recursive: true, force: true });
       rmSync(repo.dir, { recursive: true, force: true });
     }
@@ -876,6 +1077,7 @@ console.log('\n  the reusable workflow');
   check('the upload action is the version redline-review.yml uses', /uses: actions\/upload-artifact@([0-9a-f]{40})/.exec(upload)?.[1] === /uses: actions\/upload-artifact@([0-9a-f]{40})/.exec(review)?.[1]);
   check('the cleanup removes the PR, the script and the output', /run: rm -rf pr \.redline fix-out\s*$/.test(steps[cleanAt] ?? '') && (steps[cleanAt] ?? '').includes('if: always()'));
   check('the job has a timeout past the fix\'s wall limit', Number(/timeout-minutes: (\d+)/.exec(wf)?.[1]) * 60_000 > LIMITS.timeMs);
+  check('the hard deadline leaves the job five minutes for its other steps and the upload', LIMITS.timeMs < LIMITS.hardMs && Number(/timeout-minutes: (\d+)/.exec(wf)?.[1]) * 60_000 >= LIMITS.hardMs + 5 * 60_000);
   check('the env file comment names the account boundary', /root:gha-exec 640/.test(wf) && /never (?:by )?gha-oss/i.test(wf));
 }
 
@@ -919,6 +1121,7 @@ console.log('\n  pin bump, both callers');
   const bump = readFileSync(fileURLToPath(new URL('../../.github/workflows/redline-pin-bump.yml', import.meta.url)), 'utf8');
   check('the bump workflow rewrites both caller paths with pin.mjs', /CALLER_PATHS: .*redline\.yml .*redline-fix\.yml/.test(bump.replace(/\n\s+/g, ' ')) && bump.includes('node scripts/redline/pin.mjs "$SHA" "$note"') && /redline-\(review\|fix-run\)\.yml/.test(bump));
   check('the bump workflow runs when the fix workflow changes', /- \.github\/workflows\/redline-fix-run\.yml/.test(bump));
+  check('the tests, their fixtures and the README move no pin', ["- '!scripts/redline/*.test.mjs'", "- '!scripts/redline/test-fixtures/**'", "- '!scripts/redline/README.md'"].every((l) => bump.includes(l)) && bump.indexOf("'!scripts/redline/") > bump.indexOf('- scripts/redline/**'));
   const selfTest = readFileSync(fileURLToPath(new URL('../../.github/workflows/redline-self-test.yml', import.meta.url)), 'utf8');
   // `test` is a required check, so it must report on every PR: no paths filter, which would leave a
   // PR outside the paths with a check that never runs.
