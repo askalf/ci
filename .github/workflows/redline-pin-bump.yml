@@ -40,6 +40,8 @@ jobs:
     # reaches the callers while GitHub's hosted queue is down.
     runs-on: [self-hosted, ci-exec]
     timeout-minutes: 10
+    # A fork repository has no ci-exec runners and no bump to make: the job runs here only.
+    if: github.repository == 'askalf/ci'
     permissions:
       contents: read
     env:
