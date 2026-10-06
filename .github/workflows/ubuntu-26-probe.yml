@@ -61,10 +61,13 @@ jobs:
           if sudo -n -u probe-run -- bash -c 'test -r "$1"' _ "$f"; then echo "ok   bash builtin test -r honours the ACL"; else echo "FAIL bash builtin test -r ignores the ACL"; fail=1; fi
           # kill -KILL -1 as the account: does /usr/bin/kill stop its processes? does bash's builtin?
           echo "kill is: $(command -v kill) -> $(readlink -f "$(command -v kill)")"; /usr/bin/kill --version 2>&1 | head -1 || true
+          set +e
           sudo -n -u probe-run -- sh -c 'sleep 300 & sleep 300 &'; sleep 1
           echo "before: $(ps -u probe-run -o pid= | wc -l) process(es)"
           sudo -n -u probe-run -- /usr/bin/kill -KILL -1; echo "/usr/bin/kill -KILL -1 exit $?"; sleep 1
           left=$(ps -u probe-run -o pid= | wc -l); if [ "$left" -eq 0 ]; then echo "ok   /usr/bin/kill -KILL -1 stopped them"; else echo "DIFF /usr/bin/kill -KILL -1 left $left"; fi
+          sudo -n -u probe-run -- sh -c 'sleep 300 & sleep 300 &'; sleep 1
+          echo "before: $(ps -u probe-run -o pid= | wc -l) process(es)"
           sudo -n -u probe-run -- bash -c 'kill -KILL -1'; echo "bash kill exit $?"; sleep 1
           left=$(ps -u probe-run -o pid= | wc -l); if [ "$left" -eq 0 ]; then echo "ok   bash builtin kill -KILL -1 stopped them"; else echo "FAIL bash builtin kill -KILL -1 left $left"; fail=1; fi
           exit $fail
