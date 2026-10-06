@@ -1406,8 +1406,18 @@ console.log('\n  pin bump, both callers');
   check('a file that calls neither is refused', (await throws(() => bumpCaller('name: x\n', NEW)))?.message.includes('no askalf/ci/.github/workflows/redline-review.yml or askalf/ci/.github/workflows/redline-fix-run.yml call'));
   const bump = readFileSync(fileURLToPath(new URL('../../.github/workflows/redline-pin-bump.yml', import.meta.url)), 'utf8');
   check('the bump workflow rewrites both caller paths with pin.mjs', /CALLER_PATHS: .*redline\.yml .*redline-fix\.yml/.test(bump.replace(/\n\s+/g, ' ')) && bump.includes('node scripts/redline/pin.mjs "$SHA" "$note"') && /redline-\(review\|fix-run\)\.yml/.test(bump));
-  check('the bump workflow runs when the fix workflow changes', /- \.github\/workflows\/redline-fix-run\.yml/.test(bump));
-  check('the tests, their fixtures and the README move no pin', ["- '!scripts/redline/*.test.mjs'", "- '!scripts/redline/test-fixtures/**'", "- '!scripts/redline/README.md'"].every((l) => bump.includes(l)) && bump.indexOf("'!scripts/redline/") > bump.indexOf('- scripts/redline/**'));
+  const pinPaths = (/\n      PIN_PATHS: >-\n((?: {8}\S.*\n)+)/.exec(bump)?.[1] ?? '').split(/\s+/).filter(Boolean);
+  check('a change to the fix workflow moves the pin', pinPaths.includes('.github/workflows/redline-fix-run.yml'));
+  check('the tests, their fixtures and the README move no pin',
+    ['scripts/redline/*.test.mjs', 'scripts/redline/test-fixtures', 'scripts/redline/README.md'].every((x) => pinPaths.includes(`:(exclude)${x}`))
+      && pinPaths.indexOf(':(exclude)scripts/redline/*.test.mjs') > pinPaths.indexOf('scripts/redline'));
+  // Batched: a merge here no longer opens eleven bump PRs at once (68 reviews on 2026-10-06).
+  const on = /\non:\n((?: {2}.*\n)+)/.exec(bump)?.[1] ?? '';
+  check('the bump runs hourly and on dispatch, never per push', /^  schedule:\n    - cron: '\d+ \* \* \* \*'\n  workflow_dispatch:\n$/.test(on));
+  check('a scheduled bump waits for the newest change to be quiet; a dispatch does not',
+    /QUIET_MINUTES: \d+/.test(bump) && bump.includes('if [ "$EVENT" = schedule ] && [ "$age" -lt "$QUIET_MINUTES" ]; then')
+      && bump.includes("git log -1 --format='%H %ct' HEAD -- $PIN_PATHS") && bump.includes('SHA: ${{ steps.pick.outputs.sha }}')
+      && bump.includes('fetch-depth: 0'));
   const selfTest = readFileSync(fileURLToPath(new URL('../../.github/workflows/redline-self-test.yml', import.meta.url)), 'utf8');
   // `test` is a required check, so it must report on every PR: no paths filter, which would leave a
   // PR outside the paths with a check that never runs.
