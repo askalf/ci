@@ -39,6 +39,22 @@
       }
     },
     {
+      "name": "fix_describe",
+      "description": "Replace the pull request description with the complete new text. Only for a finding on the PR description or title: start from the current description in the brief and change only what the finding asks. No attribution lines and no em dashes.",
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "body"
+        ],
+        "properties": {
+          "body": {
+            "type": "string",
+            "description": "The whole new description, markdown."
+          }
+        }
+      }
+    },
+    {
       "name": "fix_list",
       "description": "List a directory of the checkout (directories end with /).",
       "input_schema": {
