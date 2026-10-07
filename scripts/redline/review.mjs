@@ -326,6 +326,16 @@ export function diffFingerprint(pr, files, commits) {
 }
 
 /**
+ * Whether GitHub listed every file and commit the PR reports. The files endpoint stops at 3,000 and
+ * the commits endpoint at 250, with no sign that it stopped, so a list shorter than the PR's own
+ * counts leaves changes no fingerprint saw, and no approval may carry over it. Pure.
+ */
+export function listedInFull(pr, files, commits) {
+  return Number.isInteger(pr.changed_files) && Number.isInteger(pr.commits)
+    && files.length === pr.changed_files && commits.length === pr.commits;
+}
+
+/**
  * The approval to carry over to a new head: the reviewer's latest verdict on this PR (at any head,
  * dismissed or not, since a push dismisses it) when that verdict approved and carries this
  * fingerprint. A later request for changes, or no fingerprint, means a full review. Pure.
@@ -727,10 +737,11 @@ export async function runReview(ctx) {
 
   const files = await ghAll(ctx, `/repos/${repo}/pulls/${n}/files`);
   const commits = await ghAll(ctx, `/repos/${repo}/pulls/${n}/commits`, 3);
-  const fingerprint = diffFingerprint(pr, files, commits);
+  const fingerprint = listedInFull(pr, files, commits) ? diffFingerprint(pr, files, commits) : '';
   // The reviewer's latest verdict approved a head with this same fingerprint: the same files with the
   // same patches against the base, the same text and no new commit message but a routine merge. That
-  // approval carries over; a re-read, or a change no fingerprint covers, is read in full.
+  // approval carries over; a re-read, or a change no fingerprint covers (a file with no patch, or
+  // more files or commits than GitHub listed), is read in full.
   const prior = ctx.reread || !fingerprint ? null : carriedApproval(reviews, fingerprint);
   if (prior) {
     ctx.log?.(`the change is unchanged since ${String(prior.commit_id ?? '').slice(0, 7)}; its approval carries over to ${headSha.slice(0, 7)}`);

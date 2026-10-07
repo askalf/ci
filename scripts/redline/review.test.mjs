@@ -264,7 +264,7 @@ console.log('\n  verdictAtHead');
 
 
 const PATCH = '@@ -1 +1,2 @@\n+export const token = process.env.X;\n const y = 2;';
-function world({ reviews = [], heads = [HEAD], turns, modelStatus = [], draft = false, files = null } = {}) {
+function world({ reviews = [], heads = [HEAD], turns, modelStatus = [], draft = false, files = null, counts = {} } = {}) {
   const calls = { posted: [], model: [], sleeps: 0 };
   let headReads = 0;
   const json = (body, status = 200, headers = {}) => ({ ok: status < 300, status, headers: new Headers(headers), json: async () => body, text: async () => JSON.stringify(body) });
@@ -284,7 +284,8 @@ function world({ reviews = [], heads = [HEAD], turns, modelStatus = [], draft = 
     }
     const p = u.pathname;
     if (init.method === 'POST' && p.endsWith('/reviews')) { const b = JSON.parse(init.body); calls.posted.push({ ...b, auth: init.headers.authorization }); return json({ html_url: 'https://x/review/1' }); }
-    if (/\/pulls\/7$/.test(p)) { const sha = heads[Math.min(headReads++, heads.length - 1)]; return json({ number: 7, state: 'open', draft, title: 'feat: add token', body: 'Adds it.', user: { login: 'askalf' }, head: { sha, ref: 'feat/x', repo: { full_name: 'askalf/r' } }, base: { ref: 'main', repo: { full_name: 'askalf/r' } } }); }
+    // changed_files and commits match what /files and /commits list unless counts says otherwise.
+    if (/\/pulls\/7$/.test(p)) { const sha = heads[Math.min(headReads++, heads.length - 1)]; return json({ number: 7, state: 'open', draft, title: 'feat: add token', body: 'Adds it.', user: { login: 'askalf' }, head: { sha, ref: 'feat/x', repo: { full_name: 'askalf/r' } }, base: { ref: 'main', repo: { full_name: 'askalf/r' } }, changed_files: files ? files.length : 1, commits: 1, ...counts }); }
     if (p.endsWith('/reviews')) return json(u.searchParams.get('page') === '1' ? reviews : []);
     if (p.endsWith('/files')) return json(u.searchParams.get('page') === '1' ? (files ?? [{ filename: 'src/b.js', status: 'modified', additions: 1, deletions: 0, patch: PATCH }]) : []);
     if (p.endsWith('/commits')) return json(u.searchParams.get('page') === '1' ? [{ sha: HEAD, commit: { message: 'feat: add token' } }] : []);
@@ -873,7 +874,7 @@ console.log('\n  pin bump');
 
 // ---------- an approval carries over a merge of the base ----------
 {
-  const { diffFingerprint, carriedApproval, carriedBody } = reviewModule;
+  const { diffFingerprint, carriedApproval, carriedBody, listedInFull } = reviewModule;
   const pr = { title: 'feat: add token', body: 'Adds it.', base: { ref: 'main' } };
   const files = [{ filename: 'src/b.js', status: 'modified', sha: 'aaa', additions: 1, deletions: 0, patch: PATCH }];
   const own = [{ sha: HEAD, parents: [{ sha: 'p' }], commit: { message: 'feat: add token' } }];
@@ -894,6 +895,11 @@ console.log('\n  pin bump');
   check('a file GitHub shows no patch for leaves no fingerprint, so nothing carries over',
     diffFingerprint(pr, [...files, { filename: 'big.bin', status: 'modified', sha: 'c' }], own) === ''
       && carriedApproval([approval('')], '') === null);
+  check('only lists as long as the PR\'s own file and commit counts are listed in full',
+    listedInFull({ ...pr, changed_files: 1, commits: 1 }, files, own)
+      && !listedInFull({ ...pr, changed_files: 1, commits: 251 }, files, own)
+      && !listedInFull({ ...pr, changed_files: 3001, commits: 1 }, files, own)
+      && !listedInFull(pr, files, own));
   check('a changed file, title, description, base or own commit message changes it',
     diffFingerprint(pr, [{ ...files[0], sha: 'bbb' }], own) !== fp
     && diffFingerprint({ ...pr, title: 'x' }, files, own) !== fp
@@ -933,6 +939,19 @@ console.log('\n  pin bump');
     const r = await runReview(ctx);
     check('a changed change is read in full, and its body carries the fingerprint',
       calls.model.length > 0 && r.outcome === 'posted' && calls.posted[0].body.includes(`<!-- redline:diff=${worldFp} -->`));
+  }
+  {
+    // GitHub lists at most 250 commits, so a commit appended past them leaves the listed commits and
+    // files, and the fingerprint, just as they were when the change was approved.
+    const { ctx, calls } = world({ reviews: [approval(worldFp)], counts: { commits: 251 }, turns: [submit(APPROVE)] });
+    const r = await runReview(ctx);
+    check('a PR with more commits than GitHub listed is read in full, and its body carries no fingerprint',
+      calls.model.length > 0 && r.outcome === 'posted' && !calls.posted[0].body.includes('<!-- redline:diff='));
+  }
+  {
+    const { ctx, calls } = world({ reviews: [approval(worldFp)], counts: { changed_files: 3001 }, turns: [submit(APPROVE)] });
+    await runReview(ctx);
+    check('so is a PR with more files than GitHub listed', calls.model.length > 0);
   }
 }
 
