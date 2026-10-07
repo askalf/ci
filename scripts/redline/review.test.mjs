@@ -929,6 +929,19 @@ console.log('\n  pin bump');
         && calls.posted[0].body.includes(`<!-- redline:head=${HEAD} -->`));
   }
   {
+    // The head moves between the first PR read and the carry-over's publication.
+    const { ctx, calls } = world({ reviews: [approval(worldFp)], heads: [HEAD, OTHER], turns: [submit(APPROVE)] });
+    const r = await runReview(ctx);
+    check('a head that moved before the carry-over is published: skipped, nothing posted or recorded',
+      r.outcome === 'skipped' && /head moved/.test(r.reason) && calls.posted.length === 0 && r.record === undefined && calls.model.length === 0);
+  }
+  {
+    const { ctx, calls } = world({ reviews: [approval(worldFp)], heads: [HEAD, OTHER], turns: [submit(APPROVE)] });
+    ctx.reviewToken = '';
+    const r = await runReview(ctx);
+    check('without a token too: no approval record for a moved head', r.outcome === 'skipped' && r.record === undefined && calls.posted.length === 0);
+  }
+  {
     const { ctx, calls } = world({ reviews: [approval(worldFp)], turns: [submit(APPROVE)] });
     ctx.reread = true;
     await runReview(ctx);

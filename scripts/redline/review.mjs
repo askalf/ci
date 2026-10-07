@@ -747,6 +747,10 @@ export async function runReview(ctx) {
     ctx.log?.(`the change is unchanged since ${String(prior.commit_id ?? '').slice(0, 7)}; its approval carries over to ${headSha.slice(0, 7)}`);
     const body = carriedBody(prior, headSha, fingerprint);
     if (ctx.dryRun) return { outcome: 'dry-run', verdict: 'APPROVE', body };
+    // The files and commits read above are the PR's current ones, not headSha's: confirm the head
+    // did not move while they were read, or the fingerprint may be another head's.
+    const now = await gh(ctx, `/repos/${repo}/pulls/${n}`);
+    if (now.head.sha !== headSha) return { outcome: 'skipped', reason: `head moved to ${now.head.sha.slice(0, 7)} during the review` };
     const record = (posted) => verdictRecord({ repo, pr: n, headSha, event: 'APPROVE', body, comments: [], posted });
     if (!ctx.reviewToken) return { outcome: 'unposted', verdict: 'APPROVE', record: record(false) };
     const posted = await gh(ctx, `/repos/${repo}/pulls/${n}/reviews`, {
