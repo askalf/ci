@@ -305,16 +305,24 @@ export function renderBody(review, verdict, headSha, notes = [], fingerprint = '
   return parts.join('\n\n');
 }
 
+/** A merge of a branch into the PR branch in git's own words, with nothing else in the message. */
+const ROUTINE_MERGE = /^Merge (?:remote-tracking )?branch '[\w./-]+'(?: of [\w./:@-]+)? into [\w./-]+\n?$/;
+
 /**
- * What a review reads, minus what a merge of the base into the PR branch changes: the title and
- * description, each changed file's name, status and blob, and the messages of the PR's own (non-merge)
- * commits. A PR brought up to date with its base keeps its fingerprint; any change to what it
- * proposes, its text or its commit messages does not. Pure.
+ * The identity of what a review reads: the title, description and base; each changed file's name,
+ * status, previous name, blob and patch against the base, with only the hunk line numbers dropped;
+ * and every commit message but a routine merge's. Merging the base in keeps it when the merge changes
+ * none of the PR's files relative to the base. A base change to a file the PR changes alters that
+ * file's patch, and any other commit message counts. A file whose patch GitHub does not show (too
+ * large, or binary) leaves the change unidentified: the result is '' and nothing carries over. Pure.
  */
 export function diffFingerprint(pr, files, commits) {
-  const own = commits.filter((c) => (c.parents?.length ?? 1) < 2).map((c) => String(c.commit?.message ?? '')).sort();
-  const changed = files.map((f) => [f.filename, f.status, f.sha ?? '', f.previous_filename ?? '']).sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
-  return createHash('sha256').update(JSON.stringify({ title: pr.title ?? '', body: pr.body ?? '', base: pr.base?.ref ?? '', changed, own })).digest('hex');
+  if (files.some((f) => typeof f.patch !== 'string')) return '';
+  const messages = [...new Set(commits.map((c) => String(c.commit?.message ?? '')).filter((m) => !ROUTINE_MERGE.test(m)))].sort();
+  const changed = files
+    .map((f) => [f.filename, f.status, f.previous_filename ?? '', f.sha ?? '', f.patch.replace(/^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@/gm, '@@')])
+    .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+  return createHash('sha256').update(JSON.stringify({ title: pr.title ?? '', body: pr.body ?? '', base: pr.base?.ref ?? '', changed, messages })).digest('hex');
 }
 
 /**
@@ -323,6 +331,7 @@ export function diffFingerprint(pr, files, commits) {
  * fingerprint. A later request for changes, or no fingerprint, means a full review. Pure.
  */
 export function carriedApproval(reviews, fingerprint) {
+  if (!fingerprint) return null;
   let last = null;
   for (const r of reviews) {
     if ((r.user?.login ?? '') !== REVIEWER_LOGIN) continue;
@@ -340,7 +349,7 @@ export function carriedBody(prior, headSha, fingerprint) {
     .replace(/\n\n<!-- redline:head=[0-9a-f]+ -->/g, '')
     .replace(/\n\n<!-- redline:diff=[0-9a-f]+ -->/g, '')
     .replace(/\n\n_The change is unchanged since [^_\n]+_/g, '');
-  return [kept, `_The change is unchanged since ${String(prior.commit_id ?? '').slice(0, 7)} (its files, text and commits; the base was merged in), so this verdict carries over._`,
+  return [kept, `_The change is unchanged since ${String(prior.commit_id ?? '').slice(0, 7)} (the same files and patches against the base, text and commits), so this verdict carries over._`,
     `<!-- redline:head=${headSha} -->`, `<!-- redline:diff=${fingerprint} -->`].join('\n\n');
 }
 
@@ -719,10 +728,10 @@ export async function runReview(ctx) {
   const files = await ghAll(ctx, `/repos/${repo}/pulls/${n}/files`);
   const commits = await ghAll(ctx, `/repos/${repo}/pulls/${n}/commits`, 3);
   const fingerprint = diffFingerprint(pr, files, commits);
-  // A head that only brought the base in proposes exactly what was approved: carry the approval over
-  // instead of reading the same change again (a merge of the base into every open PR was a quarter
-  // of a busy repo's reviews).
-  const prior = ctx.reread ? null : carriedApproval(reviews, fingerprint);
+  // The reviewer's latest verdict approved a head with this same fingerprint: the same files with the
+  // same patches against the base, the same text and no new commit message but a routine merge. That
+  // approval carries over; a re-read, or a change no fingerprint covers, is read in full.
+  const prior = ctx.reread || !fingerprint ? null : carriedApproval(reviews, fingerprint);
   if (prior) {
     ctx.log?.(`the change is unchanged since ${String(prior.commit_id ?? '').slice(0, 7)}; its approval carries over to ${headSha.slice(0, 7)}`);
     const body = carriedBody(prior, headSha, fingerprint);

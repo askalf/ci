@@ -879,17 +879,27 @@ console.log('\n  pin bump');
   const own = [{ sha: HEAD, parents: [{ sha: 'p' }], commit: { message: 'feat: add token' } }];
   const merge = { sha: 'm', parents: [{ sha: 'p1' }, { sha: 'p2' }], commit: { message: "Merge branch 'main' into feat/x" } };
   const fp = diffFingerprint(pr, files, own);
+  const approval = (fpx, commit = OTHER, state = 'DISMISSED') => ({ user: { login: REVIEWER_LOGIN }, state, commit_id: commit,
+    body: `**Verdict: approve.** Fine.\n\n<!-- redline:head=${commit} -->\n\n<!-- redline:diff=${fpx} -->` });
   check('a merge of the base keeps the fingerprint', diffFingerprint(pr, files, [...own, merge]) === fp);
-  check('file order does not matter', diffFingerprint(pr, [...files, { filename: 'a.js', status: 'added', sha: 'b' }], own)
-    === diffFingerprint(pr, [{ filename: 'a.js', status: 'added', sha: 'b' }, ...files], own));
+  const added = { filename: 'a.js', status: 'added', sha: 'b', patch: '@@ -0,0 +1 @@\n+export {};' };
+  check('file order does not matter', diffFingerprint(pr, [...files, added], own) === diffFingerprint(pr, [added, ...files], own));
+  check('a base change to a file the PR changes alters it, though the merge kept the PR blob',
+    diffFingerprint(pr, [{ ...files[0], patch: PATCH.replace(' const y = 2;', ' const y = 3;') }], own) !== fp);
+  check('hunk line numbers that only moved do not', diffFingerprint(pr, [{ ...files[0], patch: PATCH.replace('@@ -1 +1,2 @@', '@@ -40 +40,2 @@') }], own) === fp);
+  check('a merge with any message but git\'s own words changes it',
+    diffFingerprint(pr, files, [...own, { ...merge, commit: { message: "Merge branch 'main' into feat/x\n\nCo-Authored-By: someone" } }]) !== fp
+    && diffFingerprint(pr, files, [...own, { ...merge, commit: { message: 'Merge in the token: ghp_x' } }]) !== fp
+    && diffFingerprint(pr, files, [...own, { ...merge, commit: { message: "Merge remote-tracking branch 'origin/main' into feat/x" } }]) === fp);
+  check('a file GitHub shows no patch for leaves no fingerprint, so nothing carries over',
+    diffFingerprint(pr, [...files, { filename: 'big.bin', status: 'modified', sha: 'c' }], own) === ''
+      && carriedApproval([approval('')], '') === null);
   check('a changed file, title, description, base or own commit message changes it',
     diffFingerprint(pr, [{ ...files[0], sha: 'bbb' }], own) !== fp
     && diffFingerprint({ ...pr, title: 'x' }, files, own) !== fp
     && diffFingerprint({ ...pr, body: 'Adds it. Also y.' }, files, own) !== fp
     && diffFingerprint({ ...pr, base: { ref: 'next' } }, files, own) !== fp
     && diffFingerprint(pr, files, [...own, { sha: 'c', parents: [{ sha: 'x' }], commit: { message: 'fix: y' } }]) !== fp);
-  const approval = (fpx, commit = OTHER, state = 'DISMISSED') => ({ user: { login: REVIEWER_LOGIN }, state, commit_id: commit,
-    body: `**Verdict: approve.** Fine.\n\n<!-- redline:head=${commit} -->\n\n<!-- redline:diff=${fpx} -->` });
   const changes = (commit = OTHER) => ({ user: { login: REVIEWER_LOGIN }, state: 'CHANGES_REQUESTED', commit_id: commit, body: `**Verdict: request changes.** No.\n\n<!-- redline:head=${commit} -->` });
   check('a dismissed approval with this fingerprint carries over', carriedApproval([approval(fp)], fp)?.commit_id === OTHER);
   check('another fingerprint, or none, does not', carriedApproval([approval('0'.repeat(64))], fp) === null
