@@ -871,6 +871,61 @@ console.log('\n  pin bump');
   }
 }
 
+// ---------- an approval carries over a merge of the base ----------
+{
+  const { diffFingerprint, carriedApproval, carriedBody } = reviewModule;
+  const pr = { title: 'feat: add token', body: 'Adds it.', base: { ref: 'main' } };
+  const files = [{ filename: 'src/b.js', status: 'modified', sha: 'aaa', additions: 1, deletions: 0, patch: PATCH }];
+  const own = [{ sha: HEAD, parents: [{ sha: 'p' }], commit: { message: 'feat: add token' } }];
+  const merge = { sha: 'm', parents: [{ sha: 'p1' }, { sha: 'p2' }], commit: { message: "Merge branch 'main' into feat/x" } };
+  const fp = diffFingerprint(pr, files, own);
+  check('a merge of the base keeps the fingerprint', diffFingerprint(pr, files, [...own, merge]) === fp);
+  check('file order does not matter', diffFingerprint(pr, [...files, { filename: 'a.js', status: 'added', sha: 'b' }], own)
+    === diffFingerprint(pr, [{ filename: 'a.js', status: 'added', sha: 'b' }, ...files], own));
+  check('a changed file, title, description, base or own commit message changes it',
+    diffFingerprint(pr, [{ ...files[0], sha: 'bbb' }], own) !== fp
+    && diffFingerprint({ ...pr, title: 'x' }, files, own) !== fp
+    && diffFingerprint({ ...pr, body: 'Adds it. Also y.' }, files, own) !== fp
+    && diffFingerprint({ ...pr, base: { ref: 'next' } }, files, own) !== fp
+    && diffFingerprint(pr, files, [...own, { sha: 'c', parents: [{ sha: 'x' }], commit: { message: 'fix: y' } }]) !== fp);
+  const approval = (fpx, commit = OTHER, state = 'DISMISSED') => ({ user: { login: REVIEWER_LOGIN }, state, commit_id: commit,
+    body: `**Verdict: approve.** Fine.\n\n<!-- redline:head=${commit} -->\n\n<!-- redline:diff=${fpx} -->` });
+  const changes = (commit = OTHER) => ({ user: { login: REVIEWER_LOGIN }, state: 'CHANGES_REQUESTED', commit_id: commit, body: `**Verdict: request changes.** No.\n\n<!-- redline:head=${commit} -->` });
+  check('a dismissed approval with this fingerprint carries over', carriedApproval([approval(fp)], fp)?.commit_id === OTHER);
+  check('another fingerprint, or none, does not', carriedApproval([approval('0'.repeat(64))], fp) === null
+    && carriedApproval([{ ...approval(fp), body: '**Verdict: approve.** Fine.' }], fp) === null);
+  check('a later request for changes stops it', carriedApproval([approval(fp), changes()], fp) === null);
+  check('only the reviewer counts', carriedApproval([{ ...approval(fp), user: { login: 'someone' } }], fp) === null);
+  const body = carriedBody(approval(fp), HEAD, fp);
+  check('the carried body names the new head and the fingerprint once each, and says why',
+    body.split('<!-- redline:head=').length === 2 && body.includes(`<!-- redline:head=${HEAD} -->`)
+      && body.split('<!-- redline:diff=').length === 2 && body.includes('unchanged since 34b7875') && body.startsWith('**Verdict: approve.**'));
+  check('carrying twice keeps one note', carriedBody({ body, commit_id: HEAD }, OTHER, fp).split('carries over').length === 2);
+
+  // End to end: the world's PR is the same change an earlier head approved.
+  const worldFp = diffFingerprint({ title: 'feat: add token', body: 'Adds it.', base: { ref: 'main' } },
+    [{ filename: 'src/b.js', status: 'modified', additions: 1, deletions: 0, patch: PATCH }], [{ sha: HEAD, commit: { message: 'feat: add token' } }]);
+  {
+    const { ctx, calls } = world({ reviews: [approval(worldFp)], turns: [submit(APPROVE)] });
+    const r = await runReview(ctx);
+    check('an unchanged change is approved at the new head with no model call',
+      r.outcome === 'posted' && r.verdict === 'APPROVE' && calls.model.length === 0 && calls.posted[0].event === 'APPROVE'
+        && calls.posted[0].body.includes(`<!-- redline:head=${HEAD} -->`));
+  }
+  {
+    const { ctx, calls } = world({ reviews: [approval(worldFp)], turns: [submit(APPROVE)] });
+    ctx.reread = true;
+    await runReview(ctx);
+    check('a re-read always reads the change', calls.model.length > 0);
+  }
+  {
+    const { ctx, calls } = world({ reviews: [approval('1'.repeat(64))], turns: [submit(APPROVE)] });
+    const r = await runReview(ctx);
+    check('a changed change is read in full, and its body carries the fingerprint',
+      calls.model.length > 0 && r.outcome === 'posted' && calls.posted[0].body.includes(`<!-- redline:diff=${worldFp} -->`));
+  }
+}
+
 rmSync(root, { recursive: true, force: true });
 rmSync(outside, { recursive: true, force: true });
 console.log(`\n  ${pass} pass, ${fail} fail`);

@@ -55,6 +55,7 @@
 // no bundled fallback, and a variable that is unset, a file that cannot be read or an empty file ends
 // the run. REDLINE_VERDICT_FILE, when set, is where verdict.json goes.
 
+import { createHash } from 'node:crypto';
 import { readFileSync, readdirSync, lstatSync, realpathSync, appendFileSync, openSync, readSync, closeSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
 import { join, resolve, relative, isAbsolute, sep, dirname } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
@@ -286,7 +287,7 @@ export function finalVerdict(review) {
 
 const fence = (s) => { const t = String(s); const n = Math.max(3, ...(t.match(/`+/g) ?? []).map((m) => m.length + 1)); return '`'.repeat(n); };
 
-export function renderBody(review, verdict, headSha, notes = []) {
+export function renderBody(review, verdict, headSha, notes = [], fingerprint = '') {
   const parts = [`**Verdict: ${verdict === 'APPROVE' ? 'approve' : 'request changes'}.** ${review.summary}`];
   const blocking = review.findings.filter((f) => f.severity === 'blocking');
   const minor = review.findings.filter((f) => f.severity === 'minor');
@@ -300,7 +301,47 @@ export function renderBody(review, verdict, headSha, notes = []) {
   for (const n of notes) parts.push(`_${n}_`);
   if (verdict === 'REQUEST_CHANGES') parts.push(`rule:${review.rule}`);
   parts.push(`<!-- redline:head=${headSha} -->`);
+  if (fingerprint) parts.push(`<!-- redline:diff=${fingerprint} -->`);
   return parts.join('\n\n');
+}
+
+/**
+ * What a review reads, minus what a merge of the base into the PR branch changes: the title and
+ * description, each changed file's name, status and blob, and the messages of the PR's own (non-merge)
+ * commits. A PR brought up to date with its base keeps its fingerprint; any change to what it
+ * proposes, its text or its commit messages does not. Pure.
+ */
+export function diffFingerprint(pr, files, commits) {
+  const own = commits.filter((c) => (c.parents?.length ?? 1) < 2).map((c) => String(c.commit?.message ?? '')).sort();
+  const changed = files.map((f) => [f.filename, f.status, f.sha ?? '', f.previous_filename ?? '']).sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+  return createHash('sha256').update(JSON.stringify({ title: pr.title ?? '', body: pr.body ?? '', base: pr.base?.ref ?? '', changed, own })).digest('hex');
+}
+
+/**
+ * The approval to carry over to a new head: the reviewer's latest verdict on this PR (at any head,
+ * dismissed or not, since a push dismisses it) when that verdict approved and carries this
+ * fingerprint. A later request for changes, or no fingerprint, means a full review. Pure.
+ */
+export function carriedApproval(reviews, fingerprint) {
+  let last = null;
+  for (const r of reviews) {
+    if ((r.user?.login ?? '') !== REVIEWER_LOGIN) continue;
+    const body = String(r.body ?? '');
+    if (!/^\*\*Verdict: (approve|request changes)\.\*\*/.test(body)) continue;
+    last = r;
+  }
+  if (!last || !String(last.body).startsWith('**Verdict: approve.**')) return null;
+  return String(last.body).includes(`<!-- redline:diff=${fingerprint} -->`) ? last : null;
+}
+
+/** The carried approval's body, at the new head. Pure. */
+export function carriedBody(prior, headSha, fingerprint) {
+  const kept = String(prior.body)
+    .replace(/\n\n<!-- redline:head=[0-9a-f]+ -->/g, '')
+    .replace(/\n\n<!-- redline:diff=[0-9a-f]+ -->/g, '')
+    .replace(/\n\n_The change is unchanged since [^_\n]+_/g, '');
+  return [kept, `_The change is unchanged since ${String(prior.commit_id ?? '').slice(0, 7)} (its files, text and commits; the base was merged in), so this verdict carries over._`,
+    `<!-- redline:head=${headSha} -->`, `<!-- redline:diff=${fingerprint} -->`].join('\n\n');
 }
 
 /** The standing Redline verdict at this head, or null. */
@@ -671,15 +712,33 @@ export async function runReview(ctx) {
   if (pr.draft) return { outcome: 'skipped', reason: 'draft PR' };
 
   // A re-read reviews the head again: the verdict standing there is the one being reconsidered.
-  const standing = ctx.reread ? null : verdictAtHead(await ghAll(ctx, `/repos/${repo}/pulls/${n}/reviews`), headSha);
+  const reviews = ctx.reread ? [] : await ghAll(ctx, `/repos/${repo}/pulls/${n}/reviews`);
+  const standing = ctx.reread ? null : verdictAtHead(reviews, headSha);
   if (standing) return { outcome: 'existing', verdict: standing.state === 'APPROVED' ? 'APPROVE' : 'REQUEST_CHANGES', url: standing.html_url };
 
   const files = await ghAll(ctx, `/repos/${repo}/pulls/${n}/files`);
+  const commits = await ghAll(ctx, `/repos/${repo}/pulls/${n}/commits`, 3);
+  const fingerprint = diffFingerprint(pr, files, commits);
+  // A head that only brought the base in proposes exactly what was approved: carry the approval over
+  // instead of reading the same change again (a merge of the base into every open PR was a quarter
+  // of a busy repo's reviews).
+  const prior = ctx.reread ? null : carriedApproval(reviews, fingerprint);
+  if (prior) {
+    ctx.log?.(`the change is unchanged since ${String(prior.commit_id ?? '').slice(0, 7)}; its approval carries over to ${headSha.slice(0, 7)}`);
+    const body = carriedBody(prior, headSha, fingerprint);
+    if (ctx.dryRun) return { outcome: 'dry-run', verdict: 'APPROVE', body };
+    const record = (posted) => verdictRecord({ repo, pr: n, headSha, event: 'APPROVE', body, comments: [], posted });
+    if (!ctx.reviewToken) return { outcome: 'unposted', verdict: 'APPROVE', record: record(false) };
+    const posted = await gh(ctx, `/repos/${repo}/pulls/${n}/reviews`, {
+      token: ctx.reviewToken, method: 'POST',
+      body: { commit_id: headSha, event: 'APPROVE', body },
+    });
+    return { outcome: 'posted', verdict: 'APPROVE', url: posted.html_url, record: record(true) };
+  }
   if (ctx.pinModel && ctx.pinModel !== ctx.model && pinOnly(files)) {
     ctx.log?.(`the PR only moves Redline pins; read on ${ctx.pinModel} instead of ${ctx.model}`);
     ctx.model = ctx.pinModel;
   }
-  const commits = await ghAll(ctx, `/repos/${repo}/pulls/${n}/commits`, 3);
   const diff = planDiff(files);
   const brief = buildBrief(pr, files, commits, diff.text);
   const corpus = [...corpusOf(brief), ...checkoutCorpus(ctx.checkout, unshownFiles(files, diff.omitted))];
@@ -774,10 +833,10 @@ export async function runReview(ctx) {
   if (!review) throw new Error(`no review submitted within ${LIMITS.turns} turns`);
 
   const verdict = finalVerdict(review);
-  if (ctx.dryRun) return { outcome: 'dry-run', verdict, body: renderBody(review, verdict, headSha, notes) };
+  if (ctx.dryRun) return { outcome: 'dry-run', verdict, body: renderBody(review, verdict, headSha, notes, fingerprint) };
   const now = await gh(ctx, `/repos/${repo}/pulls/${n}`);
   if (now.head.sha !== headSha) return { outcome: 'skipped', reason: `head moved to ${now.head.sha.slice(0, 7)} during the review` };
-  const body = renderBody(review, verdict, headSha, notes);
+  const body = renderBody(review, verdict, headSha, notes, fingerprint);
   const record = (posted) => verdictRecord({ repo, pr: n, headSha, event: verdict, body, comments: [], posted });
   if (!ctx.reviewToken) return { outcome: 'unposted', verdict, record: record(false) };
   const posted = await gh(ctx, `/repos/${repo}/pulls/${n}/reviews`, {
