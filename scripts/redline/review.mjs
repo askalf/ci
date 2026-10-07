@@ -57,7 +57,7 @@
 
 import { createHash } from 'node:crypto';
 import { readFileSync, readdirSync, lstatSync, realpathSync, appendFileSync, openSync, readSync, closeSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
-import { join, resolve, relative, isAbsolute, sep, dirname } from 'node:path';
+import { join, resolve, relative, isAbsolute, sep, dirname, posix } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { request as httpRequest } from 'node:http';
@@ -113,6 +113,7 @@ export const LIMITS = {
   readLines: 400, readBytes: 64_000, listEntries: 400,
   grepResults: 80, grepFiles: 5_000, grepFileBytes: 1_000_000, grepPattern: 200, searchMs: 10_000,
   corpusBytes: 8_000_000,
+  contextChars: 20_000, compareFiles: 300,
   // timeMs forces the submit; past hardMs no model call starts or retries, so the run ends inside
   // the job's 20-minute timeout.
   turns: 30, forceSubmitAt: 24, timeMs: 12 * 60_000, hardMs: 18 * 60_000, maxTokens: 8_000, modelTimeoutMs: 240_000,
@@ -287,7 +288,7 @@ export function finalVerdict(review) {
 
 const fence = (s) => { const t = String(s); const n = Math.max(3, ...(t.match(/`+/g) ?? []).map((m) => m.length + 1)); return '`'.repeat(n); };
 
-export function renderBody(review, verdict, headSha, notes = [], fingerprint = '') {
+export function renderBody(review, verdict, headSha, notes = [], fingerprint = '', context = []) {
   const parts = [`**Verdict: ${verdict === 'APPROVE' ? 'approve' : 'request changes'}.** ${review.summary}`];
   const blocking = review.findings.filter((f) => f.severity === 'blocking');
   const minor = review.findings.filter((f) => f.severity === 'minor');
@@ -302,6 +303,9 @@ export function renderBody(review, verdict, headSha, notes = [], fingerprint = '
   if (verdict === 'REQUEST_CHANGES') parts.push(`rule:${review.rule}`);
   parts.push(`<!-- redline:head=${headSha} -->`);
   if (fingerprint) parts.push(`<!-- redline:diff=${fingerprint} -->`);
+  // Only an approval carries over, and only with what it read: a context too long to post leaves none.
+  const marker = fingerprint && verdict === 'APPROVE' ? contextMarker(context) : '';
+  if (marker) parts.push(marker);
   return parts.join('\n\n');
 }
 
@@ -323,6 +327,102 @@ export function diffFingerprint(pr, files, commits) {
     .map((f) => [f.filename, f.status, f.previous_filename ?? '', f.sha ?? '', f.patch.replace(/^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@/gm, '@@')])
     .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
   return createHash('sha256').update(JSON.stringify({ title: pr.title ?? '', body: pr.body ?? '', base: pr.base?.ref ?? '', changed, messages })).digest('hex');
+}
+
+/**
+ * What a tool call's answer depends on, as context entries: a path read or searched is everything
+ * under it; a directory listed is 'dir/', the names under it. A path through a symlink also names
+ * where it resolves. The root is '.'. A path outside the checkout names nothing.
+ */
+export function toolContext(root, name, input = {}) {
+  if (name !== 'redline_read' && name !== 'redline_search' && name !== 'redline_list') return [];
+  const clean = (p) => {
+    const rel = posix.normalize(String(p ?? '').replace(/\\/g, '/').replace(/^\/+/, '') || '.').replace(/\/+$/, '') || '.';
+    return rel === '..' || rel.startsWith('../') ? null : rel;
+  };
+  const named = clean(input.path);
+  if (!named) return [];
+  let real = null;
+  try { real = clean(relative(realpathSync(root), safePath(root, input.path)).split(sep).join('/')); } catch { /* not there */ }
+  return [...new Set([named, real].filter(Boolean))].map((p) => (name === 'redline_list' ? `${p}/` : p));
+}
+
+/** A review's context as a body marker, or '' when it is too long to post. Pure. */
+export function contextMarker(context) {
+  const text = [...new Set(context)].sort().map((p) => encodeURIComponent(p).replace(/%2F/g, '/')).join(' ');
+  return text.length <= LIMITS.contextChars ? `<!-- redline:context=${text} -->` : '';
+}
+
+/** The context a review body records, or null when it records none. Pure. */
+export function readContext(body) {
+  const m = /<!-- redline:context=(\S*(?: \S+)*) -->/.exec(String(body ?? ''));
+  if (!m) return null;
+  try { return m[1].split(' ').filter(Boolean).map(decodeURIComponent); } catch { return null; }
+}
+
+const NAME_CHANGES = new Set(['added', 'removed', 'renamed', 'copied']);
+const under = (dir, p) => dir === '.' || p === dir || p.startsWith(`${dir}/`);
+const dirOf = (p) => posix.dirname(p);
+const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/**
+ * The names a file goes by in code that uses it: its name without the extension, and its
+ * directory's name (a Go package, a Python package, an index module). Pure.
+ */
+export function namesOf(path) {
+  const base = posix.basename(path);
+  const stem = base.includes('.') && !base.startsWith('.') ? base.slice(0, base.lastIndexOf('.')) : base;
+  const dir = posix.basename(dirOf(path));
+  return [...new Set([stem, dir === '.' ? '' : dir].filter(Boolean))];
+}
+
+/**
+ * Whether a file changed between two heads may bear on a review of the PR's files: it is under a
+ * path the review read or searched, its name came or went under a directory the review listed, it
+ * sits in a directory beside one of the PR's files, or the PR's files name it (namesOf) in their
+ * text at the new head. Pure.
+ */
+export function bearsOn(file, { context, prFiles, prText }) {
+  const paths = [file.filename, file.previous_filename].filter(Boolean);
+  if (context.some((c) => (c.endsWith('/')
+    ? NAME_CHANGES.has(file.status) && paths.some((p) => under(c.slice(0, -1), p))
+    : paths.some((p) => under(c, p))))) return true;
+  const dirs = new Set(prFiles.map((f) => dirOf(f.filename)));
+  if (paths.some((p) => dirs.has(dirOf(p)))) return true;
+  return paths.some((p) => namesOf(p).some((n) => new RegExp(`(?<![\\w$-])${escapeRe(n)}(?![\\w$-])`).test(prText)));
+}
+
+/**
+ * Whether an approval reached at one head still holds at a head that differs from it only by a
+ * merge of the base (the fingerprints match). The PR's own patches being the same is not enough: the
+ * base can change a file the change depends on, a helper it calls say. So the new head must descend
+ * from the approved one (compare status 'ahead'), GitHub must have listed every file changed between
+ * them (it lists at most 300), the review's context must be on record, the PR's files must have been
+ * read in full (prText not null), and no file changed between the heads may bear on the review
+ * (bearsOn). Anything else is a full review. Pure.
+ */
+export function contextKept(compare, context, prFiles, prText) {
+  if (!Array.isArray(context) || typeof prText !== 'string' || compare?.status !== 'ahead') return false;
+  if (!Array.isArray(compare.files) || compare.files.length >= LIMITS.compareFiles) return false;
+  return !compare.files.some((f) => bearsOn(f, { context, prFiles, prText }));
+}
+
+/**
+ * The text of the PR's changed files in the checkout, joined, for bearsOn's name search; null when
+ * a file present at the head cannot be read in full (too large, binary, or outside the checkout).
+ */
+export function prFilesText(root, files) {
+  const out = [];
+  for (const f of files) {
+    if (f.status === 'removed') continue;
+    try {
+      const file = safePath(root, f.filename);
+      const st = lstatSync(file);
+      if (!st.isFile() || st.size > LIMITS.grepFileBytes || isBinary(file)) return null;
+      out.push(readFileSync(file, 'utf8'));
+    } catch { return null; }
+  }
+  return out.join('\n');
 }
 
 /**
@@ -358,9 +458,11 @@ export function carriedBody(prior, headSha, fingerprint) {
   const kept = String(prior.body)
     .replace(/\n\n<!-- redline:head=[0-9a-f]+ -->/g, '')
     .replace(/\n\n<!-- redline:diff=[0-9a-f]+ -->/g, '')
+    .replace(/\n\n<!-- redline:context=[^\n]*? -->/g, '')
     .replace(/\n\n_The change is unchanged since [^_\n]+_/g, '');
-  return [kept, `_The change is unchanged since ${String(prior.commit_id ?? '').slice(0, 7)} (the same files and patches against the base, text and commits), so this verdict carries over._`,
-    `<!-- redline:head=${headSha} -->`, `<!-- redline:diff=${fingerprint} -->`].join('\n\n');
+  const context = readContext(prior.body) ?? [];
+  return [kept, `_The change is unchanged since ${String(prior.commit_id ?? '').slice(0, 7)} (the same files and patches against the base, text and commits, and nothing it read or uses changed since), so this verdict carries over._`,
+    `<!-- redline:head=${headSha} -->`, `<!-- redline:diff=${fingerprint} -->`, contextMarker(context)].filter(Boolean).join('\n\n');
 }
 
 /** The standing Redline verdict at this head, or null. */
@@ -740,9 +842,20 @@ export async function runReview(ctx) {
   const fingerprint = listedInFull(pr, files, commits) ? diffFingerprint(pr, files, commits) : '';
   // The reviewer's latest verdict approved a head with this same fingerprint: the same files with the
   // same patches against the base, the same text and no new commit message but a routine merge. That
-  // approval carries over; a re-read, or a change no fingerprint covers (a file with no patch, or
-  // more files or commits than GitHub listed), is read in full.
-  const prior = ctx.reread || !fingerprint ? null : carriedApproval(reviews, fingerprint);
+  // approval carries over when nothing it read or the change uses moved between the two heads
+  // (contextKept); a re-read, or a change no fingerprint covers (a file with no patch, or more files
+  // or commits than GitHub listed), is read in full.
+  let prior = ctx.reread || !fingerprint ? null : carriedApproval(reviews, fingerprint);
+  if (prior) {
+    const context = readContext(prior.body);
+    const since = String(prior.commit_id ?? '');
+    const compare = context && /^[0-9a-f]{40}$/.test(since)
+      ? await gh(ctx, `/repos/${repo}/compare/${since}...${headSha}?per_page=${LIMITS.compareFiles}`) : null;
+    if (!contextKept(compare, context, files, prFilesText(ctx.checkout, files))) {
+      ctx.log?.(`the change is unchanged since ${since.slice(0, 7)}, but what it read or uses may have changed since; read in full`);
+      prior = null;
+    }
+  }
   if (prior) {
     ctx.log?.(`the change is unchanged since ${String(prior.commit_id ?? '').slice(0, 7)}; its approval carries over to ${headSha.slice(0, 7)}`);
     const body = carriedBody(prior, headSha, fingerprint);
@@ -773,6 +886,7 @@ export async function runReview(ctx) {
   let repaired = false;
   let textOnly = 0;
   const notes = [];
+  const context = [];
   // A text answer is not a review: nothing in prose is graded, grounded or posted. Five of eight
   // live runs on 2026-09-25 answered in prose for 25 turns straight, because the gateway between
   // this script and the model drops tool_choice, so the forced turns never forced anything.
@@ -826,6 +940,9 @@ export async function runReview(ctx) {
         results.push(force
           ? { type: 'tool_result', tool_use_id: u.id, is_error: true, content: 'The read budget is spent. Call redline_submit now with what you have read.' }
           : { type: 'tool_result', tool_use_id: u.id, content: runTool(ctx.checkout, u.name, u.input) });
+        // What the model read is what its verdict rests on; a later head that changes it gets a
+        // full review rather than this one's approval.
+        if (!force) context.push(...toolContext(ctx.checkout, u.name, u.input));
         continue;
       }
       const checked = checkSubmission(u.input);
@@ -857,10 +974,10 @@ export async function runReview(ctx) {
   if (!review) throw new Error(`no review submitted within ${LIMITS.turns} turns`);
 
   const verdict = finalVerdict(review);
-  if (ctx.dryRun) return { outcome: 'dry-run', verdict, body: renderBody(review, verdict, headSha, notes, fingerprint) };
+  if (ctx.dryRun) return { outcome: 'dry-run', verdict, body: renderBody(review, verdict, headSha, notes, fingerprint, context) };
   const now = await gh(ctx, `/repos/${repo}/pulls/${n}`);
   if (now.head.sha !== headSha) return { outcome: 'skipped', reason: `head moved to ${now.head.sha.slice(0, 7)} during the review` };
-  const body = renderBody(review, verdict, headSha, notes, fingerprint);
+  const body = renderBody(review, verdict, headSha, notes, fingerprint, context);
   const record = (posted) => verdictRecord({ repo, pr: n, headSha, event: verdict, body, comments: [], posted });
   if (!ctx.reviewToken) return { outcome: 'unposted', verdict, record: record(false) };
   const posted = await gh(ctx, `/repos/${repo}/pulls/${n}/reviews`, {
