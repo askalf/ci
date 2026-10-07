@@ -393,18 +393,33 @@ export function bearsOn(file, { context, prFiles, prText }) {
 }
 
 /**
+ * Whether a changed file is prose no code runs: Markdown, reStructuredText or AsciiDoc, or a
+ * license, notice, authors or changelog file. A dependency of the PR's code, direct or transitive,
+ * a configuration or a lockfile is never one, nor is a file whose name or previous name is not. Pure.
+ */
+export function inertFile(file) {
+  const paths = [file.filename, file.previous_filename].filter(Boolean);
+  return paths.length > 0 && paths.every((p) => {
+    const base = posix.basename(p);
+    return /\.(?:md|markdown|rst|adoc)$/i.test(base) || /^(?:LICEN[CS]E|COPYING|NOTICE|AUTHORS|CHANGELOG|CHANGES)(?:\.(?:md|txt))?$/i.test(base);
+  });
+}
+
+/**
  * Whether an approval reached at one head still holds at a head that differs from it only by a
  * merge of the base (the fingerprints match). The PR's own patches being the same is not enough: the
- * base can change a file the change depends on, a helper it calls say. So the new head must descend
- * from the approved one (compare status 'ahead'), GitHub must have listed every file changed between
- * them (it lists at most 300), the review's context must be on record, the PR's files must have been
- * read in full (prText not null), and no file changed between the heads may bear on the review
- * (bearsOn). Anything else is a full review. Pure.
+ * base can change a file the change depends on, a helper it calls or anything that helper calls in
+ * turn, and no reading of the PR's files can name that whole chain. So this fails closed: the new
+ * head must descend from the approved one (compare status 'ahead'), GitHub must have listed every
+ * file changed between them (it lists at most 300), every one of those files must be prose no code
+ * runs (inertFile), the review's context must be on record, the PR's files must have been read in
+ * full (prText not null), and none of the changed files may bear on the review (bearsOn), since a
+ * PR can read a document it names. Any code, configuration or lockfile change is a full review. Pure.
  */
 export function contextKept(compare, context, prFiles, prText) {
   if (!Array.isArray(context) || typeof prText !== 'string' || compare?.status !== 'ahead') return false;
   if (!Array.isArray(compare.files) || compare.files.length >= LIMITS.compareFiles) return false;
-  return !compare.files.some((f) => bearsOn(f, { context, prFiles, prText }));
+  return compare.files.every(inertFile) && !compare.files.some((f) => bearsOn(f, { context, prFiles, prText }));
 }
 
 /**

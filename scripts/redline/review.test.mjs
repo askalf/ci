@@ -974,7 +974,7 @@ console.log('\n  pin bump');
 
 // ---------- a carried approval needs what it read and what the change uses unchanged ----------
 {
-  const { diffFingerprint, contextMarker, readContext, toolContext, namesOf, bearsOn, contextKept, prFilesText } = reviewModule;
+  const { diffFingerprint, contextMarker, readContext, toolContext, namesOf, bearsOn, inertFile, contextKept, prFilesText } = reviewModule;
   const ctxRoot = mkdtempSync(join(tmpdir(), 'redline-ctx-'));
   mkdirSync(join(ctxRoot, 'src'));
   mkdirSync(join(ctxRoot, 'lib'));
@@ -1015,6 +1015,18 @@ console.log('\n  pin bump');
     !contextKept(ahead([]), null, prFiles, prText)
       && !contextKept(ahead(Array.from({ length: LIMITS.compareFiles }, (_, i) => ({ filename: `docs/${i}.md`, status: 'modified' }))), ['src/use.js'], prFiles, prText)
       && !contextKept(ahead([]), ['src/use.js'], prFiles, null) && prFilesText(ctxRoot, [{ filename: 'src/gone.js', status: 'modified' }]) === null);
+  check('prose no code runs is inert; code, configuration, lockfiles and a rename out of prose are not',
+    inertFile({ filename: 'docs/notes.md' }) && inertFile({ filename: 'LICENSE' }) && inertFile({ filename: 'CHANGELOG.md' })
+      && inertFile({ filename: 'guide/intro.rst' })
+      && !inertFile({ filename: 'backend/driver.js' }) && !inertFile({ filename: 'package-lock.json' }) && !inertFile({ filename: 'tsconfig.json' })
+      && !inertFile({ filename: '.github/workflows/ci.yml' }) && !inertFile({ filename: 'docs/conf.py' })
+      && !inertFile({ filename: 'src/x.js', previous_filename: 'docs/x.md', status: 'renamed' }));
+  check('a base change to a dependency of a dependency is not kept, though nothing the review read or the PR names changed',
+    !bears({ filename: 'backend/driver.js', status: 'modified' }, ['src/use.js', 'lib/helper.js'])
+      && !contextKept(ahead([{ filename: 'backend/driver.js', status: 'modified' }]), ['src/use.js', 'lib/helper.js'], prFiles, prText));
+  check('nor is any code change mixed in with prose, nor prose the review read',
+    !contextKept(ahead([{ filename: 'docs/notes.md', status: 'modified' }, { filename: 'pkg/kept.js', status: 'modified' }]), ['src/use.js'], prFiles, prText)
+      && !contextKept(ahead([{ filename: 'docs/notes.md', status: 'modified' }]), ['docs'], prFiles, prText));
 
   // End to end: the approved head read src/use.js only; the base then changed the helper it calls,
   // and the PR merged the base in, so its files, patches and messages are as they were.
@@ -1033,6 +1045,12 @@ console.log('\n  pin bump');
     const { r, calls } = await run({ reviews: [approved(['src/use.js'])], compare: ahead([{ filename: 'docs/notes.md', status: 'modified' }]) });
     check('a base change to nothing it read or uses carries the approval', calls.model.length === 0 && r.outcome === 'posted'
       && calls.posted[0].body.includes('carries over') && readContext(calls.posted[0].body)?.join() === 'src/use.js');
+  }
+  {
+    // src/use.js imports lib/helper.js, which imports backend/driver.js; the base changed only the driver.
+    const { calls } = await run({ reviews: [approved(['src/use.js', 'lib/helper.js'])], compare: ahead([{ filename: 'backend/driver.js', status: 'modified' }]) });
+    check('a base-only change to a dependency of the imported helper is read in full, not carried',
+      calls.compares === 1 && calls.model.length > 0 && !calls.posted[0].body.includes('carries over'));
   }
   {
     const { calls } = await run({ reviews: [approved(null)], compare: ahead([]) });
