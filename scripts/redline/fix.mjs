@@ -149,7 +149,7 @@ export function parseReviewBody(body) {
   const summary = (/^\*\*Verdict: [^*\n]+\*\*\s*(.*)$/m.exec(text)?.[1] ?? '').trim();
   const rule = /^rule:([a-z0-9-]+)\s*$/m.exec(text)?.[1] ?? null;
   if (!findings.length) {
-    const plain = text.replace(/<!-- redline:(head|diff)=[0-9a-f]+ -->/g, '').trim();
+    const plain = text.replace(/<!-- redline:(head|diff)=[0-9a-f]+ -->|<!-- redline:context=[^\n]*? -->/g, '').trim();
     if (plain) findings.push({ n: 1, severity: 'blocking', file: null, line: null, quote: '', problem: plain, suggestion: '' });
   }
   return { summary, findings, rule };

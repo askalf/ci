@@ -264,8 +264,8 @@ console.log('\n  verdictAtHead');
 
 
 const PATCH = '@@ -1 +1,2 @@\n+export const token = process.env.X;\n const y = 2;';
-function world({ reviews = [], heads = [HEAD], turns, modelStatus = [], draft = false, files = null, counts = {} } = {}) {
-  const calls = { posted: [], model: [], sleeps: 0 };
+function world({ reviews = [], heads = [HEAD], turns, modelStatus = [], draft = false, files = null, counts = {}, compare = { status: 'ahead', files: [] } } = {}) {
+  const calls = { posted: [], model: [], sleeps: 0, compares: 0 };
   let headReads = 0;
   const json = (body, status = 200, headers = {}) => ({ ok: status < 300, status, headers: new Headers(headers), json: async () => body, text: async () => JSON.stringify(body) });
   const fetch = async (url, init = {}) => {
@@ -284,6 +284,8 @@ function world({ reviews = [], heads = [HEAD], turns, modelStatus = [], draft = 
     }
     const p = u.pathname;
     if (init.method === 'POST' && p.endsWith('/reviews')) { const b = JSON.parse(init.body); calls.posted.push({ ...b, auth: init.headers.authorization }); return json({ html_url: 'https://x/review/1' }); }
+    // The files changed between the approved head and this one.
+    if (p.includes('/compare/')) { calls.compares++; return json(compare); }
     // changed_files and commits match what /files and /commits list unless counts says otherwise.
     if (/\/pulls\/7$/.test(p)) { const sha = heads[Math.min(headReads++, heads.length - 1)]; return json({ number: 7, state: 'open', draft, title: 'feat: add token', body: 'Adds it.', user: { login: 'askalf' }, head: { sha, ref: 'feat/x', repo: { full_name: 'askalf/r' } }, base: { ref: 'main', repo: { full_name: 'askalf/r' } }, changed_files: files ? files.length : 1, commits: 1, ...counts }); }
     if (p.endsWith('/reviews')) return json(u.searchParams.get('page') === '1' ? reviews : []);
@@ -874,14 +876,14 @@ console.log('\n  pin bump');
 
 // ---------- an approval carries over a merge of the base ----------
 {
-  const { diffFingerprint, carriedApproval, carriedBody, listedInFull } = reviewModule;
+  const { diffFingerprint, carriedApproval, carriedBody, listedInFull, toolContext, contextMarker, readContext, namesOf, bearsOn, contextKept, prFilesText } = reviewModule;
   const pr = { title: 'feat: add token', body: 'Adds it.', base: { ref: 'main' } };
   const files = [{ filename: 'src/b.js', status: 'modified', sha: 'aaa', additions: 1, deletions: 0, patch: PATCH }];
   const own = [{ sha: HEAD, parents: [{ sha: 'p' }], commit: { message: 'feat: add token' } }];
   const merge = { sha: 'm', parents: [{ sha: 'p1' }, { sha: 'p2' }], commit: { message: "Merge branch 'main' into feat/x" } };
   const fp = diffFingerprint(pr, files, own);
-  const approval = (fpx, commit = OTHER, state = 'DISMISSED') => ({ user: { login: REVIEWER_LOGIN }, state, commit_id: commit,
-    body: `**Verdict: approve.** Fine.\n\n<!-- redline:head=${commit} -->\n\n<!-- redline:diff=${fpx} -->` });
+  const approval = (fpx, commit = OTHER, state = 'DISMISSED', context = ['src/b.js']) => ({ user: { login: REVIEWER_LOGIN }, state, commit_id: commit,
+    body: `**Verdict: approve.** Fine.\n\n<!-- redline:head=${commit} -->\n\n<!-- redline:diff=${fpx} -->${context ? `\n\n${contextMarker(context)}` : ''}` });
   check('a merge of the base keeps the fingerprint', diffFingerprint(pr, files, [...own, merge]) === fp);
   const added = { filename: 'a.js', status: 'added', sha: 'b', patch: '@@ -0,0 +1 @@\n+export {};' };
   check('file order does not matter', diffFingerprint(pr, [...files, added], own) === diffFingerprint(pr, [added, ...files], own));
@@ -917,15 +919,16 @@ console.log('\n  pin bump');
     body.split('<!-- redline:head=').length === 2 && body.includes(`<!-- redline:head=${HEAD} -->`)
       && body.split('<!-- redline:diff=').length === 2 && body.includes('unchanged since 34b7875') && body.startsWith('**Verdict: approve.**'));
   check('carrying twice keeps one note', carriedBody({ body, commit_id: HEAD }, OTHER, fp).split('carries over').length === 2);
+  check('the carried body keeps the context, once', readContext(body)?.join() === 'src/b.js' && body.split('<!-- redline:context=').length === 2);
 
   // End to end: the world's PR is the same change an earlier head approved.
   const worldFp = diffFingerprint({ title: 'feat: add token', body: 'Adds it.', base: { ref: 'main' } },
     [{ filename: 'src/b.js', status: 'modified', additions: 1, deletions: 0, patch: PATCH }], [{ sha: HEAD, commit: { message: 'feat: add token' } }]);
   {
-    const { ctx, calls } = world({ reviews: [approval(worldFp)], turns: [submit(APPROVE)] });
+    const { ctx, calls } = world({ reviews: [approval(worldFp)], compare: { status: 'ahead', files: [{ filename: 'docs/notes.md', status: 'modified' }] }, turns: [submit(APPROVE)] });
     const r = await runReview(ctx);
-    check('an unchanged change is approved at the new head with no model call',
-      r.outcome === 'posted' && r.verdict === 'APPROVE' && calls.model.length === 0 && calls.posted[0].event === 'APPROVE'
+    check('an unchanged change, with nothing it read or uses changed since, is approved at the new head with no model call',
+      r.outcome === 'posted' && r.verdict === 'APPROVE' && calls.model.length === 0 && calls.compares === 1 && calls.posted[0].event === 'APPROVE'
         && calls.posted[0].body.includes(`<!-- redline:head=${HEAD} -->`));
   }
   {
@@ -968,6 +971,87 @@ console.log('\n  pin bump');
   }
 }
 
+
+// ---------- a carried approval needs what it read and what the change uses unchanged ----------
+{
+  const { diffFingerprint, contextMarker, readContext, toolContext, namesOf, bearsOn, contextKept, prFilesText } = reviewModule;
+  const ctxRoot = mkdtempSync(join(tmpdir(), 'redline-ctx-'));
+  mkdirSync(join(ctxRoot, 'src'));
+  mkdirSync(join(ctxRoot, 'lib'));
+  writeFileSync(join(ctxRoot, 'src', 'use.js'), "import { load } from '../lib/helper.js';\nexport const value = load();\n");
+  writeFileSync(join(ctxRoot, 'lib', 'helper.js'), 'export function load() { return 1; }\n');
+
+  check('a read or search names its path; a listing names the names under a directory; the root is .',
+    toolContext(ctxRoot, 'redline_read', { path: '/src/use.js' }).join() === 'src/use.js'
+      && toolContext(ctxRoot, 'redline_search', { pattern: 'x' }).join() === '.'
+      && toolContext(ctxRoot, 'redline_list', { path: 'lib/' }).join() === 'lib/'
+      && toolContext(ctxRoot, 'redline_read', { path: '../outside' }).length === 0
+      && toolContext(ctxRoot, 'redline_submit', {}).length === 0);
+  check('a context marker round-trips, sorted and deduplicated, with spaces in names',
+    readContext(contextMarker(['src/a b.js', 'lib/', 'src/a b.js'])).join('|') === 'lib/|src/a b.js'
+      && readContext(contextMarker([]))?.length === 0 && readContext('no marker') === null);
+  check('a context too long to post leaves no marker, so nothing carries over',
+    contextMarker(Array.from({ length: 5_000 }, (_, i) => `src/file-${i}.js`)) === '');
+  check('a file goes by its name and its directory\'s name', namesOf('lib/helper.js').join() === 'helper,lib' && namesOf('Makefile').join() === 'Makefile');
+
+  const prFiles = [{ filename: 'src/use.js', status: 'modified' }];
+  const prText = prFilesText(ctxRoot, prFiles);
+  const bears = (f, context = ['src/use.js']) => bearsOn(f, { context, prFiles, prText });
+  check('a base-only change to a helper the PR\'s unchanged file calls bears on the review', bears({ filename: 'lib/helper.js', status: 'modified' }));
+  check('so does a file beside a PR file, one under a path read, and a name added under a directory listed',
+    bears({ filename: 'src/other.js', status: 'modified' })
+      && bears({ filename: 'conf/x.json', status: 'modified' }, ['conf'])
+      && bears({ filename: 'pkg/new.js', status: 'added' }, ['pkg/'])
+      && bears({ filename: 'old/thing.go', previous_filename: 'conf/thing.go', status: 'renamed' }, ['conf']));
+  check('a file the review never read and the change does not use does not',
+    !bears({ filename: 'docs/notes.md', status: 'modified' }) && !bears({ filename: 'pkg/kept.js', status: 'modified' }, ['pkg/']));
+  const ahead = (files) => ({ status: 'ahead', files });
+  check('the context is kept only on a head that descends from the approved one with nothing that bears on it changed',
+    contextKept(ahead([{ filename: 'docs/notes.md', status: 'modified' }]), ['src/use.js'], prFiles, prText)
+      && !contextKept(ahead([{ filename: 'lib/helper.js', status: 'modified' }]), ['src/use.js'], prFiles, prText)
+      && !contextKept({ status: 'diverged', files: [] }, ['src/use.js'], prFiles, prText)
+      && !contextKept({ status: 'behind', files: [] }, ['src/use.js'], prFiles, prText));
+  check('nor with no context on record, a compare GitHub cut short, or a PR file that could not be read',
+    !contextKept(ahead([]), null, prFiles, prText)
+      && !contextKept(ahead(Array.from({ length: LIMITS.compareFiles }, (_, i) => ({ filename: `docs/${i}.md`, status: 'modified' }))), ['src/use.js'], prFiles, prText)
+      && !contextKept(ahead([]), ['src/use.js'], prFiles, null) && prFilesText(ctxRoot, [{ filename: 'src/gone.js', status: 'modified' }]) === null);
+
+  // End to end: the approved head read src/use.js only; the base then changed the helper it calls,
+  // and the PR merged the base in, so its files, patches and messages are as they were.
+  const usePatch = "@@ -0,0 +1,2 @@\n+import { load } from '../lib/helper.js';\n+export const value = load();";
+  const useFiles = [{ filename: 'src/use.js', status: 'added', additions: 2, deletions: 0, patch: usePatch }];
+  const useFp = diffFingerprint({ title: 'feat: add token', body: 'Adds it.', base: { ref: 'main' } }, useFiles, [{ sha: HEAD, commit: { message: 'feat: add token' } }]);
+  const approved = (context) => ({ user: { login: REVIEWER_LOGIN }, state: 'DISMISSED', commit_id: OTHER,
+    body: `**Verdict: approve.** Fine.\n\n<!-- redline:head=${OTHER} -->\n\n<!-- redline:diff=${useFp} -->${context ? `\n\n${contextMarker(context)}` : ''}` });
+  const run = async (opts) => { const w = world({ files: useFiles, turns: [submit(APPROVE)], ...opts }); w.ctx.checkout = ctxRoot; return { r: await runReview(w.ctx), calls: w.calls }; };
+  {
+    const { r, calls } = await run({ reviews: [approved(['src/use.js'])], compare: ahead([{ filename: 'lib/helper.js', status: 'modified' }]) });
+    check('a base-only helper change under an unchanged PR call site is read in full, not carried',
+      calls.compares === 1 && calls.model.length > 0 && r.outcome === 'posted' && !calls.posted[0].body.includes('carries over'));
+  }
+  {
+    const { r, calls } = await run({ reviews: [approved(['src/use.js'])], compare: ahead([{ filename: 'docs/notes.md', status: 'modified' }]) });
+    check('a base change to nothing it read or uses carries the approval', calls.model.length === 0 && r.outcome === 'posted'
+      && calls.posted[0].body.includes('carries over') && readContext(calls.posted[0].body)?.join() === 'src/use.js');
+  }
+  {
+    const { calls } = await run({ reviews: [approved(null)], compare: ahead([]) });
+    check('an approval with no context on record is read in full, without a compare', calls.model.length > 0 && calls.compares === 0);
+  }
+  {
+    const { calls } = await run({ reviews: [approved(['src/use.js'])], compare: { status: 'diverged', files: [] } });
+    check('a head that does not descend from the approved one is read in full', calls.model.length > 0);
+  }
+  {
+    const reads = [use('redline_read', { path: 'lib/helper.js' }, 'r1'), submit(APPROVE)];
+    const { calls } = await run({ reviews: [], turns: reads });
+    const posted = calls.posted[0]?.body ?? '';
+    check('a full approval records what it read', readContext(posted)?.join() === 'lib/helper.js');
+    const changes = await run({ reviews: [], turns: [use('redline_read', { path: 'lib/helper.js' }, 'r1'), submit({ verdict: 'REQUEST_CHANGES', summary: 'No; read lib/helper.js.', findings: [] })] });
+    check('a request for changes records none', !(changes.calls.posted[0]?.body ?? '').includes('redline:context='));
+  }
+  rmSync(ctxRoot, { recursive: true, force: true });
+}
 rmSync(root, { recursive: true, force: true });
 rmSync(outside, { recursive: true, force: true });
 console.log(`\n  ${pass} pass, ${fail} fail`);

@@ -94,6 +94,8 @@ const BODY = [
   const plain = parseReviewBody(`Please handle the empty page.\n\n<!-- redline:head=${HEAD} -->`);
   check('a body without the shape is one blocking finding with the text, marker dropped', plain.findings.length === 1 && plain.findings[0].severity === 'blocking' && plain.findings[0].problem === 'Please handle the empty page.' && plain.findings[0].file === null);
   check('an empty body has no findings', parseReviewBody('').findings.length === 0 && parseReviewBody(null).findings.length === 0);
+  const marked = parseReviewBody(`Please handle the empty page.\n\n<!-- redline:head=${HEAD} -->\n\n<!-- redline:diff=${'a'.repeat(64)} -->\n\n<!-- redline:context=lib/ src/a%20b.js -->`);
+  check('the diff and context markers are dropped too', marked.findings.length === 1 && marked.findings[0].problem === 'Please handle the empty page.');
   const items = inlineItems([{ path: 'src/b.js', line: 3, body: ' Read it from the config. ' }, { path: 'src/c.js', line: null, original_line: 9, body: 'x' }, { path: 'z', line: 1, body: '  ' }]);
   check('inline comments keep path, line (original_line as a fallback) and trimmed body; empty ones drop',
     items.length === 2 && items[0].body === 'Read it from the config.' && items[0].line === 3 && items[1].line === 9);
