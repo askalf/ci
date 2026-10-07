@@ -14,7 +14,8 @@
 #
 # Each bump PR is a review in every caller, so bumps are batched: the hourly run bumps to the newest
 # main commit that changed what a caller runs, once that commit has been quiet for QUIET_MINUTES, so a
-# burst of merges is one wave. A dispatch bumps at once, for a fix that cannot wait. An open bump PR
+# burst of merges is one wave. A dispatch bumps at once, for a fix that cannot wait, unless it sets
+# wait-for-quiet: the host's clock dispatches it that way hourly, since GitHub drops scheduled runs. An open bump PR
 # that already proposes the picked commit is left alone, so its review and checks are not restarted.
 name: Redline pin bump
 
@@ -22,6 +23,11 @@ on:
   schedule:
     - cron: '41 * * * *'
   workflow_dispatch:
+    inputs:
+      wait-for-quiet:
+        description: 'Wait, as the hourly schedule does, until the newest change has been quiet for QUIET_MINUTES'
+        type: boolean
+        default: false
 
 permissions: {}
 
@@ -89,6 +95,7 @@ jobs:
         id: pick
         env:
           EVENT: ${{ github.event_name }}
+          WAIT_FOR_QUIET: ${{ inputs.wait-for-quiet }}
         run: |
           set -euo pipefail
           # Unquoted on purpose: PIN_PATHS is a list of pathspecs, none with a space; set -f keeps
@@ -101,7 +108,7 @@ jobs:
           set +f
           age=$(( ( $(date +%s) - at ) / 60 ))
           echo "newest change a caller runs: ${sha:0:7}, ${age} minutes ago"
-          if [ "$EVENT" = schedule ] && [ "$age" -lt "$QUIET_MINUTES" ]; then
+          if { [ "$EVENT" = schedule ] || [ "${WAIT_FOR_QUIET:-false}" = true ]; } && [ "$age" -lt "$QUIET_MINUTES" ]; then
             echo "::notice::${sha:0:7} landed ${age} minutes ago; the bump waits for ${QUIET_MINUTES} quiet minutes, so a burst of merges is one wave"
             echo "ok=false" >> "$GITHUB_OUTPUT"
           else

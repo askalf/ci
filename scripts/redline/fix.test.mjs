@@ -1413,9 +1413,13 @@ console.log('\n  pin bump, both callers');
       && pinPaths.indexOf(':(exclude)scripts/redline/*.test.mjs') > pinPaths.indexOf('scripts/redline'));
   // Batched: a burst of merges here is one bump wave, and an open bump PR is not reset for no change.
   const on = /\non:\n((?: {2}.*\n)+)/.exec(bump)?.[1] ?? '';
-  check('the bump runs hourly and on dispatch, never per push', /^  schedule:\n    - cron: '\d+ \* \* \* \*'\n  workflow_dispatch:\n$/.test(on));
+  check('the bump runs hourly and on dispatch, never per push',
+    /^  schedule:\n    - cron: '\d+ \* \* \* \*'\n  workflow_dispatch:\n/.test(on) && !/^  push:/m.test(on));
+  check('a dispatch may ask to wait for the quiet window like the schedule; by default it bumps at once',
+    /\n      wait-for-quiet:\n(?: {8}.*\n)*? {8}type: boolean\n {8}default: false\n/.test(bump)
+      && bump.includes('WAIT_FOR_QUIET: ${{ inputs.wait-for-quiet }}'));
   check('a scheduled bump waits for the newest change to be quiet; a dispatch does not',
-    /QUIET_MINUTES: \d+/.test(bump) && bump.includes('if [ "$EVENT" = schedule ] && [ "$age" -lt "$QUIET_MINUTES" ]; then')
+    /QUIET_MINUTES: \d+/.test(bump) && bump.includes('if { [ "$EVENT" = schedule ] || [ "${WAIT_FOR_QUIET:-false}" = true ]; } && [ "$age" -lt "$QUIET_MINUTES" ]; then')
       && bump.includes("git log -1 --first-parent --format='%H %ct' HEAD -- $PIN_PATHS") && bump.includes('SHA: ${{ steps.pick.outputs.sha }}')
       && bump.includes('fetch-depth: 0'));
   {
@@ -1454,6 +1458,16 @@ console.log('\n  pin bump, both callers');
       const got = readFileSync(out, 'utf8');
       check('a branch merged a minute ago is picked as the merge and waits for the quiet window',
         r.status === 0 && got.includes('ok=false') && r.stdout.includes(`newest change a caller runs: ${merge.slice(0, 7)}`));
+      const pick = (env) => {
+        writeFileSync(out, '');
+        const x = spawnSync('bash', ['-c', script.join('\n')], { cwd: d, encoding: 'utf8',
+          env: { ...process.env, PIN_PATHS: pinPaths, QUIET_MINUTES: '60', GITHUB_OUTPUT: out, ...env } });
+        return { status: x.status, got: readFileSync(out, 'utf8') };
+      };
+      const waits = pick({ EVENT: 'workflow_dispatch', WAIT_FOR_QUIET: 'true' });
+      check('a dispatch with wait-for-quiet waits like the schedule', waits.status === 0 && waits.got.includes('ok=false'));
+      const atOnce = pick({ EVENT: 'workflow_dispatch', WAIT_FOR_QUIET: 'false' });
+      check('a dispatch without it bumps at once', atOnce.status === 0 && atOnce.got.includes('ok=true') && atOnce.got.includes(`sha=${merge}`));
       rmSync(d, { recursive: true, force: true });
     }
   }
