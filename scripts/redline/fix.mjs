@@ -20,8 +20,11 @@
 // Hardening, each with a reason:
 //   - The review must be a CHANGES_REQUESTED review of this PR at this head: an old review, a
 //     review on another PR, a moved head or a fork PR is refused before the model is called.
-//   - fix_write stays inside the checkout (symlinks resolved) and never touches .github/: a
-//     workflow change from this lane would run with the PR's own permissions on the next push.
+//   - fix_write stays inside the checkout (symlinks resolved). Under .github/ it writes only a
+//     file the pull request itself changes, and never the review's or this lane's own workflow:
+//     a workflow change runs with the PR's own permissions on the next push, which the PR's own
+//     change to that file already does; a workflow the PR leaves alone, or a new one, is never
+//     this lane's to add. The trusted review reads every head before anything merges.
 //   - A file the repository marks `redline-protected` in .gitattributes (captured payloads,
 //     vendored code, recorded fixtures) is never written by fix_write and never enters the commit.
 //     The marks are read from the reviewed head's tree before the install runs and judged in a
@@ -270,10 +273,30 @@ export function protectedFromCheckAttr(raw) {
   return out;
 }
 
-/** Why a checkout-relative path may not be written, or '' when it may. Pure. */
-function writeRule(rel) {
+/** The review's and this lane's own workflows: never written from here, whatever the PR changes. */
+export const LANE_WORKFLOWS = /^\.github\/workflows\/redline[^/]*\.ya?ml$/;
+
+/**
+ * The paths under .github/ a run may write: the files the pull request itself changes and that
+ * exist at its head (added, modified or renamed; a removed one has no file to write), except the
+ * lane's own workflows. A workflow this lane changed runs with the PR's own permissions on the
+ * next push, which the PR's own change to that file already does; a file the PR leaves alone, or
+ * a new one, is never this lane's to add. Pure: `files` is the PR's files list from the API.
+ */
+export function editableGithub(files) {
+  const out = new Set();
+  for (const f of Array.isArray(files) ? files : []) {
+    const p = String(f?.filename ?? '');
+    if (/^\.github\//.test(p) && f?.status !== 'removed' && !LANE_WORKFLOWS.test(p)) out.add(p);
+  }
+  return out;
+}
+
+/** Why a checkout-relative path may not be written, or '' when it may. `github` is editableGithub's set. Pure. */
+function writeRule(rel, github = new Set()) {
   if (/(^|\/)(?:\.git|node_modules)(?:\/|$)/.test(rel)) return 'path is under .git or node_modules';
-  if (/^\.github(?:\/|$)/.test(rel)) return 'nothing under .github/ is written by the fix lane';
+  if (LANE_WORKFLOWS.test(rel)) return 'the review and fix workflows are never written by the fix lane';
+  if (/^\.github(?:\/|$)/.test(rel) && !github.has(rel)) return 'under .github/ the fix lane writes only a file this pull request already changes';
   if (/(?:^|\/)\.gitattributes$/.test(rel)) return '.gitattributes is never written by the fix lane';
   return '';
 }
@@ -294,15 +317,14 @@ export function landingPath(root, abs) {
 
 /**
  * Resolve a path the model wants to write. Inside the checkout, symlinks included; never under
- * .git or node_modules, never under .github (a workflow or action definition changed by this lane
- * would run with the PR's own permissions on the next push) and never a .gitattributes, checked
- * on the path as named and on where it lands through any directory symlink. Returns the absolute
- * path or throws.
+ * .git or node_modules, under .github only a path in `github` (editableGithub: the files the PR
+ * changes, less the lane's own workflows) and never a .gitattributes, checked on the path as
+ * named and on where it lands through any directory symlink. Returns the absolute path or throws.
  */
-export function safeWritePath(root, p) {
+export function safeWritePath(root, p, github = new Set()) {
   const rel = posix.normalize(String(p ?? '').replace(/\\/g, '/').replace(/^\/+/, ''));
   if (!rel || rel === '.' || rel === '..' || rel.startsWith('../')) throw new Error('path is outside the checkout');
-  const named = writeRule(rel);
+  const named = writeRule(rel, github);
   if (named) throw new Error(named);
   const rootReal = realpathSync(root);
   const abs = resolve(rootReal, rel);
@@ -315,23 +337,23 @@ export function safeWritePath(root, p) {
   try { st = lstatSync(abs); } catch { /* a new file */ }
   if (st?.isSymbolicLink()) throw new Error('path is a symlink');
   if (st?.isDirectory()) throw new Error('path is a directory');
-  const landed = writeRule(landingPath(root, abs));
+  const landed = writeRule(landingPath(root, abs), github);
   if (landed) throw new Error(`${landed} (through a directory symlink)`);
   return abs;
 }
 
 /**
  * Which changed paths become the commit. Everything the checkout shows as changed is staged
- * (`git add -A`) except: paths under .github/, a .gitattributes, paths marked redline-protected
- * (`protectedSet`), files over LIMITS.fileBytes, and paths the install step dirtied that the model
- * did not write (a lockfile rewritten by npm is not the fix). Pure: `sizeOf(path)` supplies sizes.
- * Returns { keep, skipped: [{ path, why }] }.
+ * (`git add -A`) except: paths under .github/ that are not in `github` (editableGithub's set), a
+ * .gitattributes, paths marked redline-protected (`protectedSet`), files over LIMITS.fileBytes,
+ * and paths the install step dirtied that the model did not write (a lockfile rewritten by npm is
+ * not the fix). Pure: `sizeOf(path)` supplies sizes. Returns { keep, skipped: [{ path, why }] }.
  */
-export function stageable(paths, { installDirty = [], written = new Set(), sizeOf = () => 0, protectedSet = new Set() } = {}) {
+export function stageable(paths, { installDirty = [], written = new Set(), sizeOf = () => 0, protectedSet = new Set(), github = new Set() } = {}) {
   const keep = [];
   const skipped = [];
   for (const p of paths) {
-    if (/^\.github(?:\/|$)/.test(p)) skipped.push({ path: p, why: 'under .github/' });
+    if (/^\.github(?:\/|$)/.test(p) && !github.has(p)) skipped.push({ path: p, why: 'under .github/ and not a file the PR changes' });
     else if (/(?:^|\/)\.gitattributes$/.test(p)) skipped.push({ path: p, why: 'a .gitattributes' });
     else if (protectedSet.has(p)) skipped.push({ path: p, why: `marked ${PROTECTED_ATTR}` });
     else if (installDirty.includes(p) && !written.has(p)) skipped.push({ path: p, why: 'changed by the install, not by the fix' });
@@ -589,7 +611,7 @@ export const TOOLS = [
     input_schema: { type: 'object', required: ['path'], properties: { path: { type: 'string' }, start_line: { type: 'integer', minimum: 1 }, end_line: { type: 'integer', minimum: 1 } } } },
   { name: 'fix_search', description: 'Search the checkout with a JavaScript regular expression. At most 80 matches.',
     input_schema: { type: 'object', required: ['pattern'], properties: { pattern: { type: 'string' }, path: { type: 'string', description: 'Directory or file to search; default the root.' } } } },
-  { name: 'fix_write', description: 'Write a whole file in the checkout (created if absent). Read it first and write it back complete. Never under .github/, .git/ or node_modules/.',
+  { name: 'fix_write', description: 'Write a whole file in the checkout (created if absent). Read it first and write it back complete. Never under .git/ or node_modules/; under .github/ only the files the brief lists as writable there.',
     input_schema: { type: 'object', required: ['path', 'content'], properties: { path: { type: 'string' }, content: { type: 'string' } } } },
   { name: 'fix_run', description: `Run one allowed command in the checkout, without a shell; stdout and stderr together, capped. Default timeout ${LIMITS.runDefaultS}s, at most ${LIMITS.runMaxS}s. The allowed commands are listed in the brief.`,
     input_schema: { type: 'object', required: ['command'], properties: { command: { type: 'string' }, timeout_seconds: { type: 'integer', minimum: 1, maximum: LIMITS.runMaxS } } } },
@@ -705,7 +727,7 @@ export async function runLoop(ctx, brief) {
   return { refused: `no fix submitted within ${LIMITS.turns} turns`, turns };
 }
 
-export function buildBrief({ pr, files, headSha, review, items, plan, installNote, diff, protectedFiles = [] }) {
+export function buildBrief({ pr, files, headSha, review, items, plan, installNote, diff, protectedFiles = [], githubFiles = [] }) {
   const findings = review.findings;
   return [
     `Repository: ${pr.base.repo.full_name}`,
@@ -713,6 +735,9 @@ export function buildBrief({ pr, files, headSha, review, items, plan, installNot
     `${pr.head.ref} -> ${pr.base.ref}; head ${headSha}`,
     '', 'PR description:', String(pr.body ?? '').slice(0, LIMITS.bodyChars) || '(empty)',
     '', `Files the PR changes (${files.length}):`, ...files.map((f) => `- ${f.status} +${f.additions} -${f.deletions} ${f.filename}`),
+    githubFiles.length
+      ? `Under .github/ you may write only these files, which this PR already changes: ${githubFiles.join(', ')}. No other file there, and no new file there.`
+      : 'Nothing under .github/ is written in this run: the PR changes no file there that this lane may edit.',
     ...(protectedFiles.length
       ? ['', `Captured data, marked ${PROTECTED_ATTR} (never written by fix_write): ${protectedFiles.join(', ')}. A finding about the text inside one of these is answered in the summary, not by an edit.`]
       : []),
@@ -916,6 +941,7 @@ async function answerReview(ctx) {
   if (reviewRow.commit_id !== headSha) return refuse(`the review is at ${reviewRow.commit_id}, not at the head`);
   const comments = await ghAll(ctx, `/repos/${repo}/pulls/${n}/reviews/${ref.id}/comments`, 3);
   const files = await ghAll(ctx, `/repos/${repo}/pulls/${n}/files`, 3);
+  const github = editableGithub(files);
   const review = parseReviewBody(reviewRow.body);
   const items = inlineItems(comments);
   if (!review.findings.length && !items.length) return refuse('the review has no finding to answer');
@@ -1041,7 +1067,7 @@ async function answerReview(ctx) {
     const staged = () => {
       git(root, genv, ['reset', '-q', headSha]);
       const changed = changedPaths(root, genv);
-      return stageable(changed, { installDirty, written, sizeOf, protectedSet: protectedPaths(attrs, changed) });
+      return stageable(changed, { installDirty, written, sizeOf, protectedSet: protectedPaths(attrs, changed), github });
     };
     const runs = [];
     let seq = 0;
@@ -1081,7 +1107,7 @@ async function answerReview(ctx) {
       if (name === 'fix_search') return readTool(root, 'redline_search', input);
       if (name === 'fix_write') {
         try {
-          const abs = safeWritePath(root, input.path);
+          const abs = safeWritePath(root, input.path, github);
           const content = String(input.content ?? '');
           if (Buffer.byteLength(content) > LIMITS.writeBytes) return `error: content is larger than ${LIMITS.writeBytes} bytes`;
           const rel = relative(realpathSync(root), abs).split(sep).join('/');
@@ -1141,7 +1167,7 @@ async function answerReview(ctx) {
     };
 
     const protectedFiles = [...protectedPaths(attrs, files.map((f) => f.filename))];
-    const brief = buildBrief({ pr, files, headSha, review, items, plan, installNote, diff: buildDiff(files, LIMITS.diffChars), protectedFiles });
+    const brief = buildBrief({ pr, files, headSha, review, items, plan, installNote, diff: buildDiff(files, LIMITS.diffChars), protectedFiles, githubFiles: [...github].sort() });
     let loop;
     let calls = 0;
     try {
@@ -1203,9 +1229,12 @@ async function answerReview(ctx) {
     const message = git(root, genv, ['log', '-1', '--format=%B']) ?? '';
     if (hasAttributionTrailer(message)) throw new Error('the commit message carries an attribution trailer');
     const newHead = git(root, genv, ['rev-parse', 'HEAD']);
-    // The commit holds the kept paths and nothing protected, checked on the commit itself.
+    // The commit holds the kept paths and nothing protected, checked on the commit itself. Under
+    // .github/ it holds only the PR's own files, and removes none: a fix answers a finding in a
+    // workflow, it does not take the workflow away.
     const landed = (git(root, genv, ['diff', '--name-only', '-z', '--no-renames', headSha, 'HEAD']) ?? '').split('\0').filter(Boolean);
-    const stray = landed.filter((p) => !st.keep.includes(p) || /(?:^|\/)\.gitattributes$/.test(p) || /^\.github(?:\/|$)/.test(p));
+    const removed = (git(root, genv, ['diff', '--name-only', '-z', '--no-renames', '--diff-filter=D', headSha, 'HEAD']) ?? '').split('\0').filter(Boolean);
+    const stray = landed.filter((p) => !st.keep.includes(p) || /(?:^|\/)\.gitattributes$/.test(p) || (/^\.github(?:\/|$)/.test(p) && (!github.has(p) || removed.includes(p))));
     const marked = protectedPaths(attrs, landed);
     if (stray.length || marked.size) throw new Error(`the commit carries a path the fix lane leaves out: ${[...new Set([...stray, ...marked])].join(', ').slice(0, 300)}`);
     const commits = (git(root, genv, ['log', '--format=%H%x00%s', `${headSha}..HEAD`]) ?? '').split('\n').filter(Boolean)
