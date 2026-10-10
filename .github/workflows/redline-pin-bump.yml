@@ -1,9 +1,10 @@
 # Opens a PR in each Redline caller that moves its pins, and the redline-ref input that names the
 # same commit, to the main commit that changed the review or the fix. A caller pins two reusable
 # workflows by SHA: redline.yml calls redline-review.yml and redline-fix.yml, where the repository
-# has one, calls redline-fix-run.yml. Each pins by SHA so a change reaches it only through a
-# reviewed bump there; this writes those bumps (scripts/redline/pin.mjs), and each repo's own gate
-# reviews and merges them.
+# has one, calls redline-fix-run.yml. A drift watcher pins a third thing as a step, in whichever
+# workflow file it lives: uses: askalf/ci/actions/drift-report@<sha> (the report step). Each pins by
+# SHA so a change reaches it only through a reviewed bump there; this writes those bumps
+# (scripts/redline/pin.mjs), and each repo's own gate reviews and merges them.
 #
 # Writing to other repos needs a token GITHUB_TOKEN cannot be: REDLINE_PIN_BUMP_TOKEN, a
 # fine-grained token owned by askalf with Contents, Pull requests and Workflows read/write on the
@@ -64,6 +65,10 @@ jobs:
         :(exclude)scripts/redline/*.test.mjs
         :(exclude)scripts/redline/test-fixtures
         :(exclude)scripts/redline/README.md
+        scripts/drift-report
+        :(exclude)scripts/drift-report/*.test.mjs
+        :(exclude)scripts/drift-report/README.md
+        actions/drift-report
         .github/workflows/redline-review.yml
         .github/workflows/redline-fix-run.yml
         .github/workflows/redline-pin-bump.yml
@@ -136,13 +141,14 @@ jobs:
           note="main ${day}"
           if [ -n "$pr" ]; then note="${note}, ${SOURCE}#${pr}"; fi
           pattern="uses: ${SOURCE}/.github/workflows/redline-(review|fix-run).yml@[0-9a-f]{40}"
+          action="uses: ${SOURCE}/actions/drift-report@[0-9a-f]{40}"
           title="ci: bump Redline to ${SOURCE}@${short}"
-          body="Moves the pinned ${SOURCE} calls and their redline-ref inputs to ${SOURCE}@${SHA}, the main commit that last changed the review or the fix (${note}). The scripts are fetched at that same commit. The pins are the only change."
+          body="Moves the pinned ${SOURCE} calls and their redline-ref inputs, and every drift-report action pin, to ${SOURCE}@${SHA}, the main commit that last changed the review, the fix or the report step (${note}). The scripts are fetched at that same commit. The pins are the only change."
 
           # One caller repository. Any command that fails ends this repository's bump (set -e
           # holds inside the subshell it runs in), never the loop: the next repository is still bumped.
           bump() {
-            local repo="$1" base tip path current updated blob todo="" bad=0 bumped=0 open
+            local repo="$1" base tip path current updated blob todo="" atodo="" bad=0 bumped=0 open name
             base="$(gh api "repos/${repo}" --jq .default_branch)"
             tip="$(gh api "repos/${repo}/git/ref/heads/${base}" --jq .object.sha)"
             # Which caller files need the new pin. The review caller must exist; the fix caller may not.
@@ -159,7 +165,18 @@ jobs:
               fi
               todo="${todo:+$todo }${path}"
             done
-            [ -n "$todo" ] || return "$bad"
+            # The drift-report action is pinned as a step in whichever workflow file a watcher is, so
+            # those files are found by reading the directory, not from a list. A file whose every pin is
+            # already at the commit needs nothing.
+            for name in $(gh api "repos/${repo}/contents/.github/workflows?ref=${tip}" --jq '.[] | select(.type == "file") | .name' 2>/dev/null); do
+              path=".github/workflows/${name}"
+              case " $CALLER_PATHS " in *" $path "*) continue;; esac
+              current="$(gh api "repos/${repo}/contents/${path}?ref=${tip}" --jq .content 2>/dev/null | base64 -d)" || continue
+              printf '%s\n' "$current" | grep -Eq "$action" || continue
+              if ! printf '%s\n' "$current" | grep -E "$action" | grep -vq "@${SHA}"; then echo "${path} already at ${short}"; continue; fi
+              atodo="${atodo:+$atodo }${path}"
+            done
+            [ -n "${todo}${atodo}" ] || return "$bad"
             # An open bump PR that already proposes this commit in every file that needs it is left
             # alone: resetting its branch would restart its review and checks for no change.
             open="$(gh pr list --repo "$repo" --head "$BRANCH" --state open --json number --jq '.[0].number // empty')"
@@ -168,6 +185,10 @@ jobs:
               for path in $todo; do
                 if ! current="$(gh api "repos/${repo}/contents/${path}?ref=${BRANCH}" --jq .content 2>/dev/null | base64 -d)"; then carried=0; break; fi
                 if ! printf '%s\n' "$current" | grep -Eq "redline-(review|fix-run).yml@${SHA}" || ! printf '%s\n' "$current" | grep -q "redline-ref: ${SHA}"; then carried=0; break; fi
+              done
+              for path in $atodo; do
+                if ! current="$(gh api "repos/${repo}/contents/${path}?ref=${BRANCH}" --jq .content 2>/dev/null | base64 -d)"; then carried=0; break; fi
+                if ! printf '%s\n' "$current" | grep -Eq "$action" || printf '%s\n' "$current" | grep -E "$action" | grep -vq "@${SHA}"; then carried=0; break; fi
               done
               if [ "$carried" -eq 1 ]; then echo "#${open} already proposes ${short}"; return "$bad"; fi
             fi
@@ -178,20 +199,24 @@ jobs:
             else
               gh api -X POST "repos/${repo}/git/refs" -f ref="refs/heads/${BRANCH}" -f sha="$tip" >/dev/null
             fi
-            for path in $todo; do
+            # One commit per file: the Redline callers through pin.mjs, the watchers through pin.mjs --action.
+            rewrite() {
+              local path="$1" what="$2"; shift 2
               current="$(gh api "repos/${repo}/contents/${path}?ref=${BRANCH}" --jq .content | base64 -d)"
-              if ! updated="$(printf '%s\n' "$current" | node scripts/redline/pin.mjs "$SHA" "$note")"; then
-                echo "::error::${repo}: could not rewrite ${path}"; bad=1; continue
+              if ! updated="$(printf '%s\n' "$current" | node scripts/redline/pin.mjs "$@" "$SHA" "$note")"; then
+                echo "::error::${repo}: could not rewrite ${path}"; bad=1; return
               fi
               blob="$(gh api "repos/${repo}/contents/${path}?ref=${BRANCH}" --jq .sha)"
               printf '%s\n' "$updated" > caller.yml
               gh api -X PUT "repos/${repo}/contents/${path}" \
-                -f message="ci: bump Redline to ${SOURCE}@${short} in $(basename "$path")" \
+                -f message="ci: bump ${what} to ${SOURCE}@${short} in $(basename "$path")" \
                 -f content="$(base64 -w0 caller.yml)" \
                 -f branch="$BRANCH" -f sha="$blob" >/dev/null
               echo "${path} bumped"
               bumped=$((bumped + 1))
-            done
+            }
+            for path in $todo; do rewrite "$path" Redline; done
+            for path in $atodo; do rewrite "$path" drift-report --action; done
             # A branch with no new commit has nothing to propose.
             if [ "$bumped" -eq 0 ]; then return 1; fi
             open="$(gh pr list --repo "$repo" --head "$BRANCH" --state open --json number --jq '.[0].number // empty')"

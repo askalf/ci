@@ -48,10 +48,12 @@ Next to the prompts the hosts hold the credential files the scripts read (`/etc/
 
 ## The pin bump
 
-A push to `main` that changes what a caller runs, `scripts/redline/` (its tests, test fixtures and
-README aside) or one of the reusable workflows, runs `redline-pin-bump.yml`. It rewrites `redline.yml` and, where a repository has one, `redline-fix.yml` in
-every caller in its `CALLERS` list through `pin.mjs`, one commit per caller file on `bot/redline-pin`,
-and opens or updates one pull request per repository. Each repository's own gate reviews and merges the
+A push to `main` that changes what a caller runs, `scripts/redline/` or `scripts/drift-report/` (their
+tests, test fixtures and READMEs aside), `actions/drift-report/` or one of the reusable workflows,
+runs `redline-pin-bump.yml`. It rewrites `redline.yml` and, where a repository has one,
+`redline-fix.yml` in every caller in its `CALLERS` list through `pin.mjs`, and every other workflow
+file there that pins `actions/drift-report` through `pin.mjs --action`, one commit per file on
+`bot/redline-pin`, and opens or updates one pull request per repository. Each repository's own gate reviews and merges the
 bump. This repository is in the list: its own `redline.yml` moves the same way. The job needs
 `REDLINE_PIN_BUMP_TOKEN`, a fine-grained token with Contents, Pull requests and Workflows read and
 write on every repository in the list (Workflows because the pins live in `.github/workflows/`);

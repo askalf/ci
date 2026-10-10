@@ -6,7 +6,7 @@ the action does the reporting those ask for and nothing else.
 
 | what | input | mechanics |
 |---|---|---|
-| an issue, once | `issue: true` | one open issue per label (or per exact title under the label with `issue-match: title`), found by reading every open issue under the label, every page; a second run comments the new body on it instead of opening another |
+| an issue, once | `issue: true` | one open issue per label (or per exact title under the label with `issue-match: title`), found by reading every open issue under the label, every page; a second run comments the new body on it instead of opening another, or leaves it alone with `issue-refresh: none`, for a watcher that runs often |
 | a pull request carrying files | `pr: true` | the files as the watcher left them, bytes and mode, are committed to `bot/<name>-<utc stamp>` and opened as one PR with the diff in its body (a diff that does not fit GitHub's 65,536-character body is cut, with a note; the Files changed tab has the whole of it); while that PR is open, a run with the same blobs and modes does nothing and a run with new ones pushes a commit to it and says so; every open PR is read, every page, and a fork's branch under the prefix is never ours |
 | the all-clear | `close: true` | every open issue under the label (or title) is closed with a comment naming the run |
 
@@ -84,7 +84,7 @@ steps:
 ```
 
 The job needs node 22 on PATH and, for `pr`, a checkout (HEAD is the base; depth 1 is enough).
-Outputs: `issue-action` (created, refreshed, none),
+Outputs: `issue-action` (created, refreshed, unchanged, none),
 `issue-number`, `issue-url`, `pr-action` (created, refreshed, unchanged, none), `pr-number`,
 `pr-url`, `pr-branch`, `closed`.
 
@@ -93,8 +93,8 @@ Outputs: `issue-action` (created, refreshed, none),
 A caller names one full commit sha of this repository's main, the same way `redline.yml` does, and a
 change here reaches a repository only through a reviewed bump of that line. `pin.mjs --action <sha>
 [note]` rewrites every `uses: askalf/ci/actions/drift-report@…` line in a workflow read on stdin.
-The pin bump workflow does not yet look for these pins in callers' other workflow files; that
-arrives with the first caller, and until then a bump is a hand edit.
+The pin bump reads each caller's `.github/workflows` directory and moves every file that carries
+such a pin, one commit per file, in the same `bot/redline-pin` pull request as the Redline pins.
 
 ## Tests
 

@@ -179,6 +179,12 @@ console.log('\n  issue');
   const comment = w.find('gh', 'issue', 'comment')[0];
   check('an open issue under the label is refreshed with the body, not duplicated', w.find('gh', 'issue', 'create').length === 0 && comment && comment.args[2] === '20' && bodyOf(comment) === 'The list moved.\n');
   check('outputs name the refreshed issue', out['issue-action'] === 'refreshed' && out['issue-number'] === '20' && out['issue-url'] === 'u20');
+  const wn = world({ issues: [{ number: 20, title: 'Codex drift detected', url: 'u20' }] });
+  const outn = await report(readConfig(issueEnv({ DR_ISSUE_REFRESH: 'none' })), deps(wn));
+  check('issue-refresh none: an open issue is left as it is, no comment, no create', wn.find('gh', 'issue', 'comment').length === 0 && wn.find('gh', 'issue', 'create').length === 0 && outn['issue-action'] === 'unchanged' && outn['issue-number'] === '20');
+  const wn2 = world();
+  check('issue-refresh none still opens the first issue', (await report(readConfig(issueEnv({ DR_ISSUE_REFRESH: 'none' })), deps(wn2)))['issue-action'] === 'created');
+  check('issue-refresh takes comment or none', /issue-refresh must be comment or none/.test((await throws(() => readConfig(issueEnv({ DR_ISSUE_REFRESH: 'daily' }))))?.message));
 }
 {
   const w = world({ issues: [{ number: 30, title: 'Wire drift detected: CC v2', url: 'u30' }] });
