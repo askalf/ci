@@ -1527,7 +1527,7 @@ esac
     check('an open bump PR that already carries the picked commit is left alone, before any reset',
       skipAt > 0 && resetAt > skipAt
         && /grep -Eq "redline-\(review\|fix-run\)\.yml@\$\{SHA\}" \|\| ! printf '%s\\n' "\$current" \| grep -q "redline-ref: \$\{SHA\}"/.test(bump)
-        && bump.includes('contents/${path}?ref=${BRANCH}'));
+        && bump.includes('contents/${at}?ref=${BRANCH}'));
   }
   const selfTest = readFileSync(fileURLToPath(new URL('../../.github/workflows/redline-self-test.yml', import.meta.url)), 'utf8');
   // `test` is a required check, so it must report on every PR: no paths filter, which would leave a
