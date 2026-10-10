@@ -9,7 +9,7 @@ import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { readConfig, report, stamp, pickPr, pickIssues, pushEnv, prBody, parseEntries, parseLines, gitPath, BODY_LIMIT, BODY_RESERVE } from './report.mjs';
-import { bumpActionPins, countActionPins, DRIFT_REPORT_ACTION } from '../redline/pin.mjs';
+import { actionPins, bumpActionPins, countActionPins, DRIFT_REPORT_ACTION } from '../redline/pin.mjs';
 
 let pass = 0;
 let fail = 0;
@@ -516,6 +516,23 @@ console.log('\n  action pin');
   check('pins in a CRLF file are found, bumped and keep their line endings', countActionPins(crlf) === 2 && crlfBumped === `steps:\r\n  - uses: ${DRIFT_REPORT_ACTION}@${SHA} # new\r\n  - uses: ${DRIFT_REPORT_ACTION}@${SHA} # new\r\n  - uses: actions/checkout@abc\r\n`);
   check('a bump without a note leaves no comment and no stray space', bumpActionPins(`uses: ${DRIFT_REPORT_ACTION}@${'6'.repeat(40)} # gone\n`, SHA) === `uses: ${DRIFT_REPORT_ACTION}@${SHA}\n`);
   check('the action path is what action.yml documents', DRIFT_REPORT_ACTION === 'askalf/ci/actions/drift-report' && existsSync(new URL('../../actions/drift-report/action.yml', import.meta.url)));
+  const spaced = `      - uses:   ${DRIFT_REPORT_ACTION}@${'7'.repeat(40)} # old\n`;
+  check('a pin with several spaces after uses: is found and bumped', actionPins(spaced).join() === '7'.repeat(40) && bumpActionPins(spaced, SHA) === `      - uses:   ${DRIFT_REPORT_ACTION}@${SHA}\n`);
+  check('actionPins names each pin\'s sha in file order', actionPins(yaml).join() === ['0'.repeat(40), '1'.repeat(40)].join());
+
+  // The bump workflow decides which watcher files to rewrite with pin.mjs --action-pins, so it
+  // finds exactly the pins pin.mjs --action rewrites, however the uses: line is spaced.
+  const pinMjs = new URL('../redline/pin.mjs', import.meta.url).pathname;
+  const cli = (input, ...args) => spawnSync(process.execPath, [pinMjs, ...args], { input, encoding: 'utf8' });
+  const listed = cli(spaced, '--action-pins');
+  check('pin.mjs --action-pins prints the sha of a pin spaced uses:   <action>@<sha>', listed.status === 0 && listed.stdout === `${'7'.repeat(40)}\n`);
+  const none = cli('on: push\n', '--action-pins');
+  check('pin.mjs --action-pins prints nothing for a file without the pin', none.status === 0 && none.stdout === '');
+  const moved = cli(spaced, '--action', SHA);
+  check('after pin.mjs --action, --action-pins lists only the new sha', moved.status === 0 && cli(moved.stdout, '--action-pins').stdout === `${SHA}\n`);
+  const bumpYml = readFileSync(new URL('../../.github/workflows/redline-pin-bump.yml', import.meta.url), 'utf8');
+  check('the bump workflow finds watcher pins with pin.mjs --action-pins, not a pattern of its own',
+    bumpYml.includes('node scripts/redline/pin.mjs --action-pins') && !/actions\/drift-report@\[0-9a-f\]/.test(bumpYml) && !bumpYml.includes('"$action"'));
 }
 
 rmSync(root, { recursive: true, force: true });

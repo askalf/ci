@@ -141,14 +141,13 @@ jobs:
           note="main ${day}"
           if [ -n "$pr" ]; then note="${note}, ${SOURCE}#${pr}"; fi
           pattern="uses: ${SOURCE}/.github/workflows/redline-(review|fix-run).yml@[0-9a-f]{40}"
-          action="uses: ${SOURCE}/actions/drift-report@[0-9a-f]{40}"
           title="ci: bump Redline to ${SOURCE}@${short}"
           body="Moves the pinned ${SOURCE} calls and their redline-ref inputs, and every drift-report action pin, to ${SOURCE}@${SHA}, the main commit that last changed the review, the fix or the report step (${note}). The scripts are fetched at that same commit. The pins are the only change."
 
           # One caller repository. Any command that fails ends this repository's bump (set -e
           # holds inside the subshell it runs in), never the loop: the next repository is still bumped.
           bump() {
-            local repo="$1" base tip path current updated blob todo="" atodo="" bad=0 unread=0 bumped=0 open name names
+            local repo="$1" base tip path current updated blob todo="" atodo="" bad=0 unread=0 bumped=0 open name names pins
             base="$(gh api "repos/${repo}" --jq .default_branch)"
             tip="$(gh api "repos/${repo}/git/ref/heads/${base}" --jq .object.sha)"
             # Which caller files need the new pin. The review caller must exist; the fix caller may not.
@@ -169,7 +168,9 @@ jobs:
             # those files are found by reading the directory, not from a list. A file whose every pin is
             # already at the commit needs nothing. A directory or file that could not be read is not a
             # file without pins: it is reported, and this repository's bump stops for this run, so a
-            # transient failure never opens a PR that moves some of the pins and reports success.
+            # transient failure never opens a PR that moves some of the pins and reports success. The
+            # pins are found by pin.mjs --action-pins, so a line is a pin here exactly when pin.mjs
+            # --action rewrites it.
             if ! names="$(gh api "repos/${repo}/contents/.github/workflows?ref=${tip}" --jq '.[] | select(.type == "file") | .name')"; then
               echo "::error::${repo}: could not list .github/workflows at ${tip:0:7}"; unread=1; names=""
             fi
@@ -179,8 +180,11 @@ jobs:
               if ! current="$(gh api "repos/${repo}/contents/${path}?ref=${tip}" --jq .content | base64 -d)"; then
                 echo "::error::${repo}: could not read ${path} at ${tip:0:7}"; unread=1; continue
               fi
-              printf '%s\n' "$current" | grep -Eq "$action" || continue
-              if ! printf '%s\n' "$current" | grep -E "$action" | grep -vq "@${SHA}"; then echo "${path} already at ${short}"; continue; fi
+              if ! pins="$(printf '%s\n' "$current" | node scripts/redline/pin.mjs --action-pins)"; then
+                echo "::error::${repo}: could not read the action pins in ${path}"; unread=1; continue
+              fi
+              [ -n "$pins" ] || continue
+              if ! printf '%s\n' "$pins" | grep -vqx "$SHA"; then echo "${path} already at ${short}"; continue; fi
               atodo="${atodo:+$atodo }${path}"
             done
             if [ "$unread" -ne 0 ]; then echo "::error::${repo}: not every workflow could be read; nothing is bumped here this run"; return 1; fi
@@ -196,7 +200,8 @@ jobs:
               done
               for path in $atodo; do
                 if ! current="$(gh api "repos/${repo}/contents/${path}?ref=${BRANCH}" --jq .content 2>/dev/null | base64 -d)"; then carried=0; break; fi
-                if ! printf '%s\n' "$current" | grep -Eq "$action" || printf '%s\n' "$current" | grep -E "$action" | grep -vq "@${SHA}"; then carried=0; break; fi
+                if ! pins="$(printf '%s\n' "$current" | node scripts/redline/pin.mjs --action-pins)" || [ -z "$pins" ]; then carried=0; break; fi
+                if printf '%s\n' "$pins" | grep -vqx "$SHA"; then carried=0; break; fi
               done
               if [ "$carried" -eq 1 ]; then echo "#${open} already proposes ${short}"; return "$bad"; fi
             fi
