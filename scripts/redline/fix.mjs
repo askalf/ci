@@ -281,15 +281,28 @@ export const LANE_WORKFLOWS = /^\.github\/workflows\/redline[^/]*\.ya?ml$/;
  * exist at its head (added, modified or renamed; a removed one has no file to write), except the
  * lane's own workflows. A workflow this lane changed runs with the PR's own permissions on the
  * next push, which the PR's own change to that file already does; a file the PR leaves alone, or
- * a new one, is never this lane's to add. Pure: `files` is the PR's files list from the API.
+ * a new one, is never this lane's to add. Pure: `files` is the compare of the PR's base with the
+ * reviewed head (headCompare), `atHead` that head's own blobs (headBlobs). A path counts only when
+ * the reviewed tree holds it as a regular file with the very blob the compare names, so a file a
+ * later push added or changed is never in the set, whatever any files list said.
  */
-export function editableGithub(files) {
+export function editableGithub(files, atHead = new Map()) {
   const out = new Set();
   for (const f of Array.isArray(files) ? files : []) {
     const p = String(f?.filename ?? '');
-    if (/^\.github\//.test(p) && f?.status !== 'removed' && !LANE_WORKFLOWS.test(p)) out.add(p);
+    if (/^\.github\//.test(p) && f?.status !== 'removed' && !LANE_WORKFLOWS.test(p) && f?.sha && atHead.get(p) === f.sha) out.add(p);
   }
   return out;
+}
+
+/**
+ * The PR's changed files as of the reviewed head: the compare of the base with that commit, which
+ * no later push can change (the PR's files list follows the PR's current head instead). The
+ * compare stops at 300 files; a .github file past that is simply not writable.
+ */
+export async function headCompare(ctx, repo, baseSha, headSha) {
+  const c = await gh(ctx, `/repos/${repo}/compare/${baseSha}...${headSha}`);
+  return Array.isArray(c?.files) ? c.files : [];
 }
 
 /** Why a checkout-relative path may not be written, or '' when it may. `github` is editableGithub's set. Pure. */
@@ -855,6 +868,18 @@ function headAttributes(root, env, headSha) {
   return out;
 }
 
+/** The reviewed head's regular files under .github/ as path -> blob sha, read from its tree. */
+function headBlobs(root, env, headSha) {
+  const out = new Map();
+  for (const row of (git(root, env, ['ls-tree', '-r', '-z', headSha, '--', '.github']) ?? '').split('\0')) {
+    const tab = row.indexOf('\t');
+    if (tab < 0) continue;
+    const [mode, type, sha] = row.slice(0, tab).split(' ');
+    if (type === 'blob' && ['100644', '100755'].includes(mode)) out.set(row.slice(tab + 1), sha);
+  }
+  return out;
+}
+
 /**
  * The given paths that `attrs` (headAttributes) marks redline-protected. git decides, in a fresh
  * scratch repository holding only those files, with no global or system config, so nothing a
@@ -941,7 +966,7 @@ async function answerReview(ctx) {
   if (reviewRow.commit_id !== headSha) return refuse(`the review is at ${reviewRow.commit_id}, not at the head`);
   const comments = await ghAll(ctx, `/repos/${repo}/pulls/${n}/reviews/${ref.id}/comments`, 3);
   const files = await ghAll(ctx, `/repos/${repo}/pulls/${n}/files`, 3);
-  const github = editableGithub(files);
+  const compared = await headCompare(ctx, repo, pr.base.sha, headSha);
   const review = parseReviewBody(reviewRow.body);
   const items = inlineItems(comments);
   if (!review.findings.length && !items.length) return refuse('the review has no finding to answer');
@@ -1002,6 +1027,9 @@ async function answerReview(ctx) {
     if (changedPaths(root, genv).length) return refuse('the checkout is not clean');
     // The marks as the reviewed head has them, before any command can touch the checkout.
     const attrs = headAttributes(root, genv, headSha);
+    // The .github files this run may write, pinned to the reviewed head: the compare with that
+    // commit, each path checked against the blob the reviewed tree holds.
+    const github = editableGithub(compared, headBlobs(root, genv, headSha));
 
     if (runAs) {
       // The run account must work, must not read the key or the brief, may write the checkout

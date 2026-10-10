@@ -176,10 +176,14 @@ console.log('\n  the write sandbox');
     && /already changes/.test((() => { try { safeWritePath(root, '.github/workflows/other.yml', prGithub); return ''; } catch (e) { return e.message; } })()));
   check('the review and fix workflows are refused even when the PR changes them', /never written/.test((() => { try { safeWritePath(root, '.github/workflows/redline-fix.yml', prGithub); return ''; } catch (e) { return e.message; } })())
     && LANE_WORKFLOWS.test('.github/workflows/redline.yml') && LANE_WORKFLOWS.test('.github/workflows/redline-pin-bump.yaml') && !LANE_WORKFLOWS.test('.github/workflows/ci.yml') && !LANE_WORKFLOWS.test('.github/workflows/redline/x.yml'));
-  const g = editableGithub([{ filename: '.github/workflows/ci.yml', status: 'modified' }, { filename: '.github/workflows/redline.yml', status: 'modified' }, { filename: '.github/old.yml', status: 'removed' },
-    { filename: '.github/actions/a/action.yml', status: 'added' }, { filename: 'src/a.js', status: 'modified' }, { filename: '.github/CODEOWNERS', status: 'renamed' }]);
+  const atHead = new Map([['.github/workflows/ci.yml', 'b1'], ['.github/workflows/redline.yml', 'b2'], ['.github/actions/a/action.yml', 'b3'], ['.github/CODEOWNERS', 'b4'], ['.github/changed.yml', 'b5']]);
+  const g = editableGithub([{ filename: '.github/workflows/ci.yml', status: 'modified', sha: 'b1' }, { filename: '.github/workflows/redline.yml', status: 'modified', sha: 'b2' }, { filename: '.github/old.yml', status: 'removed', sha: 'b0' },
+    { filename: '.github/actions/a/action.yml', status: 'added', sha: 'b3' }, { filename: 'src/a.js', status: 'modified', sha: 'b6' }, { filename: '.github/CODEOWNERS', status: 'renamed', sha: 'b4' }], atHead);
   check('editableGithub: the PR\'s .github files that exist at the head, less the lane\'s workflows', [...g].sort().join() === '.github/CODEOWNERS,.github/actions/a/action.yml,.github/workflows/ci.yml');
   check('editableGithub takes anything that is not a list as none', editableGithub(null).size === 0 && editableGithub([null, {}]).size === 0);
+  check('editableGithub: a file absent from the reviewed tree, at another blob there, or with no blob named is not writable',
+    editableGithub([{ filename: '.github/workflows/new.yml', status: 'added', sha: 'b7' }, { filename: '.github/changed.yml', status: 'modified', sha: 'b8' }, { filename: '.github/workflows/ci.yml', status: 'modified' }], atHead).size === 0
+      && editableGithub([{ filename: '.github/workflows/ci.yml', status: 'modified', sha: 'b1' }]).size === 0);
   check('.git and node_modules are refused', /\.git or node_modules/.test(err('.git/config')) && /\.git or node_modules/.test(err('node_modules/x/index.js')) && /\.git or node_modules/.test(err('a/node_modules/b')));
   check('a directory is refused', /directory/.test(err('src')));
   check('the checkout root itself is refused', /outside/.test(err('')) && /outside/.test(err('.')));
@@ -441,9 +445,13 @@ function makeRepo({ pkg = null, testExit = 0, testBody = null } = {}) {
   return { dir, head: sh(dir, ['rev-parse', 'HEAD']) };
 }
 const PR_FILES = [{ filename: 'src/b.js', status: 'modified', additions: 1, deletions: 0, patch: '@@ -1 +1,2 @@\n+export const token = process.env.X;\n const y = 2;' }];
-function world(repo, { turns, prHead, reviewState = 'CHANGES_REQUESTED', reviewCommit, body = BODY, comments = [{ path: 'src/b.js', line: 1, body: 'Read it from the config instead.' }], dryRun = false, model = 'm', reviewUrl = REVIEW_URL, files = PR_FILES } = {}) {
+// The compare of the base with the reviewed head: by default the PR's files list, each with the
+// blob the reviewed tree holds at that path (none when it holds none), as GitHub would report it.
+const blobAt = (repo, p) => { const r = spawnSync('git', ['rev-parse', '-q', '--verify', `${repo.head}:${p}`], { cwd: repo.dir, encoding: 'utf8' }); return r.status === 0 ? r.stdout.trim() : undefined; };
+function world(repo, { turns, prHead, reviewState = 'CHANGES_REQUESTED', reviewCommit, body = BODY, comments = [{ path: 'src/b.js', line: 1, body: 'Read it from the config instead.' }], dryRun = false, model = 'm', reviewUrl = REVIEW_URL, files = PR_FILES, compared = null } = {}) {
   const calls = { model: [], gh: [] };
   const head = prHead ?? repo.head;
+  const compare = compared ?? files.map((f) => ({ ...f, sha: blobAt(repo, f.filename) }));
   const json = (b, status = 200) => ({ ok: status < 300, status, json: async () => b, text: async () => JSON.stringify(b) });
   const fetch = async (url, init = {}) => {
     const u = new URL(url);
@@ -456,10 +464,11 @@ function world(repo, { turns, prHead, reviewState = 'CHANGES_REQUESTED', reviewC
     }
     calls.gh.push(u.pathname);
     const p = u.pathname;
-    if (/\/pulls\/7$/.test(p)) return json({ number: 7, state: 'open', title: 'feat: add token', body: 'Adds it.', user: { login: 'askalf' }, head: { sha: head, ref: 'feat/x', repo: { full_name: 'askalf/r' } }, base: { ref: 'main', repo: { full_name: 'askalf/r' } } });
+    if (/\/pulls\/7$/.test(p)) return json({ number: 7, state: 'open', title: 'feat: add token', body: 'Adds it.', user: { login: 'askalf' }, head: { sha: head, ref: 'feat/x', repo: { full_name: 'askalf/r' } }, base: { sha: 'base0', ref: 'main', repo: { full_name: 'askalf/r' } } });
     if (/\/reviews\/99$/.test(p)) return json({ id: 99, state: reviewState, commit_id: reviewCommit ?? repo.head, body, html_url: REVIEW_URL, user: { login: 'sprayberry-redline' } });
     if (/\/reviews\/99\/comments$/.test(p)) return json(u.searchParams.get('page') === '1' ? comments : []);
     if (p.endsWith('/files')) return json(u.searchParams.get('page') === '1' ? files : []);
+    if (p.endsWith(`/compare/base0...${repo.head}`)) return json({ files: compare });
     return json({ message: `unexpected ${p}` }, 404);
   };
   const out = join(repo.dir, '..', `redline-fix-out-${Math.random().toString(36).slice(2)}`);
@@ -546,6 +555,30 @@ if (!gitOk) {
     const e = await throws(() => runFix(w.ctx));
     check('a command that deletes the PR\'s workflow is refused at the commit, and no bundle is written',
       /leaves out: .*\.github\/workflows\/ci\.yml/.test(e?.message ?? '') && !existsSync(join(w.out, 'fix.bundle')));
+    rmSync(w.out, { recursive: true, force: true });
+    rmSync(repo.dir, { recursive: true, force: true });
+  }
+  {
+    // A push after the head check adds a workflow: the PR's files list now names it, but the
+    // reviewed head has no such file and the compare with that head does not list it.
+    const repo = makeRepo();
+    mkdirSync(join(repo.dir, '.github', 'workflows'), { recursive: true });
+    writeFileSync(join(repo.dir, '.github', 'workflows', 'ci.yml'), 'name: ci\non: push\n');
+    sh(repo.dir, ['add', '-A']);
+    sh(repo.dir, ['-c', 'user.name=t', '-c', 'user.email=t@x', 'commit', '-q', '-m', 'ci: add the workflow']);
+    repo.head = sh(repo.dir, ['rev-parse', 'HEAD']);
+    const ci = { filename: '.github/workflows/ci.yml', status: 'added', additions: 2, deletions: 0 };
+    const late = { filename: '.github/workflows/new.yml', status: 'added', additions: 1, deletions: 0, sha: 'f'.repeat(40) };
+    const make = "import { writeFileSync } from 'node:fs';\nwriteFileSync('.github/workflows/new.yml', 'name: new\\n');\n";
+    const w = world(repo, { files: [...PR_FILES, ci, late], compared: [...PR_FILES, { ...ci, sha: blobAt(repo, ci.filename) }], turns: [
+      tool('fix_write', { path: '.github/workflows/new.yml', content: 'name: new\n' }), tool('fix_write', { path: 'make.mjs', content: make }), tool('fix_run', { command: 'node make.mjs' }),
+      tool('fix_write', { path: '.github/workflows/ci.yml', content: 'name: ci\non: pull_request\n' }), finish({ subject: 'run the workflow on pull requests' }),
+    ] });
+    const { record: r } = await runFix(w.ctx);
+    check('a workflow the files list names but the reviewed head lacks is not in the brief and cannot be written', w.calls.model[0].messages[0].content.includes('you may write only these files, which this PR already changes: .github/workflows/ci.yml.')
+      && /already changes/.test(JSON.stringify(w.calls.model[1].messages.at(-1))));
+    check('a command that creates that workflow leaves it out of the commit and the bundle', r.outcome === 'fixed' && !r.files.includes('.github/workflows/new.yml')
+      && spawnSync('git', ['cat-file', '-e', `${r.new_head}:.github/workflows/new.yml`], { cwd: repo.dir }).status !== 0 && existsSync(join(w.out, 'fix.bundle')));
     rmSync(w.out, { recursive: true, force: true });
     rmSync(repo.dir, { recursive: true, force: true });
   }
