@@ -58,10 +58,21 @@ write on every repository in the list (Workflows because the pins live in `.gith
 without it the job says so and stops, green. A repository whose bump fails is reported and the job
 goes on to the next one, then fails at the end.
 
+## The drift report
+
+`actions/drift-report` is the step a drift watcher ends with, pinned the same way: `uses:
+askalf/ci/actions/drift-report@<sha>`. A watcher decides what drifted and says so through three
+inputs; the action opens or refreshes the issue under a label, carries changed files into one open
+bot pull request with the diff in its body, and closes the issues on a clean run. The PR is opened
+with a PAT so that CI runs on it, the issue is handled with the job token so that a PAT without
+Issues rights is enough. The mechanics and the token split are in
+[scripts/drift-report/README.md](scripts/drift-report/README.md); `pin.mjs --action <sha>` moves the pin.
+
 ## Tests
 
 `node scripts/redline/review.test.mjs` and `node scripts/redline/fix.test.mjs` run against a stubbed
-GitHub and model and touch no network. `redline-self-test.yml` runs them, and the `tools.json` and
+GitHub and model and touch no network; `node scripts/drift-report/report.test.mjs` runs the drift
+report against a fake `gh` and `git`. `redline-self-test.yml` runs them, and the `tools.json` and
 `fix-tools.json` drift check, on every pull request: it is a required check, and a path-filtered
 required check never reports on a pull request outside its paths.
 

@@ -1,0 +1,182 @@
+# The report step of a drift watcher: an issue keyed by a label, opened once and refreshed with a
+# comment; one open pull request on a bot/<prefix><stamp> branch that carries the files the watcher
+# changed, with the diff in its body; and the close of those issues on a clean run. The watcher
+# decides what drifted and says so through `issue`, `pr` and `close`; this step decides nothing.
+# The mechanics are scripts/drift-report/report.mjs, tested without GitHub.
+#
+# Pinned like the Redline workflows: a caller names one full commit sha of this repository's main,
+#   uses: askalf/ci/actions/drift-report@<sha>
+# and a change here reaches a repository only through a reviewed bump of that line.
+#
+# The job needs node 22 on PATH (actions/setup-node, or the runner host), a checkout for `pr`
+# (depth 1 is enough; the commit is built on HEAD in a temporary index and the checkout is left as
+# the watcher had it), `issues: write` for `issue` and `close`, and `contents: write` plus
+# `pull-requests: write` for `pr`.
+#
+# One open issue and one open PR per label hold only while runs of the watcher do not overlap:
+# two runs that both read an empty list before either creates would each create. The caller
+# serialises its runs with a concurrency group of its own, cancellation off (a cancelled run
+# leaves a pushed branch without its PR):
+#   concurrency: { group: <watcher name>, cancel-in-progress: false }
+name: Drift report
+description: Open or refresh a drift issue, carry changed files into one bot pull request, close the issue on a clean run.
+
+inputs:
+  label:
+    description: The label that keys the issue and the pull request. One label per kind of drift.
+    required: true
+  label-color:
+    description: Six hex digits for the label when this step creates it.
+    required: false
+    default: BFD4F2
+  label-description:
+    description: The label's description when this step creates it.
+    required: false
+    default: Drift this watcher reports
+  issue:
+    description: "true: open an issue under the label, or comment on the open one."
+    required: false
+    default: 'false'
+  issue-title:
+    description: The issue title. With issue-match title, also the key an open issue is matched by.
+    required: false
+  issue-body-file:
+    description: A file with the issue body, at most 63,488 characters, also posted as the comment that refreshes an open issue.
+    required: false
+  issue-body:
+    description: The issue body as text, when there is no file.
+    required: false
+  issue-match:
+    description: "label: one issue per label. title: one per exact title under the label, for a label shared by several watchers."
+    required: false
+    default: label
+  pr:
+    description: "true: commit pr-files to a bot branch and open a pull request, or refresh the open one."
+    required: false
+    default: 'false'
+  pr-branch-prefix:
+    description: "Branch prefix only this watcher writes, bot/<name>- ; a UTC stamp follows. One open PR at a time under it."
+    required: false
+  pr-files:
+    description: Paths inside the checkout, space or comma separated, as the watcher left them. Named as git names them; a ./ prefix is dropped.
+    required: false
+  pr-title:
+    description: The pull request title, and the commit subject unless pr-commit-message is set.
+    required: false
+  pr-body-file:
+    description: A file with the pull request body, at most 63,488 characters; the staged diff and the run link are appended, and a diff that does not fit GitHub's 65,536-character body is cut with a note.
+    required: false
+  pr-commit-message:
+    description: The commit subject. Defaults to pr-title.
+    required: false
+  pr-base:
+    description: The base branch. Defaults to the repository's default branch.
+    required: false
+  pr-diff:
+    description: "true: append the diff of pr-files to the pull request body."
+    required: false
+    default: 'true'
+  issue-pointer:
+    description: "true: when a pull request is opened, comment once on each open issue under the label with its link."
+    required: false
+    default: 'true'
+  close:
+    description: "true: close the open issues under the label (and title, with close-match title). Not with issue."
+    required: false
+    default: 'false'
+  close-comment:
+    description: The closing comment. Defaults to naming the workflow and the run.
+    required: false
+  close-match:
+    description: "label or title, like issue-match."
+    required: false
+    default: label
+  close-title:
+    description: The exact title to close with close-match title. Defaults to issue-title.
+    required: false
+  token:
+    description: >-
+      The token that pushes the branch and opens the pull request. A fine-grained PAT with Contents
+      and Pull requests on this repository, so that pull_request workflows run on the PR; a PR or
+      a push made with the job token starts none. The default is the job token, for a repository
+      without one.
+    required: false
+    default: ${{ github.token }}
+  issue-token:
+    description: The token that lists, comments and closes issues. The job token, which has Issues when the job has issues write; a PAT without Issues rights cannot comment.
+    required: false
+    default: ${{ github.token }}
+  author-name:
+    description: The commit author's name.
+    required: false
+    default: drift-report[bot]
+  author-email:
+    description: The commit author's email.
+    required: false
+    default: actions@github.com
+
+outputs:
+  issue-action:
+    description: created, refreshed or none.
+    value: ${{ steps.report.outputs.issue-action }}
+  issue-number:
+    description: The issue opened or refreshed.
+    value: ${{ steps.report.outputs.issue-number }}
+  issue-url:
+    description: Its URL.
+    value: ${{ steps.report.outputs.issue-url }}
+  pr-action:
+    description: created, refreshed, unchanged or none.
+    value: ${{ steps.report.outputs.pr-action }}
+  pr-number:
+    description: The pull request opened, refreshed or found unchanged.
+    value: ${{ steps.report.outputs.pr-number }}
+  pr-url:
+    description: Its URL.
+    value: ${{ steps.report.outputs.pr-url }}
+  pr-branch:
+    description: Its branch.
+    value: ${{ steps.report.outputs.pr-branch }}
+  closed:
+    description: How many issues the run closed.
+    value: ${{ steps.report.outputs.closed }}
+
+runs:
+  using: composite
+  steps:
+    - id: report
+      shell: bash
+      env:
+        DR_REPO: ${{ github.repository }}
+        DR_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        DR_LABEL: ${{ inputs.label }}
+        DR_LABEL_COLOR: ${{ inputs.label-color }}
+        DR_LABEL_DESCRIPTION: ${{ inputs.label-description }}
+        DR_ISSUE: ${{ inputs.issue }}
+        DR_ISSUE_TITLE: ${{ inputs.issue-title }}
+        DR_ISSUE_BODY_FILE: ${{ inputs.issue-body-file }}
+        DR_ISSUE_BODY: ${{ inputs.issue-body }}
+        DR_ISSUE_MATCH: ${{ inputs.issue-match }}
+        DR_PR: ${{ inputs.pr }}
+        DR_PR_BRANCH_PREFIX: ${{ inputs.pr-branch-prefix }}
+        DR_PR_FILES: ${{ inputs.pr-files }}
+        DR_PR_TITLE: ${{ inputs.pr-title }}
+        DR_PR_BODY_FILE: ${{ inputs.pr-body-file }}
+        DR_PR_COMMIT_MESSAGE: ${{ inputs.pr-commit-message }}
+        DR_PR_BASE: ${{ inputs.pr-base }}
+        DR_PR_DIFF: ${{ inputs.pr-diff }}
+        DR_ISSUE_POINTER: ${{ inputs.issue-pointer }}
+        DR_CLOSE: ${{ inputs.close }}
+        DR_CLOSE_COMMENT: ${{ inputs.close-comment }}
+        DR_CLOSE_MATCH: ${{ inputs.close-match }}
+        DR_CLOSE_TITLE: ${{ inputs.close-title }}
+        DR_PR_TOKEN: ${{ inputs.token }}
+        DR_ISSUE_TOKEN: ${{ inputs.issue-token }}
+        DR_AUTHOR_NAME: ${{ inputs.author-name }}
+        DR_AUTHOR_EMAIL: ${{ inputs.author-email }}
+      run: |
+        if ! command -v node >/dev/null 2>&1; then
+          echo '::error::drift-report needs node 22 on PATH: add actions/setup-node before it, or install node on the runner host'
+          exit 1
+        fi
+        node "$GITHUB_ACTION_PATH/../../scripts/drift-report/report.mjs"

@@ -8,12 +8,17 @@
 //
 // CLI: node scripts/redline/pin.mjs <sha> [note] < redline.yml > redline.yml.new
 //      node scripts/redline/pin.mjs --caller <sha> <runner-label> [note] > redline-fix.yml
+//      node scripts/redline/pin.mjs --action <sha> [note] < watcher.yml > watcher.yml.new
+//
+// The third form moves the drift-report action pin (actions/drift-report), which a watcher
+// workflow carries as a step and not as a job, so it has no redline-ref to keep in step.
 
 import { readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 
 export const REVIEW_WORKFLOW = 'askalf/ci/.github/workflows/redline-review.yml';
 export const FIX_WORKFLOW = 'askalf/ci/.github/workflows/redline-fix-run.yml';
+export const DRIFT_REPORT_ACTION = 'askalf/ci/actions/drift-report';
 /** Every reusable workflow a caller pins, and the caller file that pins it. */
 export const CALLERS = [
   { workflow: REVIEW_WORKFLOW, path: '.github/workflows/redline.yml' },
@@ -129,12 +134,43 @@ jobs:
 `;
 }
 
+// The action path has only letters, dashes, dots and slashes; the dots are what a pattern must escape.
+const ACTION_PATH = DRIFT_REPORT_ACTION.replace(/\./g, '\\.');
+// After the sha: spaces, an optional comment, and the carriage return a CRLF file leaves on every
+// line once it is split on '\n'. Each is matched on its own, so a pin with trailing spaces and no
+// comment, or an uncommented pin in a CRLF file, is a pin.
+const ACTION_PIN = new RegExp(`^(\\s*(?:- )?uses:\\s*)${ACTION_PATH}@[0-9a-f]{40}[ \\t]*(#[^\\r]*)?(\\r?)$`);
+
+/** How many drift-report action pins a workflow carries. Zero means the file is not a caller. */
+export function countActionPins(yaml) {
+  return yaml.split('\n').filter((l) => ACTION_PIN.test(l)).length;
+}
+
+/**
+ * The workflow's yaml with every drift-report action pin at `sha`. A workflow without one comes
+ * back unchanged, so a caller may pass any workflow file through without checking it first.
+ * @param {string} yaml
+ * @param {string} sha
+ * @param {string} [note] the pin's trailing comment, e.g. "main 2026-10-09, askalf/ci#37"
+ */
+export function bumpActionPins(yaml, sha, note = '') {
+  if (!SHA.test(sha)) throw new Error(`not a full commit sha: ${sha}`);
+  return yaml.split('\n').map((l) => {
+    const m = ACTION_PIN.exec(l);
+    // The line keeps its ending; the old comment gives way to the note, or to nothing.
+    return m ? `${m[1]}${DRIFT_REPORT_ACTION}@${sha}${note ? ` # ${note}` : ''}${m[3]}` : l;
+  }).join('\n');
+}
+
 if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
   const args = process.argv.slice(2);
   try {
     if (args[0] === '--caller') {
       const [, sha, label, note = ''] = args;
       process.stdout.write(fixCallerYaml(sha ?? '', label ?? '', note));
+    } else if (args[0] === '--action') {
+      const [, sha, note = ''] = args;
+      process.stdout.write(bumpActionPins(readFileSync(0, 'utf8'), sha ?? '', note));
     } else {
       const [sha, note = ''] = args;
       process.stdout.write(bumpCaller(readFileSync(0, 'utf8'), sha ?? '', note));
