@@ -28,6 +28,8 @@ jobs:
         with:
           node-version: 22
       - run: node scripts/redline/review.test.mjs
+      # The drift-report action's script and the action pin, against a fake gh and git.
+      - run: node scripts/drift-report/report.test.mjs
       # The real run-account tests need a second account this job may sudo to. A host that
       # provides one (redline-run, with a sudoers line for the runner's account) lends it; on
       # GitHub's runners, where the job has passwordless sudo, it is made; anywhere else they skip
