@@ -74,7 +74,8 @@ Issues rights is enough. The mechanics and the token split are in
 
 `node scripts/redline/review.test.mjs` and `node scripts/redline/fix.test.mjs` run against a stubbed
 GitHub and model and touch no network; `node scripts/drift-report/report.test.mjs` runs the drift
-report against a fake `gh` and `git`. `redline-self-test.yml` runs them, and the `tools.json` and
+report against a fake `gh` and `git`, and `node scripts/redline/pin-bump.test.mjs` runs the pin bump's
+bump step against a fake `gh`. `redline-self-test.yml` runs them, and the `tools.json` and
 `fix-tools.json` drift check, on every pull request: it is a required check, and a path-filtered
 required check never reports on a pull request outside its paths.
 
