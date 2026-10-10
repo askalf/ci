@@ -468,7 +468,8 @@ function world(repo, { turns, prHead, reviewState = 'CHANGES_REQUESTED', reviewC
     if (/\/reviews\/99$/.test(p)) return json({ id: 99, state: reviewState, commit_id: reviewCommit ?? repo.head, body, html_url: REVIEW_URL, user: { login: 'sprayberry-redline' } });
     if (/\/reviews\/99\/comments$/.test(p)) return json(u.searchParams.get('page') === '1' ? comments : []);
     if (p.endsWith('/files')) return json(u.searchParams.get('page') === '1' ? files : []);
-    if (p.endsWith(`/compare/base0...${repo.head}`)) return json({ files: compare });
+    // Served for any head: a checkout that is not at the reviewed head is refused after this read.
+    if (/\/compare\/base0\.\.\.[0-9a-f]{40}$/.test(p)) return json({ files: compare });
     return json({ message: `unexpected ${p}` }, 404);
   };
   const out = join(repo.dir, '..', `redline-fix-out-${Math.random().toString(36).slice(2)}`);

@@ -131,7 +131,7 @@
     },
     {
       "name": "fix_write",
-      "description": "Write a whole file in the checkout (created if absent). Read it first and write it back complete. Never under .github/, .git/ or node_modules/.",
+      "description": "Write a whole file in the checkout (created if absent). Read it first and write it back complete. Never under .git/ or node_modules/; under .github/ only the files the brief lists as writable there.",
       "input_schema": {
         "type": "object",
         "required": [
