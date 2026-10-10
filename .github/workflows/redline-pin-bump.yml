@@ -148,7 +148,7 @@ jobs:
           # One caller repository. Any command that fails ends this repository's bump (set -e
           # holds inside the subshell it runs in), never the loop: the next repository is still bumped.
           bump() {
-            local repo="$1" base tip path current updated blob todo="" atodo="" bad=0 bumped=0 open name
+            local repo="$1" base tip path current updated blob todo="" atodo="" bad=0 unread=0 bumped=0 open name names
             base="$(gh api "repos/${repo}" --jq .default_branch)"
             tip="$(gh api "repos/${repo}/git/ref/heads/${base}" --jq .object.sha)"
             # Which caller files need the new pin. The review caller must exist; the fix caller may not.
@@ -167,15 +167,23 @@ jobs:
             done
             # The drift-report action is pinned as a step in whichever workflow file a watcher is, so
             # those files are found by reading the directory, not from a list. A file whose every pin is
-            # already at the commit needs nothing.
-            for name in $(gh api "repos/${repo}/contents/.github/workflows?ref=${tip}" --jq '.[] | select(.type == "file") | .name' 2>/dev/null); do
+            # already at the commit needs nothing. A directory or file that could not be read is not a
+            # file without pins: it is reported, and this repository's bump stops for this run, so a
+            # transient failure never opens a PR that moves some of the pins and reports success.
+            if ! names="$(gh api "repos/${repo}/contents/.github/workflows?ref=${tip}" --jq '.[] | select(.type == "file") | .name')"; then
+              echo "::error::${repo}: could not list .github/workflows at ${tip:0:7}"; unread=1; names=""
+            fi
+            for name in $names; do
               path=".github/workflows/${name}"
               case " $CALLER_PATHS " in *" $path "*) continue;; esac
-              current="$(gh api "repos/${repo}/contents/${path}?ref=${tip}" --jq .content 2>/dev/null | base64 -d)" || continue
+              if ! current="$(gh api "repos/${repo}/contents/${path}?ref=${tip}" --jq .content | base64 -d)"; then
+                echo "::error::${repo}: could not read ${path} at ${tip:0:7}"; unread=1; continue
+              fi
               printf '%s\n' "$current" | grep -Eq "$action" || continue
               if ! printf '%s\n' "$current" | grep -E "$action" | grep -vq "@${SHA}"; then echo "${path} already at ${short}"; continue; fi
               atodo="${atodo:+$atodo }${path}"
             done
+            if [ "$unread" -ne 0 ]; then echo "::error::${repo}: not every workflow could be read; nothing is bumped here this run"; return 1; fi
             [ -n "${todo}${atodo}" ] || return "$bad"
             # An open bump PR that already proposes this commit in every file that needs it is left
             # alone: resetting its branch would restart its review and checks for no change.

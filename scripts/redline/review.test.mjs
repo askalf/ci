@@ -804,7 +804,10 @@ console.log('\n  pin bump');
   check('this repo\'s own caller bumps cleanly', refs(f).join() === NEW && f.includes(`@${NEW} # n\n`) && f.split('\n').length === own.split('\n').length + (refs(own).length ? 0 : 1));
 
   const bump = readFileSync(fileURLToPath(new URL('../../.github/workflows/redline-pin-bump.yml', import.meta.url)), 'utf8');
-  check('the bump workflow rewrites callers with pin.mjs', bump.includes('node scripts/redline/pin.mjs "$SHA" "$note"') && !/sed -E/.test(bump));
+  check('the bump workflow rewrites callers with pin.mjs, and watchers with pin.mjs --action',
+    bump.includes('node scripts/redline/pin.mjs "$@" "$SHA" "$note"') && bump.includes('rewrite "$path" Redline') && bump.includes('rewrite "$path" drift-report --action') && !/sed -E/.test(bump));
+  check('the bump workflow reads each caller\'s workflow directory for action pins and fails the bump when it cannot',
+    bump.includes('contents/.github/workflows?ref=') && bump.includes('could not list .github/workflows') && bump.includes('nothing is bumped here this run'));
   const callers = (/\n      CALLERS: >-\n((?: {8}\S.*\n)+)/.exec(bump)?.[1] ?? '').split(/\s+/).filter(Boolean);
   const expected = ['askalf/ci', 'askalf/askalf', 'askalf/dario', 'askalf/amnesia', 'askalf/browser-bridge', 'askalf/redstamp',
     'askalf/truecopy', 'askalf/truecopy-action', 'askalf/cordon', 'askalf/plumbline', 'askalf/checkout-with-retry'];

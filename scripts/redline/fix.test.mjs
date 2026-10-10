@@ -1405,7 +1405,7 @@ console.log('\n  pin bump, both callers');
   check('the review caller still bumps', r.includes(`uses: ${REVIEW_WORKFLOW}@${NEW} # ${note}\n`) && refs(r).join() === NEW);
   check('a file that calls neither is refused', (await throws(() => bumpCaller('name: x\n', NEW)))?.message.includes('no askalf/ci/.github/workflows/redline-review.yml or askalf/ci/.github/workflows/redline-fix-run.yml call'));
   const bump = readFileSync(fileURLToPath(new URL('../../.github/workflows/redline-pin-bump.yml', import.meta.url)), 'utf8');
-  check('the bump workflow rewrites both caller paths with pin.mjs', /CALLER_PATHS: .*redline\.yml .*redline-fix\.yml/.test(bump.replace(/\n\s+/g, ' ')) && bump.includes('node scripts/redline/pin.mjs "$SHA" "$note"') && /redline-\(review\|fix-run\)\.yml/.test(bump));
+  check('the bump workflow rewrites both caller paths with pin.mjs', /CALLER_PATHS: .*redline\.yml .*redline-fix\.yml/.test(bump.replace(/\n\s+/g, ' ')) && bump.includes('node scripts/redline/pin.mjs "$@" "$SHA" "$note"') && /redline-\(review\|fix-run\)\.yml/.test(bump));
   const pinPaths = (/\n      PIN_PATHS: >-\n((?: {8}\S.*\n)+)/.exec(bump)?.[1] ?? '').split(/\s+/).filter(Boolean);
   check('a change to the fix workflow moves the pin', pinPaths.includes('.github/workflows/redline-fix-run.yml'));
   check('the tests, their fixtures and the README move no pin',
