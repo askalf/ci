@@ -531,6 +531,24 @@ if (!gitOk) {
     rmSync(w.out, { recursive: true, force: true });
     rmSync(repo.dir, { recursive: true, force: true });
   }
+  {
+    // An allowed command deletes the workflow the PR changes: staging keeps the path, so the check
+    // on the commit is what keeps the deletion out of the bundle.
+    const repo = makeRepo();
+    mkdirSync(join(repo.dir, '.github', 'workflows'), { recursive: true });
+    writeFileSync(join(repo.dir, '.github', 'workflows', 'ci.yml'), 'name: ci\non: push\n');
+    sh(repo.dir, ['add', '-A']);
+    sh(repo.dir, ['-c', 'user.name=t', '-c', 'user.email=t@x', 'commit', '-q', '-m', 'ci: add the workflow']);
+    repo.head = sh(repo.dir, ['rev-parse', 'HEAD']);
+    const files = [...PR_FILES, { filename: '.github/workflows/ci.yml', status: 'added', additions: 2, deletions: 0 }];
+    const drop = "import { unlinkSync } from 'node:fs';\nunlinkSync('.github/workflows/ci.yml');\n";
+    const w = world(repo, { files, turns: [tool('fix_write', { path: 'drop.mjs', content: drop }), tool('fix_run', { command: 'node drop.mjs' }), finish({ subject: 'drop the workflow' })] });
+    const e = await throws(() => runFix(w.ctx));
+    check('a command that deletes the PR\'s workflow is refused at the commit, and no bundle is written',
+      /leaves out: .*\.github\/workflows\/ci\.yml/.test(e?.message ?? '') && !existsSync(join(w.out, 'fix.bundle')));
+    rmSync(w.out, { recursive: true, force: true });
+    rmSync(repo.dir, { recursive: true, force: true });
+  }
 
   console.log('\n  runFix: a dry run');
   {
