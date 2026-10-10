@@ -9,9 +9,12 @@
 // CLI: node scripts/redline/pin.mjs <sha> [note] < redline.yml > redline.yml.new
 //      node scripts/redline/pin.mjs --caller <sha> <runner-label> [note] > redline-fix.yml
 //      node scripts/redline/pin.mjs --action <sha> [note] < watcher.yml > watcher.yml.new
+//      node scripts/redline/pin.mjs --action-pins < watcher.yml
 //
 // The third form moves the drift-report action pin (actions/drift-report), which a watcher
 // workflow carries as a step and not as a job, so it has no redline-ref to keep in step.
+// The fourth prints the sha of each of those pins, one per line, so a caller deciding whether a
+// file needs the third form recognises exactly the lines the third form rewrites.
 
 import { readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
@@ -139,11 +142,16 @@ const ACTION_PATH = DRIFT_REPORT_ACTION.replace(/\./g, '\\.');
 // After the sha: spaces, an optional comment, and the carriage return a CRLF file leaves on every
 // line once it is split on '\n'. Each is matched on its own, so a pin with trailing spaces and no
 // comment, or an uncommented pin in a CRLF file, is a pin.
-const ACTION_PIN = new RegExp(`^(\\s*(?:- )?uses:\\s*)${ACTION_PATH}@[0-9a-f]{40}[ \\t]*(#[^\\r]*)?(\\r?)$`);
+const ACTION_PIN = new RegExp(`^(\\s*(?:- )?uses:\\s*)${ACTION_PATH}@([0-9a-f]{40})[ \\t]*(#[^\\r]*)?(\\r?)$`);
+
+/** The sha of each drift-report action pin a workflow carries, in file order. */
+export function actionPins(yaml) {
+  return yaml.split('\n').map((l) => ACTION_PIN.exec(l)?.[2]).filter(Boolean);
+}
 
 /** How many drift-report action pins a workflow carries. Zero means the file is not a caller. */
 export function countActionPins(yaml) {
-  return yaml.split('\n').filter((l) => ACTION_PIN.test(l)).length;
+  return actionPins(yaml).length;
 }
 
 /**
@@ -158,7 +166,7 @@ export function bumpActionPins(yaml, sha, note = '') {
   return yaml.split('\n').map((l) => {
     const m = ACTION_PIN.exec(l);
     // The line keeps its ending; the old comment gives way to the note, or to nothing.
-    return m ? `${m[1]}${DRIFT_REPORT_ACTION}@${sha}${note ? ` # ${note}` : ''}${m[3]}` : l;
+    return m ? `${m[1]}${DRIFT_REPORT_ACTION}@${sha}${note ? ` # ${note}` : ''}${m[4]}` : l;
   }).join('\n');
 }
 
@@ -171,6 +179,9 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
     } else if (args[0] === '--action') {
       const [, sha, note = ''] = args;
       process.stdout.write(bumpActionPins(readFileSync(0, 'utf8'), sha ?? '', note));
+    } else if (args[0] === '--action-pins') {
+      const pins = actionPins(readFileSync(0, 'utf8'));
+      process.stdout.write(pins.map((p) => `${p}\n`).join(''));
     } else {
       const [sha, note = ''] = args;
       process.stdout.write(bumpCaller(readFileSync(0, 'utf8'), sha ?? '', note));

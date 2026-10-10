@@ -71,6 +71,7 @@ export function readConfig(env) {
     issueBodyFile: env.DR_ISSUE_BODY_FILE || '',
     issueBody: env.DR_ISSUE_BODY || '',
     issueMatch: env.DR_ISSUE_MATCH || 'label',
+    issueRefresh: env.DR_ISSUE_REFRESH || 'comment',
     pr: bool(env.DR_PR),
     prBranchPrefix: env.DR_PR_BRANCH_PREFIX || '',
     prFiles: list(env.DR_PR_FILES),
@@ -98,6 +99,7 @@ export function readConfig(env) {
   for (const [k, v] of [['issue-match', cfg.issueMatch], ['close-match', cfg.closeMatch]]) {
     if (v !== 'label' && v !== 'title') throw new Error(`${k} must be label or title: "${v}"`);
   }
+  if (cfg.issueRefresh !== 'comment' && cfg.issueRefresh !== 'none') throw new Error(`issue-refresh must be comment or none: "${cfg.issueRefresh}"`);
   if (cfg.issue) {
     if (!cfg.issueTitle) throw new Error('issue-title is required when issue is true');
     if (!cfg.issueBodyFile && !cfg.issueBody.trim()) throw new Error('issue-body-file or issue-body is required when issue is true');
@@ -283,9 +285,16 @@ export async function report(cfg, deps = {}) {
     const existing = openIssues(cfg.issueToken, cfg.issueMatch, cfg.issueTitle);
     if (existing.length > 0) {
       const i = existing[0];
-      gh(cfg.issueToken, ['issue', 'comment', String(i.number), '--body-file', bodyFile]);
-      Object.assign(out, { 'issue-action': 'refreshed', 'issue-number': String(i.number), 'issue-url': i.url });
-      log(`refreshed issue #${i.number} ${i.url}`);
+      // An hourly watcher that comments on every run would bury the issue; issue-refresh: none opens
+      // once and leaves the open issue as it is.
+      if (cfg.issueRefresh === 'none') {
+        Object.assign(out, { 'issue-action': 'unchanged', 'issue-number': String(i.number), 'issue-url': i.url });
+        log(`issue #${i.number} is open; left as it is`);
+      } else {
+        gh(cfg.issueToken, ['issue', 'comment', String(i.number), '--body-file', bodyFile]);
+        Object.assign(out, { 'issue-action': 'refreshed', 'issue-number': String(i.number), 'issue-url': i.url });
+        log(`refreshed issue #${i.number} ${i.url}`);
+      }
     } else {
       ensureLabel(cfg.issueToken);
       const url = gh(cfg.issueToken, ['issue', 'create', '--title', cfg.issueTitle, '--body-file', bodyFile, '--label', cfg.label]).stdout.trim().split('\n').pop();
