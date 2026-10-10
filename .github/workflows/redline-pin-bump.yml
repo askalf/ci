@@ -144,15 +144,22 @@ jobs:
           title="ci: bump Redline to ${SOURCE}@${short}"
           body="Moves the pinned ${SOURCE} calls and their redline-ref inputs, and every drift-report action pin, to ${SOURCE}@${SHA}, the main commit that last changed the review, the fix or the report step (${note}). The scripts are fetched at that same commit. The pins are the only change."
 
+          # A path as the Contents API takes it: each segment percent-encoded, so a workflow named
+          # with a space, a # or a ? is read and written as one whole path.
+          uri() { node -e 'process.stdout.write(process.argv[1].split("/").map(encodeURIComponent).join("/"))' "$1"; }
+
           # One caller repository. Any command that fails ends this repository's bump (set -e
           # holds inside the subshell it runs in), never the loop: the next repository is still bumped.
+          # The files to rewrite are kept in arrays, so a path is never split on its spaces.
           bump() {
-            local repo="$1" base tip path current updated blob todo="" atodo="" bad=0 unread=0 bumped=0 open name names pins
+            local repo="$1" base tip path at current updated blob bad=0 unread=0 bumped=0 open name listing pins caller
+            local -a todo=() atodo=() names=()
             base="$(gh api "repos/${repo}" --jq .default_branch)"
             tip="$(gh api "repos/${repo}/git/ref/heads/${base}" --jq .object.sha)"
             # Which caller files need the new pin. The review caller must exist; the fix caller may not.
             for path in $CALLER_PATHS; do
-              if ! current="$(gh api "repos/${repo}/contents/${path}?ref=${tip}" --jq .content 2>/dev/null | base64 -d)"; then
+              at="$(uri "$path")"
+              if ! current="$(gh api "repos/${repo}/contents/${at}?ref=${tip}" --jq .content 2>/dev/null | base64 -d)"; then
                 if [ "$path" = ".github/workflows/redline.yml" ]; then echo "::error::${repo}: no ${path}"; bad=1; else echo "no ${path}"; fi
                 continue
               fi
@@ -162,7 +169,7 @@ jobs:
               if printf '%s\n' "$current" | grep -Eq "redline-(review|fix-run).yml@${SHA}" && printf '%s\n' "$current" | grep -q "redline-ref: ${SHA}"; then
                 echo "${path} already at ${short}"; continue
               fi
-              todo="${todo:+$todo }${path}"
+              todo+=("$path")
             done
             # The drift-report action is pinned as a step in whichever workflow file a watcher is, so
             # those files are found by reading the directory, not from a list. A file whose every pin is
@@ -170,14 +177,18 @@ jobs:
             # file without pins: it is reported, and this repository's bump stops for this run, so a
             # transient failure never opens a PR that moves some of the pins and reports success. The
             # pins are found by pin.mjs --action-pins, so a line is a pin here exactly when pin.mjs
-            # --action rewrites it.
-            if ! names="$(gh api "repos/${repo}/contents/.github/workflows?ref=${tip}" --jq '.[] | select(.type == "file") | .name')"; then
-              echo "::error::${repo}: could not list .github/workflows at ${tip:0:7}"; unread=1; names=""
+            # --action rewrites it. The listing is one name per line, read whole, spaces and all.
+            if ! listing="$(gh api "repos/${repo}/contents/.github/workflows?ref=${tip}" --jq '.[] | select(.type == "file") | .name')"; then
+              echo "::error::${repo}: could not list .github/workflows at ${tip:0:7}"; unread=1; listing=""
             fi
-            for name in $names; do
+            if [ -n "$listing" ]; then mapfile -t names <<< "$listing"; fi
+            for name in "${names[@]}"; do
               path=".github/workflows/${name}"
-              case " $CALLER_PATHS " in *" $path "*) continue;; esac
-              if ! current="$(gh api "repos/${repo}/contents/${path}?ref=${tip}" --jq .content | base64 -d)"; then
+              for caller in $CALLER_PATHS; do
+                if [ "$caller" = "$path" ]; then continue 2; fi
+              done
+              at="$(uri "$path")"
+              if ! current="$(gh api "repos/${repo}/contents/${at}?ref=${tip}" --jq .content | base64 -d)"; then
                 echo "::error::${repo}: could not read ${path} at ${tip:0:7}"; unread=1; continue
               fi
               if ! pins="$(printf '%s\n' "$current" | node scripts/redline/pin.mjs --action-pins)"; then
@@ -185,21 +196,23 @@ jobs:
               fi
               [ -n "$pins" ] || continue
               if ! printf '%s\n' "$pins" | grep -vqx "$SHA"; then echo "${path} already at ${short}"; continue; fi
-              atodo="${atodo:+$atodo }${path}"
+              atodo+=("$path")
             done
             if [ "$unread" -ne 0 ]; then echo "::error::${repo}: not every workflow could be read; nothing is bumped here this run"; return 1; fi
-            [ -n "${todo}${atodo}" ] || return "$bad"
+            if [ "${#todo[@]}" -eq 0 ] && [ "${#atodo[@]}" -eq 0 ]; then return "$bad"; fi
             # An open bump PR that already proposes this commit in every file that needs it is left
             # alone: resetting its branch would restart its review and checks for no change.
             open="$(gh pr list --repo "$repo" --head "$BRANCH" --state open --json number --jq '.[0].number // empty')"
             if [ -n "$open" ]; then
               local carried=1
-              for path in $todo; do
-                if ! current="$(gh api "repos/${repo}/contents/${path}?ref=${BRANCH}" --jq .content 2>/dev/null | base64 -d)"; then carried=0; break; fi
+              for path in "${todo[@]}"; do
+                at="$(uri "$path")"
+                if ! current="$(gh api "repos/${repo}/contents/${at}?ref=${BRANCH}" --jq .content 2>/dev/null | base64 -d)"; then carried=0; break; fi
                 if ! printf '%s\n' "$current" | grep -Eq "redline-(review|fix-run).yml@${SHA}" || ! printf '%s\n' "$current" | grep -q "redline-ref: ${SHA}"; then carried=0; break; fi
               done
-              for path in $atodo; do
-                if ! current="$(gh api "repos/${repo}/contents/${path}?ref=${BRANCH}" --jq .content 2>/dev/null | base64 -d)"; then carried=0; break; fi
+              for path in "${atodo[@]}"; do
+                at="$(uri "$path")"
+                if ! current="$(gh api "repos/${repo}/contents/${at}?ref=${BRANCH}" --jq .content 2>/dev/null | base64 -d)"; then carried=0; break; fi
                 if ! pins="$(printf '%s\n' "$current" | node scripts/redline/pin.mjs --action-pins)" || [ -z "$pins" ]; then carried=0; break; fi
                 if printf '%s\n' "$pins" | grep -vqx "$SHA"; then carried=0; break; fi
               done
@@ -214,22 +227,23 @@ jobs:
             fi
             # One commit per file: the Redline callers through pin.mjs, the watchers through pin.mjs --action.
             rewrite() {
-              local path="$1" what="$2"; shift 2
-              current="$(gh api "repos/${repo}/contents/${path}?ref=${BRANCH}" --jq .content | base64 -d)"
+              local path="$1" what="$2" at; shift 2
+              at="$(uri "$path")"
+              current="$(gh api "repos/${repo}/contents/${at}?ref=${BRANCH}" --jq .content | base64 -d)"
               if ! updated="$(printf '%s\n' "$current" | node scripts/redline/pin.mjs "$@" "$SHA" "$note")"; then
                 echo "::error::${repo}: could not rewrite ${path}"; bad=1; return
               fi
-              blob="$(gh api "repos/${repo}/contents/${path}?ref=${BRANCH}" --jq .sha)"
+              blob="$(gh api "repos/${repo}/contents/${at}?ref=${BRANCH}" --jq .sha)"
               printf '%s\n' "$updated" > caller.yml
-              gh api -X PUT "repos/${repo}/contents/${path}" \
+              gh api -X PUT "repos/${repo}/contents/${at}" \
                 -f message="ci: bump ${what} to ${SOURCE}@${short} in $(basename "$path")" \
                 -f content="$(base64 -w0 caller.yml)" \
                 -f branch="$BRANCH" -f sha="$blob" >/dev/null
               echo "${path} bumped"
               bumped=$((bumped + 1))
             }
-            for path in $todo; do rewrite "$path" Redline; done
-            for path in $atodo; do rewrite "$path" drift-report --action; done
+            for path in "${todo[@]}"; do rewrite "$path" Redline; done
+            for path in "${atodo[@]}"; do rewrite "$path" drift-report --action; done
             # A branch with no new commit has nothing to propose.
             if [ "$bumped" -eq 0 ]; then return 1; fi
             open="$(gh pr list --repo "$repo" --head "$BRANCH" --state open --json number --jq '.[0].number // empty')"
