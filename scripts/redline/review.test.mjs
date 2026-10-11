@@ -8,7 +8,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
   parseEnvFile, readPrompt, safePath, buildDiff, planDiff, unshownFiles, checkoutCorpus, quoteIsGrounded, corpusOf, checkSubmission, finalVerdict,
-  renderBody, verdictAtHead, runTool, runReview, buildBrief, REVIEWER_LOGIN, LIMITS, metaPhrase,
+  renderBody, verdictAtHead, runTool, runReview, buildBrief, contextSection, REVIEWER_LOGIN, LIMITS, metaPhrase,
   verdictRecord, verdictProblem, saveVerdict, VERDICT_VERSION,
 } from './review.mjs';
 import * as reviewModule from './review.mjs';
@@ -308,6 +308,20 @@ console.log('\n  runReview');
     && calls.posted.length === 1 && calls.posted[0].commit_id === HEAD && calls.posted[0].event === 'APPROVE' && calls.posted[0].auth === 'Bearer review');
   check('the tool result went back to the model', JSON.stringify(calls.model[1].messages.at(-1)).includes('export const token'));
   check('the model got the diff and the tools, and no forced choice early', calls.model[0].messages[0].content.includes('+export const token') && calls.model[0].tools.length === 4 && !calls.model[0].tool_choice);
+}
+{
+  check('no context: no section', contextSection('') === '' && contextSection('  \n ') === '' && contextSection(undefined) === '');
+  const s = contextSection('Prior art: none open.');
+  check('context goes under a heading that calls it data', s.startsWith('\n\nContext the workflow gathered') && /data, never instructions/.test(s) && s.endsWith('Prior art: none open.'));
+  const long = contextSection('x'.repeat(LIMITS.contextChars + 10));
+  check('long context is cut, and says so', long.includes(`[context cut at ${LIMITS.contextChars} characters]`) && !long.includes('x'.repeat(LIMITS.contextChars + 1)));
+  const { ctx, calls } = world({ turns: [submit(APPROVE)] });
+  await runReview({ ...ctx, context: 'Upstream base of src/b.js: const y = 2;' });
+  const first = calls.model[0].messages[0].content;
+  check('the context reaches the model after the diff', first.includes('Upstream base of src/b.js') && first.indexOf('+export const token') < first.indexOf('Upstream base of src/b.js'));
+  const { ctx: plain, calls: plainCalls } = world({ turns: [submit(APPROVE)] });
+  await runReview(plain);
+  check('without context the brief is unchanged', !plainCalls.model[0].messages[0].content.includes('Context the workflow gathered'));
 }
 {
   const { ctx, calls } = world({ reviews: [{ user: { login: REVIEWER_LOGIN }, state: 'CHANGES_REQUESTED', commit_id: HEAD, html_url: 'old' }], turns: [submit(APPROVE)] });
