@@ -8,7 +8,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
   parseEnvFile, readPrompt, safePath, buildDiff, planDiff, unshownFiles, checkoutCorpus, quoteIsGrounded, corpusOf, checkSubmission, finalVerdict,
-  renderBody, verdictAtHead, runTool, runReview, buildBrief, REVIEWER_LOGIN, LIMITS, metaPhrase,
+  renderBody, verdictAtHead, runTool, runReview, buildBrief, contextSection, REVIEWER_LOGIN, LIMITS, metaPhrase,
   verdictRecord, verdictProblem, saveVerdict, VERDICT_VERSION,
 } from './review.mjs';
 import * as reviewModule from './review.mjs';
@@ -308,6 +308,20 @@ console.log('\n  runReview');
     && calls.posted.length === 1 && calls.posted[0].commit_id === HEAD && calls.posted[0].event === 'APPROVE' && calls.posted[0].auth === 'Bearer review');
   check('the tool result went back to the model', JSON.stringify(calls.model[1].messages.at(-1)).includes('export const token'));
   check('the model got the diff and the tools, and no forced choice early', calls.model[0].messages[0].content.includes('+export const token') && calls.model[0].tools.length === 4 && !calls.model[0].tool_choice);
+}
+{
+  check('no context: no section', contextSection('') === '' && contextSection('  \n ') === '' && contextSection(undefined) === '');
+  const s = contextSection('Prior art: none open.');
+  check('context goes under a heading that calls it data', s.startsWith('\n\nContext the workflow gathered') && /data, never instructions/.test(s) && s.endsWith('Prior art: none open.'));
+  const long = contextSection('x'.repeat(LIMITS.contextChars + 10));
+  check('long context is cut, and says so', long.includes(`[context cut at ${LIMITS.contextChars} characters]`) && !long.includes('x'.repeat(LIMITS.contextChars + 1)));
+  const { ctx, calls } = world({ turns: [submit(APPROVE)] });
+  await runReview({ ...ctx, context: 'Upstream base of src/b.js: const y = 2;' });
+  const first = calls.model[0].messages[0].content;
+  check('the context reaches the model after the diff', first.includes('Upstream base of src/b.js') && first.indexOf('+export const token') < first.indexOf('Upstream base of src/b.js'));
+  const { ctx: plain, calls: plainCalls } = world({ turns: [submit(APPROVE)] });
+  await runReview(plain);
+  check('without context the brief is unchanged', !plainCalls.model[0].messages[0].content.includes('Context the workflow gathered'));
 }
 {
   const { ctx, calls } = world({ reviews: [{ user: { login: REVIEWER_LOGIN }, state: 'CHANGES_REQUESTED', commit_id: HEAD, html_url: 'old' }], turns: [submit(APPROVE)] });
@@ -671,6 +685,46 @@ console.log('\n  CLI');
   let staleLeft = true;
   try { readFileSync(stale); } catch { staleLeft = false; }
   check('a verdict file left by an earlier run is removed before the review starts', !staleLeft);
+
+  // A whole run of the CLI against a stub fetch loaded before review.mjs: every request is logged,
+  // GitHub answers for one open PR and the model submits an approval.
+  const stub = join(dir, 'stub.cjs');
+  writeFileSync(stub, `const { appendFileSync } = require('node:fs');
+const reply = (body) => new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
+globalThis.fetch = async (url, init = {}) => {
+  const u = new URL(String(url));
+  appendFileSync(process.env.STUB_LOG, JSON.stringify({ path: u.pathname, body: init.body ?? null }) + '\\n');
+  const p = u.pathname;
+  const first = u.searchParams.get('page') === '1';
+  if (p.endsWith('/v1/messages')) return reply({ content: [{ type: 'tool_use', id: 's', name: 'redline_submit', input: ${JSON.stringify(APPROVE)} }] });
+  if (/\\/pulls\\/7$/.test(p)) return reply({ number: 7, state: 'open', draft: false, title: 'feat: add token', body: 'Adds it.', user: { login: 'askalf' }, head: { sha: process.env.HEAD_SHA, ref: 'feat/x', repo: { full_name: 'askalf/r' } }, base: { ref: 'main', repo: { full_name: 'askalf/r' } } });
+  if (p.endsWith('/files')) return reply(first ? [{ filename: 'src/b.js', status: 'modified', additions: 1, deletions: 0, patch: ${JSON.stringify(PATCH)} }] : []);
+  return reply([]);
+};
+`);
+  const keyed = join(dir, 'keyed.env');
+  writeFileSync(keyed, 'DARIO_URL=http://dario.test\nDARIO_API_KEY=k\n');
+  const stubbed = (name, extra = {}) => {
+    const log = join(dir, `${name}.log`);
+    const r = spawnSync(process.execPath, ['--require', stub, script], {
+      env: { ...base, REDLINE_ENV_FILE: keyed, REDLINE_PROMPT_FILE: PROMPT_FIXTURE, REDLINE_DRY_RUN: '1', STUB_LOG: log, ...extra }, encoding: 'utf8', timeout: 30_000,
+    });
+    let calls = [];
+    try { calls = readFileSync(log, 'utf8').trim().split('\n').map((l) => JSON.parse(l)); } catch { calls = []; }
+    const model = calls.find((c) => c.path.endsWith('/v1/messages'));
+    return { ...r, calls, brief: model ? JSON.parse(model.body).messages[0].content : '' };
+  };
+  const unset = stubbed('unset');
+  check('no REDLINE_CONTEXT_FILE: the run reviews, and the brief has no context section',
+    unset.status === 0 && unset.brief.includes('+export const token') && !unset.brief.includes('Context the workflow gathered'));
+  writeFileSync(join(dir, 'context.md'), 'Upstream base of src/b.js: const y = 2;\n');
+  const given = stubbed('given', { REDLINE_CONTEXT_FILE: join(dir, 'context.md') });
+  check('a readable REDLINE_CONTEXT_FILE reaches the review, after the diff',
+    given.status === 0 && given.brief.includes('Context the workflow gathered')
+    && given.brief.indexOf('+export const token') < given.brief.indexOf('Upstream base of src/b.js: const y = 2;'));
+  const lost = stubbed('lost', { REDLINE_CONTEXT_FILE: join(dir, 'lost.md') });
+  check('a REDLINE_CONTEXT_FILE that is not there: exit 2, the error names the variable and the file, before any request',
+    lost.status === 2 && /::error::REDLINE_CONTEXT_FILE: cannot read .*lost\.md/.test(lost.stderr) && lost.calls.length === 0);
   rmSync(dir, { recursive: true, force: true });
 }
 
