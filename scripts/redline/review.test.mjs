@@ -928,6 +928,51 @@ console.log('\n  pin bump');
   }
 }
 
+// ---------- routine PRs on REDLINE_MODEL, sensitive or large ones on REDLINE_DEEP_MODEL ----------
+{
+  const { deepReview, DEEP_LINES } = reviewModule;
+  const file = (filename, extra = {}) => ({ filename, status: 'modified', additions: 3, deletions: 1, changes: 4, patch: PATCH, ...extra });
+  check('a small source change is routine', !deepReview([file('src/b.js'), file('README.md')]));
+  check('a workflow file is deep', deepReview([file('src/b.js'), file('.github/workflows/ci.yml')]));
+  check('an auth path is deep', deepReview([file('src/middleware/auth.ts')]));
+  check('a crypto, secret or token path is deep', deepReview([file('src/lib/crypto.js')]) && deepReview([file('lib/secrets.ts')]) && deepReview([file('src/tokens/store.js')]));
+  check('a Dockerfile or a shell script is deep', deepReview([file('deploy/Dockerfile.forge')]) && deepReview([file('tools/run.sh')]));
+  check('a rename away from a sensitive path is deep', deepReview([file('src/plain.js', { status: 'renamed', previous_filename: 'src/auth.js' })]));
+  check('a file GitHub showed no patch for is deep', deepReview([file('src/big.js', { patch: undefined })]));
+  check(`more than ${DEEP_LINES} changed lines is deep, at the limit is not`,
+    deepReview([file('src/a.js', { changes: DEEP_LINES }), file('src/b.js', { changes: 1 })]) && !deepReview([file('src/a.js', { changes: DEEP_LINES })]));
+  check('additions and deletions count when changes is missing', deepReview([file('src/a.js', { changes: undefined, additions: DEEP_LINES, deletions: 1 })]));
+
+  {
+    const { ctx, calls } = world({ turns: [submit(APPROVE)] });
+    ctx.model = 'gpt-5.6-terra'; ctx.deepModel = 'gpt-6-astra';
+    await runReview(ctx);
+    check('a routine PR stays on REDLINE_MODEL with a deep model set', calls.model.length > 0 && calls.model.every((b) => b.model === 'gpt-5.6-terra'));
+  }
+  {
+    const { ctx, calls } = world({ files: [file('.github/workflows/release.yml')], turns: [submit({ ...APPROVE, summary: 'Changes the release workflow; read .github/workflows/release.yml.' })] });
+    ctx.model = 'gpt-5.6-terra'; ctx.deepModel = 'gpt-6-astra';
+    const lines = [];
+    ctx.log = (l) => lines.push(l);
+    await runReview(ctx);
+    check('a deep PR is read on REDLINE_DEEP_MODEL', calls.model.length > 0 && calls.model.every((b) => b.model === 'gpt-6-astra'));
+    check('and the switch is logged', lines.some((l) => l.includes('read on gpt-6-astra instead of gpt-5.6-terra')));
+  }
+  {
+    const { ctx, calls } = world({ files: [file('.github/workflows/release.yml')], turns: [submit(APPROVE)] });
+    ctx.model = 'gpt-5.6-terra'; ctx.deepModel = '';
+    await runReview(ctx);
+    check('with no deep model every PR stays on REDLINE_MODEL', calls.model.every((b) => b.model === 'gpt-5.6-terra'));
+  }
+  {
+    const bumpPatch = `@@ -1 +1 @@\n-    uses: askalf/ci/.github/workflows/redline-review.yml@${'a'.repeat(40)}\n+    uses: askalf/ci/.github/workflows/redline-review.yml@${'b'.repeat(40)}`;
+    const { ctx, calls } = world({ files: [{ filename: '.github/workflows/redline.yml', status: 'modified', patch: bumpPatch }], turns: [submit(APPROVE)] });
+    ctx.model = 'gpt-5.6-terra'; ctx.pinModel = 'claude-opus-5-5'; ctx.deepModel = 'gpt-6-astra';
+    await runReview(ctx);
+    check('a pin bump goes to the pin model, not the deep model', calls.model.every((b) => b.model === 'claude-opus-5-5'));
+  }
+}
+
 rmSync(root, { recursive: true, force: true });
 rmSync(outside, { recursive: true, force: true });
 console.log(`\n  ${pass} pass, ${fail} fail`);

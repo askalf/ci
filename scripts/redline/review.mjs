@@ -50,7 +50,9 @@
 // no key is stored or sent), and optionally REDLINE_GITHUB_TOKEN (or GITHUB_PAT_REVIEWER),
 // DARIO_URL (default http://127.0.0.1:3456), REDLINE_MODEL and REDLINE_FALLBACK_MODEL (default
 // claude-opus-5-5; set it empty for no fallback), and REDLINE_PIN_MODEL (default claude-opus-5-5,
-// the model for a PR that only moves Redline pins; set it empty to read those on REDLINE_MODEL). REDLINE_PROMPT_FILE names the system
+// the model for a PR that only moves Redline pins; set it empty to read those on REDLINE_MODEL), and
+// REDLINE_DEEP_MODEL (default empty, which turns it off: the model for a PR that deepReview() picks,
+// one touching workflows, auth, crypto, secrets or the like, or a large one). REDLINE_PROMPT_FILE names the system
 // prompt, installed on the runner host: this repository is public and carries no prompt, so there is
 // no bundled fallback, and a variable that is unset, a file that cannot be read or an empty file ends
 // the run. REDLINE_VERDICT_FILE, when set, is where verdict.json goes. REDLINE_CONTEXT_FILE, when set,
@@ -90,6 +92,14 @@ export const DEFAULT_FALLBACK_MODEL = 'claude-opus-5-5';
 // this model instead of REDLINE_MODEL: it changes one commit sha per caller file, and every bump
 // wave is a review in each caller, so it does not spend the reviewer model's seat.
 export const DEFAULT_PIN_MODEL = 'claude-opus-5-5';
+// When REDLINE_DEEP_MODEL is set, REDLINE_MODEL reads routine PRs and the deep model reads the ones
+// where a missed finding costs the most. On 2026-10-12 every review ran on gpt-6-astra, about ten
+// times gpt-5.6-terra per review, and the GPT seat does not cache, so each of up to 30 turns resent
+// the whole review. A PR is deep when a file sits under .github/, or a path names one of the
+// security subjects below, or it is a container or shell file, or GitHub showed no patch for a file
+// (too large to show), or the PR changes more lines than DEEP_LINES.
+const DEEP_PATH = /(^|\/)\.github\/|(^|\/)Dockerfile[^/]*$|\.(sh|bash)$|auth|crypt|secret|token|credential|permission|sandbox|signing|signature|security|policy|warden|redline/i;
+export const DEEP_LINES = 600;
 
 // Claude Fable 5.1, Claude Mythos 5.1 and Claude Opus 5.5 answer a forced tool_choice (type "tool"
 // or "any") with 400 `tool_choice: type "tool" and "any" are not supported for this model.`, on
@@ -671,8 +681,24 @@ export function pinOnly(files) {
 }
 
 /**
+ * True when the PR should be read on REDLINE_DEEP_MODEL: a file path matches DEEP_PATH (the old
+ * name of a rename too), GitHub showed no patch for a file, or the PR changes more than DEEP_LINES
+ * lines. Pure.
+ * @param {{ filename: string, previous_filename?: string, patch?: string, changes?: number, additions?: number, deletions?: number }[]} files
+ */
+export function deepReview(files) {
+  let lines = 0;
+  for (const f of files) {
+    if (DEEP_PATH.test(f.filename) || (f.previous_filename && DEEP_PATH.test(f.previous_filename))) return true;
+    if (typeof f.patch !== 'string') return true;
+    lines += Number(f.changes ?? ((f.additions ?? 0) + (f.deletions ?? 0))) || 0;
+  }
+  return lines > DEEP_LINES;
+}
+
+/**
  * Review one PR head. ctx: { repo, pr, headSha, checkout, readToken, reviewToken, darioUrl, darioKey,
- * model, fallbackModel, system, context?, fetch, sleep, now, log }. With no reviewToken the review is built but not posted.
+ * model, fallbackModel, pinModel?, deepModel?, system, context?, fetch, sleep, now, log }. With no reviewToken the review is built but not posted.
  * Returns { outcome: 'posted'|'unposted'|'existing'|'skipped'|'dry-run', verdict?, url?, reason?, record? };
  * record (verdict.json) is set when a review was built for this head, posted or not.
  */
@@ -693,6 +719,9 @@ export async function runReview(ctx) {
   if (ctx.pinModel && ctx.pinModel !== ctx.model && pinOnly(files)) {
     ctx.log?.(`the PR only moves Redline pins; read on ${ctx.pinModel} instead of ${ctx.model}`);
     ctx.model = ctx.pinModel;
+  } else if (ctx.deepModel && ctx.deepModel !== ctx.model && deepReview(files)) {
+    ctx.log?.(`the PR touches a sensitive path or is large; read on ${ctx.deepModel} instead of ${ctx.model}`);
+    ctx.model = ctx.deepModel;
   }
   const commits = await ghAll(ctx, `/repos/${repo}/pulls/${n}/commits`, 3);
   const diff = planDiff(files);
@@ -834,6 +863,7 @@ async function main() {
     model: secrets.REDLINE_MODEL || DEFAULT_MODEL,
     fallbackModel: secrets.REDLINE_FALLBACK_MODEL ?? DEFAULT_FALLBACK_MODEL,
     pinModel: secrets.REDLINE_PIN_MODEL ?? DEFAULT_PIN_MODEL,
+    deepModel: secrets.REDLINE_DEEP_MODEL || '',
     system,
     context,
     fetch: withDarioSocket(globalThis.fetch, dario.darioUrl, dario.darioSocket), sleep: (ms) => new Promise((r) => setTimeout(r, ms)), now: () => Date.now(),
