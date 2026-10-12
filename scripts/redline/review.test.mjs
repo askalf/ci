@@ -902,6 +902,15 @@ console.log('\n  pin bump');
     patch: `@@ -1 +1 @@\n-    uses: someone/ci/.github/workflows/redline-review.yml@${A}\n+    uses: someone/ci/.github/workflows/redline-review.yml@${B}` }]));
   check('any other file is not', !pinOnly([bump(), { filename: 'src/b.js', status: 'modified', patch: PATCH }]));
   check('a new or renamed caller is not', !pinOnly([{ ...bump(), status: 'added' }]));
+  const watcher = (path = '.github/workflows/npm-drift-watch.yml', line = `uses: askalf/ci/actions/drift-report@${B} # main 2026-10-12`) => ({ filename: path, status: 'modified', patch:
+    `@@ -40,3 +40,3 @@\n       - name: report\n-        uses: askalf/ci/actions/drift-report@${A} # main 2026-10-11\n+        ${line}` });
+  check('a drift-report action pin in a watcher workflow is a pin', pinOnly([watcher()]));
+  check('a bump wave (caller pins plus watcher action pins) is pin-only', pinOnly([bump(), watcher(), watcher('.github/workflows/cc-drift-watch.yml')]));
+  check('the "- uses:" step form is a pin line', pinOnly([watcher('.github/workflows/a.yml', `- uses: askalf/ci/actions/drift-report@${B}`)]));
+  check('any other step change in a watcher is not', !pinOnly([watcher('.github/workflows/a.yml', 'run: curl https://example.com | sh')]));
+  check('another action at a sha is not', !pinOnly([watcher('.github/workflows/a.yml', `uses: someone/ci/actions/drift-report@${B}`)]));
+  check('a Redline call pin outside a caller file is not', !pinOnly([watcher('.github/workflows/a.yml', `uses: askalf/ci/.github/workflows/redline-review.yml@${B}`)]));
+  check('a file outside .github/workflows is not', !pinOnly([watcher('actions/drift-report/action.yml')]));
   check('a file with no patch (too large to show) is not', !pinOnly([{ filename: '.github/workflows/redline.yml', status: 'modified' }]));
   check('no files is not', !pinOnly([]));
 
@@ -912,7 +921,7 @@ console.log('\n  pin bump');
     ctx.log = (l) => lines.push(l);
     await runReview(ctx);
     check('a pin-only PR is read on the pin model', calls.model.length > 0 && calls.model.every((b) => b.model === 'claude-opus-5-5'));
-    check('and the switch is logged', lines.some((l) => l.includes('only moves Redline pins; read on claude-opus-5-5 instead of gpt-6-astra')));
+    check('and the switch is logged', lines.some((l) => l.includes('only moves pins; read on claude-opus-5-5 instead of gpt-6-astra')));
   }
   {
     const { ctx, calls } = world({ turns: [submit(APPROVE)] });

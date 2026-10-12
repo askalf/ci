@@ -663,18 +663,25 @@ export function contextSection(text) {
 const PIN_CALLERS = new Set(['.github/workflows/redline.yml', '.github/workflows/redline-fix.yml']);
 // The lines pin.mjs writes: the pinned call, the redline-ref input naming the same commit, and comments.
 const PIN_LINE = /^\s*(?:uses: askalf\/ci\/\.github\/workflows\/redline-(?:review|fix-run)\.yml@[0-9a-f]{40}|redline-ref: ['"]?[0-9a-f]{40}['"]?)?\s*(?:#.*)?$/;
+// The line `pin.mjs --action` writes in a watcher workflow: the drift-report step pinned to a
+// commit, or a comment. A bump wave moves it together with the Redline pins; on 2026-10-12 the
+// wave's PR in dario touched eleven watcher files and, being under .github/, went to the deep model.
+const ACTION_PIN_LINE = /^\s*(?:(?:- )?uses: askalf\/ci\/actions\/drift-report@[0-9a-f]{40})?\s*(?:#.*)?$/;
+const WORKFLOW_FILE = /^\.github\/workflows\/[^/]+\.ya?ml$/;
 
 /**
- * True when the PR changes nothing but Redline pins: only the caller files, each modified, and
- * every added or removed line a pinned call, a redline-ref input or a comment. Pure.
+ * True when the PR changes nothing but pins: every file modified, and every added or removed line a
+ * pinned Redline call or redline-ref input (in a caller file), a pinned drift-report step (in any
+ * workflow file), or a comment. Pure.
  * @param {{ filename: string, status: string, patch?: string }[]} files
  */
 export function pinOnly(files) {
   if (!files.length) return false;
   return files.every((f) => {
-    if (!PIN_CALLERS.has(f.filename) || f.status !== 'modified' || typeof f.patch !== 'string') return false;
+    if (!WORKFLOW_FILE.test(f.filename) || f.status !== 'modified' || typeof f.patch !== 'string') return false;
+    const caller = PIN_CALLERS.has(f.filename);
     const changed = f.patch.split('\n').filter((l) => /^[+-]/.test(l) && !/^(\+\+\+|---) /.test(l));
-    return changed.length > 0 && changed.every((l) => PIN_LINE.test(l.slice(1)));
+    return changed.length > 0 && changed.every((l) => ACTION_PIN_LINE.test(l.slice(1)) || (caller && PIN_LINE.test(l.slice(1))));
   });
 }
 
@@ -718,7 +725,7 @@ export async function runReview(ctx) {
   // under .github/, so deepReview() would otherwise move it to the deep model.
   if (ctx.pinModel && pinOnly(files)) {
     if (ctx.pinModel !== ctx.model) {
-      ctx.log?.(`the PR only moves Redline pins; read on ${ctx.pinModel} instead of ${ctx.model}`);
+      ctx.log?.(`the PR only moves pins; read on ${ctx.pinModel} instead of ${ctx.model}`);
       ctx.model = ctx.pinModel;
     }
   } else if (ctx.deepModel && ctx.deepModel !== ctx.model && deepReview(files)) {
