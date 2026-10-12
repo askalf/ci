@@ -664,8 +664,7 @@ const PIN_CALLERS = new Set(['.github/workflows/redline.yml', '.github/workflows
 // The lines pin.mjs writes: the pinned call, the redline-ref input naming the same commit, and comments.
 const PIN_LINE = /^\s*(?:uses: askalf\/ci\/\.github\/workflows\/redline-(?:review|fix-run)\.yml@[0-9a-f]{40}|redline-ref: ['"]?[0-9a-f]{40}['"]?)?\s*(?:#.*)?$/;
 // The line `pin.mjs --action` writes in a watcher workflow: the drift-report step pinned to a
-// commit, or a comment. A bump wave moves it together with the Redline pins; on 2026-10-12 the
-// wave's PR in dario touched eleven watcher files and, being under .github/, went to the deep model.
+// commit, or a comment. A bump wave moves it together with the Redline pins.
 const ACTION_PIN_LINE = /^\s*(?:(?:- )?uses: askalf\/ci\/actions\/drift-report@[0-9a-f]{40})?\s*(?:#.*)?$/;
 const WORKFLOW_FILE = /^\.github\/workflows\/[^/]+\.ya?ml$/;
 
