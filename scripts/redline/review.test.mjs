@@ -971,6 +971,13 @@ console.log('\n  pin bump');
     await runReview(ctx);
     check('a pin bump goes to the pin model, not the deep model', calls.model.every((b) => b.model === 'claude-opus-5-5'));
   }
+  {
+    const bumpPatch = `@@ -1 +1 @@\n-    uses: askalf/ci/.github/workflows/redline-review.yml@${'a'.repeat(40)}\n+    uses: askalf/ci/.github/workflows/redline-review.yml@${'b'.repeat(40)}`;
+    const { ctx, calls } = world({ files: [{ filename: '.github/workflows/redline.yml', status: 'modified', patch: bumpPatch }], turns: [submit(APPROVE)] });
+    ctx.model = 'gpt-5.6-terra'; ctx.pinModel = 'gpt-5.6-terra'; ctx.deepModel = 'gpt-6-astra';
+    await runReview(ctx);
+    check('a pin bump stays on the pin model when it is REDLINE_MODEL, not the deep model', calls.model.length > 0 && calls.model.every((b) => b.model === 'gpt-5.6-terra'));
+  }
 }
 
 rmSync(root, { recursive: true, force: true });

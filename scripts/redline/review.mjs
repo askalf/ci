@@ -93,11 +93,9 @@ export const DEFAULT_FALLBACK_MODEL = 'claude-opus-5-5';
 // wave is a review in each caller, so it does not spend the reviewer model's seat.
 export const DEFAULT_PIN_MODEL = 'claude-opus-5-5';
 // When REDLINE_DEEP_MODEL is set, REDLINE_MODEL reads routine PRs and the deep model reads the ones
-// where a missed finding costs the most. On 2026-10-12 every review ran on gpt-6-astra, about ten
-// times gpt-5.6-terra per review, and the GPT seat does not cache, so each of up to 30 turns resent
-// the whole review. A PR is deep when a file sits under .github/, or a path names one of the
-// security subjects below, or it is a container or shell file, or GitHub showed no patch for a file
-// (too large to show), or the PR changes more lines than DEEP_LINES.
+// where a missed finding costs the most. A PR is deep when a file sits under .github/, or a path
+// names one of the security subjects below, or it is a container or shell file, or GitHub showed no
+// patch for a file (too large to show), or the PR changes more lines than DEEP_LINES.
 const DEEP_PATH = /(^|\/)\.github\/|(^|\/)Dockerfile[^/]*$|\.(sh|bash)$|auth|crypt|secret|token|credential|permission|sandbox|signing|signature|security|policy|warden|redline/i;
 export const DEEP_LINES = 600;
 
@@ -716,9 +714,13 @@ export async function runReview(ctx) {
   if (standing) return { outcome: 'existing', verdict: standing.state === 'APPROVED' ? 'APPROVE' : 'REQUEST_CHANGES', url: standing.html_url };
 
   const files = await ghAll(ctx, `/repos/${repo}/pulls/${n}/files`);
-  if (ctx.pinModel && ctx.pinModel !== ctx.model && pinOnly(files)) {
-    ctx.log?.(`the PR only moves Redline pins; read on ${ctx.pinModel} instead of ${ctx.model}`);
-    ctx.model = ctx.pinModel;
+  // A pin-only PR stays on the pin model even when that is REDLINE_MODEL: its caller files sit
+  // under .github/, so deepReview() would otherwise move it to the deep model.
+  if (ctx.pinModel && pinOnly(files)) {
+    if (ctx.pinModel !== ctx.model) {
+      ctx.log?.(`the PR only moves Redline pins; read on ${ctx.pinModel} instead of ${ctx.model}`);
+      ctx.model = ctx.pinModel;
+    }
   } else if (ctx.deepModel && ctx.deepModel !== ctx.model && deepReview(files)) {
     ctx.log?.(`the PR touches a sensitive path or is large; read on ${ctx.deepModel} instead of ${ctx.model}`);
     ctx.model = ctx.deepModel;
