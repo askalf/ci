@@ -952,6 +952,29 @@ console.log('\n  pin bump');
     deepReview([file('src/a.js', { changes: DEEP_LINES }), file('src/b.js', { changes: 1 })]) && !deepReview([file('src/a.js', { changes: DEEP_LINES })]));
   check('additions and deletions count when changes is missing', deepReview([file('src/a.js', { changes: undefined, additions: DEEP_LINES, deletions: 1 })]));
 
+  // Neither model reads an image, so a PNG with no patch must not pull a site PR onto the deep model.
+  check('an image, font or PDF with no patch is routine', !deepReview([file('brand/bg.png', { patch: undefined, changes: 0 }), file('fonts/a.woff2', { patch: undefined, changes: 0 }), file('docs/a.pdf', { patch: undefined, changes: 0 })]));
+  check('an archive or wasm with no patch is still deep', deepReview([file('vendor/a.zip', { patch: undefined })]) && deepReview([file('pkg/a.wasm', { patch: undefined })]));
+  check('an image under .github/ is still deep', deepReview([file('.github/assets/logo.png', { patch: undefined })]));
+
+  // Dependabot bumps: the same actions or images move to another sha, nothing else changes.
+  const A1 = 'a'.repeat(40), A2 = 'b'.repeat(40), D1 = '1'.repeat(64), D2 = '2'.repeat(64);
+  const bumpPatch = (rows) => '@@ -1,2 +1,2 @@\n' + rows.join('\n');
+  const actionBump = bumpPatch([`-      - uses: actions/setup-node@${A1} # v7.0.0`, `+      - uses: actions/setup-node@${A2} # v7.1.0`,
+    `-        uses: github/codeql-action/init@${A1}  # v4.38.2`, `+        uses: github/codeql-action/init@${A2}  # v4.38.3`]);
+  const imageBump = bumpPatch([`-FROM node:26-alpine@sha256:${D1} AS build`, `+FROM node:26-alpine@sha256:${D2} AS build`,
+    `-FROM gcr.io/oss-fuzz-base/base-builder-javascript@sha256:${D1}`, `+FROM gcr.io/oss-fuzz-base/base-builder-javascript@sha256:${D2}`]);
+  check('an action sha bump in a workflow is routine', !deepReview([file('.github/workflows/ci.yml', { patch: actionBump })]));
+  check('an image digest bump in a Dockerfile is routine', !deepReview([file('Dockerfile', { patch: imageBump })]) && !deepReview([file('.clusterfuzzlite/Dockerfile', { patch: imageBump })]));
+  check('a bump that swaps in another action is deep', deepReview([file('.github/workflows/ci.yml', { patch: bumpPatch([`-      - uses: actions/setup-node@${A1}`, `+      - uses: someone/setup-node@${A2}`]) })]));
+  check('a bump that swaps in another image is deep', deepReview([file('Dockerfile', { patch: bumpPatch([`-FROM node:26-alpine@sha256:${D1}`, `+FROM evil/node:26-alpine@sha256:${D2}`]) })]));
+  check('a bump with any other changed line is deep', deepReview([file('.github/workflows/ci.yml', { patch: actionBump + '\n+      - run: make all' })]));
+  check('an added action is deep', deepReview([file('.github/workflows/ci.yml', { patch: bumpPatch([`+      - uses: actions/setup-node@${A2}`]) })]));
+  check('a tag without a digest is deep', deepReview([file('Dockerfile', { patch: bumpPatch(['-FROM node:24-alpine', '+FROM node:26-alpine']) })]));
+  check('a new or renamed workflow is deep', deepReview([file('.github/workflows/ci.yml', { status: 'added', patch: actionBump })]) && deepReview([file('.github/workflows/ci.yml', { status: 'renamed', previous_filename: '.github/workflows/old.yml', patch: actionBump })]));
+  check('a bump in a file named for a security subject is deep', deepReview([file('.github/workflows/security-scan.yml', { patch: actionBump })]));
+  check('a workflow with no patch is deep', deepReview([file('.github/workflows/ci.yml', { patch: undefined })]));
+
   {
     const { ctx, calls } = world({ turns: [submit(APPROVE)] });
     ctx.model = 'gpt-5.6-terra'; ctx.deepModel = 'gpt-6-astra';

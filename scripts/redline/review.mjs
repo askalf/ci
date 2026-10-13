@@ -96,8 +96,14 @@ export const DEFAULT_PIN_MODEL = 'claude-opus-5-5';
 // where a missed finding costs the most. A PR is deep when a file sits under .github/, or a path
 // names one of the security subjects below, or it is a container or shell file, or GitHub showed no
 // patch for a file (too large to show), or the PR changes more lines than DEEP_LINES.
+// Two exceptions stay routine, because neither model can find more in them: an image, font, media
+// or PDF file (GitHub never shows a patch for one, so no model reads it), and a workflow or
+// Dockerfile whose only change moves pinned actions or images to another sha (versionBumpOnly).
 const DEEP_PATH = /(^|\/)\.github\/|(^|\/)Dockerfile[^/]*$|\.(sh|bash)$|auth|crypt|secret|token|credential|permission|sandbox|signing|signature|security|policy|warden|redline/i;
+const DEEP_NAME = /auth|crypt|secret|token|credential|permission|sandbox|signing|signature|security|policy|warden|redline/i;
 export const DEEP_LINES = 600;
+// Archives and wasm are left out on purpose: they can carry code.
+const BINARY_ASSET = /\.(png|jpe?g|gif|webp|avif|ico|bmp|tiff?|heic|pdf|woff2?|ttf|otf|eot|mp3|mp4|m4a|wav|ogg|webm|mov)$/i;
 
 // Claude Fable 5.1, Claude Mythos 5.1 and Claude Opus 5.5 answer a forced tool_choice (type "tool"
 // or "any") with 400 `tool_choice: type "tool" and "any" are not supported for this model.`, on
@@ -684,17 +690,46 @@ export function pinOnly(files) {
   });
 }
 
+// An action pinned to a full commit sha (a trailing version comment allowed), and an image pinned to
+// a sha256 digest. The capture is what the line points at without its version, so a bump (same
+// action, new sha) can be told apart from a swap (a different action).
+const ACTION_SHA_LINE = /^\s*(?:- )?uses: ([\w.-]+\/[\w./-]+)@[0-9a-f]{40}\s*(?:#.*)?$/;
+const IMAGE_DIGEST_LINE = /^\s*FROM\s+(?:--platform=\S+\s+)?([\w./-]+)(?::[\w.-]+)?@sha256:[0-9a-f]{64}(\s+AS\s+[\w.-]+)?\s*$/i;
+const DOCKERFILE = /(^|\/)Dockerfile[^/]*$/;
+
+/**
+ * True when a workflow or Dockerfile only moves pins: the file is modified, every added or removed
+ * line is an action at a commit sha (workflows) or an image at a digest (Dockerfiles), and the
+ * removed and added lines point at the same actions or images. A new action, a changed step, or a
+ * file whose own name is a security subject is not a bump. Pure.
+ * @param {{ filename: string, status: string, patch?: string }} f
+ */
+export function versionBumpOnly(f) {
+  if (f.status !== 'modified' || typeof f.patch !== 'string' || DEEP_NAME.test(f.filename)) return false;
+  const line = WORKFLOW_FILE.test(f.filename) ? ACTION_SHA_LINE : DOCKERFILE.test(f.filename) ? IMAGE_DIGEST_LINE : null;
+  if (!line) return false;
+  const removed = [];
+  const added = [];
+  for (const l of f.patch.split('\n')) {
+    if (!/^[+-]/.test(l) || /^(\+\+\+|---) /.test(l)) continue;
+    const m = line.exec(l.slice(1));
+    if (!m) return false;
+    (l[0] === '+' ? added : removed).push((m[1] + (m[2] ?? '')).toLowerCase());
+  }
+  return added.length > 0 && added.sort().join('\n') === removed.sort().join('\n');
+}
+
 /**
  * True when the PR should be read on REDLINE_DEEP_MODEL: a file path matches DEEP_PATH (the old
- * name of a rename too), GitHub showed no patch for a file, or the PR changes more than DEEP_LINES
- * lines. Pure.
- * @param {{ filename: string, previous_filename?: string, patch?: string, changes?: number, additions?: number, deletions?: number }[]} files
+ * name of a rename too) unless the file only bumps pins, GitHub showed no patch for a file that is
+ * not an image, font, media or PDF file, or the PR changes more than DEEP_LINES lines. Pure.
+ * @param {{ filename: string, status?: string, previous_filename?: string, patch?: string, changes?: number, additions?: number, deletions?: number }[]} files
  */
 export function deepReview(files) {
   let lines = 0;
   for (const f of files) {
-    if (DEEP_PATH.test(f.filename) || (f.previous_filename && DEEP_PATH.test(f.previous_filename))) return true;
-    if (typeof f.patch !== 'string') return true;
+    if ((DEEP_PATH.test(f.filename) || (f.previous_filename && DEEP_PATH.test(f.previous_filename))) && !versionBumpOnly(f)) return true;
+    if (typeof f.patch !== 'string' && !BINARY_ASSET.test(f.filename)) return true;
     lines += Number(f.changes ?? ((f.additions ?? 0) + (f.deletions ?? 0))) || 0;
   }
   return lines > DEEP_LINES;
