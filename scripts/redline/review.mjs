@@ -692,7 +692,8 @@ export function pinOnly(files) {
 
 // An action pinned to a full commit sha (a trailing version comment allowed), and an image pinned to
 // a sha256 digest. The captures are the whole line without its version (indentation, platform and
-// stage name kept), so a bump (same line, new sha) can be told apart from any other change.
+// stage name kept, case kept since action paths are case-sensitive), so a bump (same line, new sha)
+// can be told apart from any other change.
 const ACTION_SHA_LINE = /^(\s*(?:- )?uses: [\w.-]+\/[\w./-]+)@[0-9a-f]{40}\s*(?:#.*)?$/;
 const IMAGE_DIGEST_LINE = /^(\s*FROM\s+(?:--platform=\S+\s+)?[\w./-]+)(?::[\w.-]+)?@sha256:[0-9a-f]{64}(\s+AS\s+[\w.-]+)?\s*$/i;
 const DOCKERFILE = /(^|\/)Dockerfile[^/]*$/;
@@ -727,7 +728,7 @@ export function versionBumpOnly(f) {
     }
     const m = line.exec(l.slice(1));
     if (!m) return false;
-    (l[0] === '+' ? added : removed).push((m[1] + (m[2] ?? '')).toLowerCase());
+    (l[0] === '+' ? added : removed).push(m[1] + (m[2] ?? ''));
   }
   return sameRun() && bumps > 0;
 }

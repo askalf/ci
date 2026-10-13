@@ -967,6 +967,7 @@ console.log('\n  pin bump');
   check('an action sha bump in a workflow is routine', !deepReview([file('.github/workflows/ci.yml', { patch: actionBump })]));
   check('an image digest bump in a Dockerfile is routine', !deepReview([file('Dockerfile', { patch: imageBump })]) && !deepReview([file('.clusterfuzzlite/Dockerfile', { patch: imageBump })]));
   check('a bump that swaps in another action is deep', deepReview([file('.github/workflows/ci.yml', { patch: bumpPatch([`-      - uses: actions/setup-node@${A1}`, `+      - uses: someone/setup-node@${A2}`]) })]));
+  check('a bump that changes the case of an action path is deep', deepReview([file('.github/workflows/ci.yml', { patch: bumpPatch([`-      - uses: acme/actions/Build@${A1}`, `+      - uses: acme/actions/build@${A2}`]) })]));
   check('a bump that swaps in another image is deep', deepReview([file('Dockerfile', { patch: bumpPatch([`-FROM node:26-alpine@sha256:${D1}`, `+FROM evil/node:26-alpine@sha256:${D2}`]) })]));
   check('a bump with any other changed line is deep', deepReview([file('.github/workflows/ci.yml', { patch: actionBump + '\n+      - run: make all' })]));
   check('an added action is deep', deepReview([file('.github/workflows/ci.yml', { patch: bumpPatch([`+      - uses: actions/setup-node@${A2}`]) })]));
