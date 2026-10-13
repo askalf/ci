@@ -691,32 +691,45 @@ export function pinOnly(files) {
 }
 
 // An action pinned to a full commit sha (a trailing version comment allowed), and an image pinned to
-// a sha256 digest. The capture is what the line points at without its version, so a bump (same
-// action, new sha) can be told apart from a swap (a different action).
-const ACTION_SHA_LINE = /^\s*(?:- )?uses: ([\w.-]+\/[\w./-]+)@[0-9a-f]{40}\s*(?:#.*)?$/;
-const IMAGE_DIGEST_LINE = /^\s*FROM\s+(?:--platform=\S+\s+)?([\w./-]+)(?::[\w.-]+)?@sha256:[0-9a-f]{64}(\s+AS\s+[\w.-]+)?\s*$/i;
+// a sha256 digest. The captures are the whole line without its version (indentation, platform and
+// stage name kept), so a bump (same line, new sha) can be told apart from any other change.
+const ACTION_SHA_LINE = /^(\s*(?:- )?uses: [\w.-]+\/[\w./-]+)@[0-9a-f]{40}\s*(?:#.*)?$/;
+const IMAGE_DIGEST_LINE = /^(\s*FROM\s+(?:--platform=\S+\s+)?[\w./-]+)(?::[\w.-]+)?@sha256:[0-9a-f]{64}(\s+AS\s+[\w.-]+)?\s*$/i;
 const DOCKERFILE = /(^|\/)Dockerfile[^/]*$/;
 
 /**
  * True when a workflow or Dockerfile only moves pins: the file is modified, every added or removed
- * line is an action at a commit sha (workflows) or an image at a digest (Dockerfiles), and the
- * removed and added lines point at the same actions or images. A new action, a changed step, or a
- * file whose own name is a security subject is not a bump. Pure.
+ * line is an action at a commit sha (workflows) or an image at a digest (Dockerfiles), and each run
+ * of removed lines is replaced in place, line for line, by the same actions or images at the same
+ * indentation, platform and stage. A new, moved or swapped action, a changed step, or a file whose
+ * own name is a security subject is not a bump. Pure.
  * @param {{ filename: string, status: string, patch?: string }} f
  */
 export function versionBumpOnly(f) {
   if (f.status !== 'modified' || typeof f.patch !== 'string' || DEEP_NAME.test(f.filename)) return false;
   const line = WORKFLOW_FILE.test(f.filename) ? ACTION_SHA_LINE : DOCKERFILE.test(f.filename) ? IMAGE_DIGEST_LINE : null;
   if (!line) return false;
-  const removed = [];
-  const added = [];
+  let removed = [];
+  let added = [];
+  let bumps = 0;
+  const sameRun = () => {
+    const same = added.length === removed.length && added.every((k, i) => k === removed[i]);
+    bumps += added.length;
+    removed = [];
+    added = [];
+    return same;
+  };
   for (const l of f.patch.split('\n')) {
-    if (!/^[+-]/.test(l) || /^(\+\+\+|---) /.test(l)) continue;
+    if (l.startsWith('\\')) continue;
+    if (!/^[+-]/.test(l) || /^(\+\+\+|---) /.test(l)) {
+      if (!sameRun()) return false;
+      continue;
+    }
     const m = line.exec(l.slice(1));
     if (!m) return false;
     (l[0] === '+' ? added : removed).push((m[1] + (m[2] ?? '')).toLowerCase());
   }
-  return added.length > 0 && added.sort().join('\n') === removed.sort().join('\n');
+  return sameRun() && bumps > 0;
 }
 
 /**

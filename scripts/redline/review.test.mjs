@@ -974,6 +974,15 @@ console.log('\n  pin bump');
   check('a new or renamed workflow is deep', deepReview([file('.github/workflows/ci.yml', { status: 'added', patch: actionBump })]) && deepReview([file('.github/workflows/ci.yml', { status: 'renamed', previous_filename: '.github/workflows/old.yml', patch: actionBump })]));
   check('a bump in a file named for a security subject is deep', deepReview([file('.github/workflows/security-scan.yml', { patch: actionBump })]));
   check('a workflow with no patch is deep', deepReview([file('.github/workflows/ci.yml', { patch: undefined })]));
+  check('a bump that changes the build platform is deep',
+    deepReview([file('Dockerfile', { patch: bumpPatch([`-FROM --platform=linux/amd64 node@sha256:${D1} AS build`, `+FROM --platform=linux/arm64 node@sha256:${D2} AS build`]) })])
+    && deepReview([file('Dockerfile', { patch: bumpPatch([`-FROM node@sha256:${D1} AS build`, `+FROM --platform=linux/arm64 node@sha256:${D2} AS build`]) })])
+    && deepReview([file('Dockerfile', { patch: bumpPatch([`-FROM --platform=linux/amd64 node@sha256:${D1} AS build`, `+FROM node@sha256:${D2} AS build`]) })]));
+  check('a bump that swaps two actions between steps is deep', deepReview([file('.github/workflows/ci.yml', { patch: bumpPatch([
+    `-      - uses: actions/setup-node@${A1}`, `+      - uses: actions/cache@${A1}`, '        with:', '          node-version: 24',
+    `-      - uses: actions/cache@${A1}`, `+      - uses: actions/setup-node@${A1}`, '        with:', '          path: ~/.npm']) })]));
+  check('a bump that moves an action to another step is deep', deepReview([file('.github/workflows/ci.yml', { patch: bumpPatch([
+    `-      - uses: actions/setup-node@${A1}`, '        with:', '          node-version: 24', `+      - uses: actions/setup-node@${A2}`]) })]));
 
   {
     const { ctx, calls } = world({ turns: [submit(APPROVE)] });
