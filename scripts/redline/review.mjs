@@ -96,9 +96,9 @@ export const DEFAULT_PIN_MODEL = 'claude-opus-5-5';
 // where a missed finding costs the most. A PR is deep when a file sits under .github/, or a path
 // names one of the security subjects below, or it is a container or shell file, or GitHub showed no
 // patch for a file (too large to show), or the PR changes more lines than DEEP_LINES.
-// Two exceptions stay routine, because neither model can find more in them: an image, font, media
-// or PDF file (GitHub never shows a patch for one, so no model reads it), and a workflow or
-// Dockerfile whose only change moves pinned actions or images to another sha (versionBumpOnly).
+// Two routing exceptions: a workflow or Dockerfile whose only change moves pinned actions or images
+// to another sha (versionBumpOnly) gets routine review, and an image, font, media or PDF file does
+// not make the PR deep only because GitHub showed no patch for it. Size and other files still count.
 const DEEP_PATH = /(^|\/)\.github\/|(^|\/)Dockerfile[^/]*$|\.(sh|bash)$|auth|crypt|secret|token|credential|permission|sandbox|signing|signature|security|policy|warden|redline/i;
 const DEEP_NAME = /auth|crypt|secret|token|credential|permission|sandbox|signing|signature|security|policy|warden|redline/i;
 export const DEEP_LINES = 600;
