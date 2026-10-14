@@ -779,9 +779,14 @@ export async function runReview(ctx) {
       ctx.log?.(`the PR only moves pins; read on ${ctx.pinModel} instead of ${ctx.model}`);
       ctx.model = ctx.pinModel;
     }
-  } else if (ctx.deepModel && ctx.deepModel !== ctx.model && deepReview(files)) {
-    ctx.log?.(`the PR touches a sensitive path or is large; read on ${ctx.deepModel} instead of ${ctx.model}${ctx.deepKey ? ', on the deep key' : ''}`);
-    ctx.model = ctx.deepModel;
+  } else if (ctx.deepModel && deepReview(files)) {
+    // The deep key holds the deep budget apart even when the deep model is REDLINE_MODEL.
+    if (ctx.deepModel !== ctx.model) {
+      ctx.log?.(`the PR touches a sensitive path or is large; read on ${ctx.deepModel} instead of ${ctx.model}${ctx.deepKey ? ', on the deep key' : ''}`);
+      ctx.model = ctx.deepModel;
+    } else if (ctx.deepKey) {
+      ctx.log?.('the PR touches a sensitive path or is large; read on the deep key');
+    }
     if (ctx.deepKey) ctx.darioKey = ctx.deepKey;
   }
   const commits = await ghAll(ctx, `/repos/${repo}/pulls/${n}/commits`, 3);

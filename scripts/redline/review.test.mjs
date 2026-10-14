@@ -1008,6 +1008,19 @@ console.log('\n  pin bump');
     check('a deep PR is sent with REDLINE_DEEP_API_KEY when one is set', calls.keys.length > 0 && calls.keys.every((k) => k === 'deep'));
   }
   {
+    const { ctx, calls } = world({ files: [file('.github/workflows/release.yml')], turns: [submit(APPROVE)] });
+    ctx.model = 'gpt-5.6-terra'; ctx.deepModel = 'gpt-5.6-terra'; ctx.deepKey = 'deep';
+    await runReview(ctx);
+    check('a deep PR uses REDLINE_DEEP_API_KEY when the deep model is REDLINE_MODEL', calls.keys.length > 0 && calls.keys.every((k) => k === 'deep'));
+  }
+  {
+    const bumpPatch = `@@ -1 +1 @@\n-    uses: askalf/ci/.github/workflows/redline-review.yml@${'a'.repeat(40)}\n+    uses: askalf/ci/.github/workflows/redline-review.yml@${'b'.repeat(40)}`;
+    const { ctx, calls } = world({ files: [{ filename: '.github/workflows/redline.yml', status: 'modified', patch: bumpPatch }], turns: [submit(APPROVE)] });
+    ctx.model = 'gpt-5.6-terra'; ctx.pinModel = 'gpt-5.6-terra'; ctx.deepModel = 'gpt-5.6-terra'; ctx.deepKey = 'deep';
+    await runReview(ctx);
+    check('a pin bump keeps DARIO_API_KEY with a deep key set', calls.keys.length > 0 && calls.keys.every((k) => k === 'k'));
+  }
+  {
     const { ctx, calls } = world({ turns: [submit(APPROVE)] });
     ctx.model = 'gpt-5.6-terra'; ctx.deepModel = 'gpt-6-astra'; ctx.deepKey = 'deep';
     await runReview(ctx);
