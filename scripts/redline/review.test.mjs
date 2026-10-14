@@ -265,7 +265,7 @@ console.log('\n  verdictAtHead');
 
 const PATCH = '@@ -1 +1,2 @@\n+export const token = process.env.X;\n const y = 2;';
 function world({ reviews = [], heads = [HEAD], turns, modelStatus = [], draft = false, files = null } = {}) {
-  const calls = { posted: [], model: [], sleeps: 0 };
+  const calls = { posted: [], model: [], keys: [], sleeps: 0 };
   let headReads = 0;
   const json = (body, status = 200, headers = {}) => ({ ok: status < 300, status, headers: new Headers(headers), json: async () => body, text: async () => JSON.stringify(body) });
   const fetch = async (url, init = {}) => {
@@ -273,6 +273,7 @@ function world({ reviews = [], heads = [HEAD], turns, modelStatus = [], draft = 
     if (u.pathname.endsWith('/v1/messages')) {
       const body = JSON.parse(init.body);
       calls.model.push(body);
+      calls.keys.push(init.headers?.['x-api-key'] ?? '');
       if (modelStatus.length) {
         // A status, or a function of the request body returning one (or [status, headers]).
         const next = modelStatus.shift();
@@ -999,6 +1000,24 @@ console.log('\n  pin bump');
     await runReview(ctx);
     check('a deep PR is read on REDLINE_DEEP_MODEL', calls.model.length > 0 && calls.model.every((b) => b.model === 'gpt-6-astra'));
     check('and the switch is logged', lines.some((l) => l.includes('read on gpt-6-astra instead of gpt-5.6-terra')));
+  }
+  {
+    const { ctx, calls } = world({ files: [file('.github/workflows/release.yml')], turns: [submit(APPROVE)] });
+    ctx.model = 'gpt-5.6-terra'; ctx.deepModel = 'gpt-6-astra'; ctx.deepKey = 'deep';
+    await runReview(ctx);
+    check('a deep PR is sent with REDLINE_DEEP_API_KEY when one is set', calls.keys.length > 0 && calls.keys.every((k) => k === 'deep'));
+  }
+  {
+    const { ctx, calls } = world({ turns: [submit(APPROVE)] });
+    ctx.model = 'gpt-5.6-terra'; ctx.deepModel = 'gpt-6-astra'; ctx.deepKey = 'deep';
+    await runReview(ctx);
+    check('a routine PR keeps DARIO_API_KEY', calls.keys.length > 0 && calls.keys.every((k) => k === 'k'));
+  }
+  {
+    const { ctx, calls } = world({ files: [file('.github/workflows/release.yml')], turns: [submit(APPROVE)] });
+    ctx.model = 'gpt-5.6-terra'; ctx.deepModel = 'gpt-6-astra';
+    await runReview(ctx);
+    check('with no deep key a deep PR uses DARIO_API_KEY, as before', calls.keys.length > 0 && calls.keys.every((k) => k === 'k'));
   }
   {
     const { ctx, calls } = world({ files: [file('.github/workflows/release.yml')], turns: [submit(APPROVE)] });

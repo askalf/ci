@@ -52,7 +52,10 @@
 // claude-opus-5-5; set it empty for no fallback), and REDLINE_PIN_MODEL (default claude-opus-5-5,
 // the model for a PR that only moves Redline pins; set it empty to read those on REDLINE_MODEL), and
 // REDLINE_DEEP_MODEL (default empty, which turns it off: the model for a PR that deepReview() picks,
-// one touching workflows, auth, crypto, secrets or the like, or a large one). REDLINE_PROMPT_FILE names the system
+// one touching workflows, auth, crypto, secrets or the like, or a large one), and REDLINE_DEEP_API_KEY
+// (default empty: the deep model's reads go on DARIO_API_KEY; set, they go on this dario key, so a
+// large PR that spends the deep budget cannot stop routine reviews and pin bumps; not used with
+// DARIO_SOCKET, which is itself the credential). REDLINE_PROMPT_FILE names the system
 // prompt, installed on the runner host: this repository is public and carries no prompt, so there is
 // no bundled fallback, and a variable that is unset, a file that cannot be read or an empty file ends
 // the run. REDLINE_VERDICT_FILE, when set, is where verdict.json goes. REDLINE_CONTEXT_FILE, when set,
@@ -777,8 +780,9 @@ export async function runReview(ctx) {
       ctx.model = ctx.pinModel;
     }
   } else if (ctx.deepModel && ctx.deepModel !== ctx.model && deepReview(files)) {
-    ctx.log?.(`the PR touches a sensitive path or is large; read on ${ctx.deepModel} instead of ${ctx.model}`);
+    ctx.log?.(`the PR touches a sensitive path or is large; read on ${ctx.deepModel} instead of ${ctx.model}${ctx.deepKey ? ', on the deep key' : ''}`);
     ctx.model = ctx.deepModel;
+    if (ctx.deepKey) ctx.darioKey = ctx.deepKey;
   }
   const commits = await ghAll(ctx, `/repos/${repo}/pulls/${n}/commits`, 3);
   const diff = planDiff(files);
@@ -921,6 +925,7 @@ async function main() {
     fallbackModel: secrets.REDLINE_FALLBACK_MODEL ?? DEFAULT_FALLBACK_MODEL,
     pinModel: secrets.REDLINE_PIN_MODEL ?? DEFAULT_PIN_MODEL,
     deepModel: secrets.REDLINE_DEEP_MODEL || '',
+    deepKey: dario.darioSocket ? '' : (secrets.REDLINE_DEEP_API_KEY || ''),
     system,
     context,
     fetch: withDarioSocket(globalThis.fetch, dario.darioUrl, dario.darioSocket), sleep: (ms) => new Promise((r) => setTimeout(r, ms)), now: () => Date.now(),
