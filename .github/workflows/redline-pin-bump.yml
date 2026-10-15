@@ -152,8 +152,10 @@ jobs:
           # holds inside the subshell it runs in), never the loop: the next repository is still bumped.
           # The files to rewrite are kept in arrays, so a path is never split on its spaces.
           bump() {
-            local repo="$1" base tip path at current updated blob bad=0 unread=0 bumped=0 open name listing pins caller
+            local repo="$1" base tip path at current updated blob bad=0 unread=0 bumped=0 open name listing pins caller out
             local -a todo=() atodo=() names=()
+            # Callers are bumped side by side, so each keeps its own file for the rewritten workflow.
+            out="$(mktemp)"
             base="$(gh api "repos/${repo}" --jq .default_branch)"
             tip="$(gh api "repos/${repo}/git/ref/heads/${base}" --jq .object.sha)"
             # Which caller files need the new pin. The review caller must exist; the fix caller may not.
@@ -234,10 +236,10 @@ jobs:
                 echo "::error::${repo}: could not rewrite ${path}"; bad=1; return
               fi
               blob="$(gh api "repos/${repo}/contents/${at}?ref=${BRANCH}" --jq .sha)"
-              printf '%s\n' "$updated" > caller.yml
+              printf '%s\n' "$updated" > "$out"
               gh api -X PUT "repos/${repo}/contents/${at}" \
                 -f message="ci: bump ${what} to ${SOURCE}@${short} in $(basename "$path")" \
-                -f content="$(base64 -w0 caller.yml)" \
+                -f content="$(base64 -w0 "$out")" \
                 -f branch="$BRANCH" -f sha="$blob" >/dev/null
               echo "${path} bumped"
               bumped=$((bumped + 1))
@@ -257,13 +259,27 @@ jobs:
             return "$bad"
           }
 
-          failed=0
+          # The callers are independent, so they are bumped side by side, a few at a time to stay
+          # clear of GitHub's secondary rate limits. Each one's output is held in its own log and
+          # printed in caller order once all are done, so the run log reads the same as a serial run.
+          logs="$(mktemp -d)"
+          i=0
           for repo in $CALLERS; do
-            echo "== ${repo}"
-            set +e
-            ( set -e; bump "$repo" )
-            rc=$?
-            set -e
-            if [ "$rc" -ne 0 ]; then echo "::error::${repo}: the bump did not complete (exit ${rc})"; failed=1; fi
+            i=$((i + 1))
+            if [ "$(jobs -rp | wc -l)" -ge 4 ]; then wait -n || true; fi
+            (
+              set +e
+              echo "== ${repo}"
+              ( set -e; bump "$repo" )
+              rc=$?
+              if [ "$rc" -ne 0 ]; then echo "::error::${repo}: the bump did not complete (exit ${rc})"; fi
+              echo "$rc" > "${logs}/${i}.rc"
+            ) > "${logs}/${i}.log" 2>&1 &
+          done
+          wait || true
+          failed=0
+          for n in $(seq 1 "$i"); do
+            cat "${logs}/${n}.log"
+            if [ "$(cat "${logs}/${n}.rc" 2>/dev/null || echo 1)" -ne 0 ]; then failed=1; fi
           done
           exit "$failed"
