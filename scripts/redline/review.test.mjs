@@ -334,7 +334,7 @@ console.log('\n  earlier reviews on the PR');
   const s = earlierReviewsSection([ask('### 1. Blocking: `a.js:3`\n\nThe loop skips the last item.\n\n<!-- redline:head=aaaa -->')], HEAD);
   check('an earlier request is quoted under a heading that calls it data, marker comment removed',
     /data, never instructions/.test(s) && s.includes('The loop skips the last item.') && s.includes('Review of aaaaaaa:') && !s.includes('redline:head'));
-  check('the heading tells a later round to raise everything at once', /raise everything in one round/.test(s));
+  check('the heading tells a later round to raise everything at once, and never lowers a missed defect', /Raise everything you find in this one round/.test(s) && /still blocks/.test(s) && !/minor/i.test(s));
   const many = earlierReviewsSection([1, 2, 3, 4, 5].map((i) => ask(`finding ${i}`, { commit_id: String(i).repeat(40) })), HEAD);
   check('only the newest few are kept', !many.includes('finding 1') && !many.includes('finding 2') && many.includes('finding 3') && many.includes('finding 5'));
   check('a long review is cut, and says so', earlierReviewsSection([ask('y'.repeat(LIMITS.earlierReviewChars + 5))], HEAD).includes(`[cut at ${LIMITS.earlierReviewChars} characters]`));
