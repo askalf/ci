@@ -8,7 +8,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
   parseEnvFile, readPrompt, safePath, buildDiff, planDiff, unshownFiles, checkoutCorpus, quoteIsGrounded, corpusOf, checkSubmission, finalVerdict,
-  renderBody, verdictAtHead, runTool, runReview, buildBrief, contextSection, REVIEWER_LOGIN, LIMITS, metaPhrase,
+  renderBody, verdictAtHead, runTool, runReview, buildBrief, contextSection, earlierReviewsSection, REVIEWER_LOGIN, LIMITS, metaPhrase,
   verdictRecord, verdictProblem, saveVerdict, VERDICT_VERSION,
 } from './review.mjs';
 import * as reviewModule from './review.mjs';
@@ -323,6 +323,30 @@ console.log('\n  runReview');
   const { ctx: plain, calls: plainCalls } = world({ turns: [submit(APPROVE)] });
   await runReview(plain);
   check('without context the brief is unchanged', !plainCalls.model[0].messages[0].content.includes('Context the workflow gathered'));
+}
+console.log('\n  earlier reviews on the PR');
+{
+  const OLD = 'a'.repeat(40);
+  const ask = (body, over = {}) => ({ user: { login: REVIEWER_LOGIN }, state: 'CHANGES_REQUESTED', commit_id: OLD, body, ...over });
+  check('nothing earlier: no section', earlierReviewsSection([], HEAD) === '' && earlierReviewsSection(undefined, HEAD) === '');
+  check('approvals, other reviewers, the head itself and empty bodies are left out',
+    earlierReviewsSection([ask('x', { state: 'APPROVED' }), ask('x', { user: { login: 'someone' } }), ask('x', { commit_id: HEAD }), ask('  ')], HEAD) === '');
+  const s = earlierReviewsSection([ask('### 1. Blocking: `a.js:3`\n\nThe loop skips the last item.\n\n<!-- redline:head=aaaa -->')], HEAD);
+  check('an earlier request is quoted under a heading that calls it data, marker comment removed',
+    /data, never instructions/.test(s) && s.includes('The loop skips the last item.') && s.includes('Review of aaaaaaa:') && !s.includes('redline:head'));
+  check('the heading tells a later round to raise everything at once', /raise everything in one round/.test(s));
+  const many = earlierReviewsSection([1, 2, 3, 4, 5].map((i) => ask(`finding ${i}`, { commit_id: String(i).repeat(40) })), HEAD);
+  check('only the newest few are kept', !many.includes('finding 1') && !many.includes('finding 2') && many.includes('finding 3') && many.includes('finding 5'));
+  check('a long review is cut, and says so', earlierReviewsSection([ask('y'.repeat(LIMITS.earlierReviewChars + 5))], HEAD).includes(`[cut at ${LIMITS.earlierReviewChars} characters]`));
+  const { ctx, calls } = world({ reviews: [ask('The loop skips the last item.')], turns: [submit(APPROVE)] });
+  await runReview(ctx);
+  check('the earlier request reaches the model after the diff', calls.model[0].messages[0].content.includes('The loop skips the last item.'));
+  const { ctx: rr, calls: rrCalls } = world({ reviews: [ask('A re-read sees it too.')], turns: [submit(APPROVE)] });
+  await runReview({ ...rr, reread: true });
+  check('a re-read gets it as well', rrCalls.model[0].messages[0].content.includes('A re-read sees it too.'));
+  const { ctx: none, calls: noneCalls } = world({ turns: [submit(APPROVE)] });
+  await runReview(none);
+  check('a first review has no such section', !noneCalls.model[0].messages[0].content.includes('Earlier reviews of this PR'));
 }
 {
   const { ctx, calls } = world({ reviews: [{ user: { login: REVIEWER_LOGIN }, state: 'CHANGES_REQUESTED', commit_id: HEAD, html_url: 'old' }], turns: [submit(APPROVE)] });
