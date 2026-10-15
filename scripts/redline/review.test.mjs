@@ -347,6 +347,14 @@ console.log('\n  earlier reviews on the PR');
   const { ctx: none, calls: noneCalls } = world({ turns: [submit(APPROVE)] });
   await runReview(none);
   check('a first review has no such section', !noneCalls.model[0].messages[0].content.includes('Earlier reviews of this PR'));
+  const gone = 'for (let i = 0; i < items.length - 1; i++) {';
+  const stale = { ...GOOD, quote: gone, problem: 'The loop skips the last item.' };
+  const { ctx: old, calls: oldCalls } = world({ reviews: [ask(`### 1. Blocking: \`src/b.js:1\`\n\n\`\`\`\n${gone}\n\`\`\`\n\nThe loop skips the last item.`)],
+    turns: [submit({ verdict: 'REQUEST_CHANGES', summary: 'Still there.', findings: [stale] })] });
+  await runReview(old);
+  check('a line quoted only by an earlier review does not ground a finding at the head',
+    oldCalls.model[0].messages[0].content.includes(gone) && oldCalls.model.length === 2 && JSON.stringify(oldCalls.model[1].messages.at(-1)).includes('not in the diff')
+      && oldCalls.posted[0].body.includes('could be grounded') && !oldCalls.posted[0].body.includes(gone));
 }
 {
   const { ctx, calls } = world({ reviews: [{ user: { login: REVIEWER_LOGIN }, state: 'CHANGES_REQUESTED', commit_id: HEAD, html_url: 'old' }], turns: [submit(APPROVE)] });

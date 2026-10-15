@@ -813,10 +813,11 @@ export async function runReview(ctx) {
   }
   const commits = await ghAll(ctx, `/repos/${repo}/pulls/${n}/commits`, 3);
   const diff = planDiff(files);
-  const brief = buildBrief(pr, files, commits, diff.text) + contextSection(ctx.context) + earlierReviewsSection(reviews, headSha);
+  const brief = buildBrief(pr, files, commits, diff.text) + contextSection(ctx.context);
   const corpus = [...corpusOf(brief), ...checkoutCorpus(ctx.checkout, unshownFiles(files, diff.omitted))];
 
-  const messages = [{ role: 'user', content: `${brief}\n\nReview this change and finish with redline_submit.` }];
+  // Earlier reviews reach the model but not the corpus: a line they quote may be gone from the head.
+  const messages = [{ role: 'user', content: `${brief}${earlierReviewsSection(reviews, headSha)}\n\nReview this change and finish with redline_submit.` }];
   const started = ctx.now();
   let review = null;
   let repaired = false;
