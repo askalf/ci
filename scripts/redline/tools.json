@@ -116,6 +116,10 @@
                 },
                 "suggestion": {
                   "type": "string"
+                },
+                "rule": {
+                  "type": "string",
+                  "description": "This finding's rule slug (reads-as-generated, ai-attribution, secret-exposure, or none for a code finding). Required on a file the brief lists as captured data."
                 }
               }
             }

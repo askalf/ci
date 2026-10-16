@@ -412,16 +412,22 @@ console.log('\n  captured data (redline-protected)');
   const marked = protectedIn('src/b.js redline-protected\n', paths);
   check('protectedIn: the marked path and only it', marked.size === 1 && marked.has('src/b.js'));
   check('protectedIn: an unset mark does not count', protectedIn('src/b.js -redline-protected\n', paths).size === 0);
-  const prose = { verdict: 'REQUEST_CHANGES', rule: 'reads-as-generated', findings: [GOOD, { ...GOOD, file: 'src/a.js' }] };
-  check('capturedFindings: the findings on a protected path, in a review about wording',
-    capturedFindings(prose, new Set(['src/b.js'])).length === 1 && capturedFindings(prose, new Set(['src/b.js']))[0] === GOOD);
-  check('capturedFindings: an ai-attribution review is about wording too', capturedFindings({ ...prose, rule: 'ai-attribution' }, new Set(['src/b.js'])).length === 1);
-  for (const rule of ['secret-exposure', 'none', 'security', undefined]) {
-    check(`capturedFindings: a review whose rule is ${rule} keeps every finding`, capturedFindings({ ...prose, rule }, new Set(['src/b.js'])).length === 0);
+  const wording = { ...GOOD, rule: 'reads-as-generated' };
+  const prose = { verdict: 'REQUEST_CHANGES', rule: 'reads-as-generated', findings: [wording, { ...wording, file: 'src/a.js' }] };
+  const B = new Set(['src/b.js']);
+  check('capturedFindings: the wording findings on a protected path, by their own rule',
+    capturedFindings(prose, B).length === 1 && capturedFindings(prose, B)[0] === wording);
+  check('capturedFindings: ai-attribution is a wording rule too', capturedFindings({ ...prose, findings: [{ ...GOOD, rule: 'ai-attribution' }] }, B).length === 1);
+  for (const rule of ['secret-exposure', 'none', 'security']) {
+    check(`capturedFindings: a finding whose rule is ${rule} stands, whatever the review's rule`, capturedFindings({ ...prose, findings: [{ ...GOOD, rule }] }, B).length === 0);
   }
+  check('capturedFindings: a finding with no rule stands', capturedFindings({ ...prose, findings: [GOOD] }, B).length === 0);
+  check('capturedFindings: with unlabeled, a finding with no rule is asked about', capturedFindings({ ...prose, findings: [GOOD] }, B, { unlabeled: true }).length === 1);
   check('capturedFindings: nothing protected, nothing dropped', capturedFindings(prose, new Set()).length === 0);
+  check('checkSubmission: a malformed per-finding rule is refused', /rule must be a slug/.test(checkSubmission({ verdict: 'APPROVE', summary: 'ok', findings: [{ ...GOOD, rule: 'Not A Slug' }] }).error));
+  check('checkSubmission: a per-finding rule is kept', checkSubmission({ verdict: 'APPROVE', summary: 'ok', findings: [wording] }).review.findings[0].rule === 'reads-as-generated');
   const brief = buildBrief({ number: 7, title: 't', body: '', user: { login: 'a' }, head: { ref: 'h', sha: HEAD }, base: { ref: 'main', repo: { full_name: 'askalf/r' } } }, [{ filename: 'src/b.js', status: 'modified', additions: 1, deletions: 0 }], [], 'diff', ['src/b.js']);
-  check('the brief names the captured files and says a defect or a secret in them still counts', brief.includes(`Captured data, marked ${PROTECTED_ATTR}`) && brief.includes('a secret in it is): src/b.js'));
+  check('the brief names the captured files and says a defect or a secret in them still counts', brief.includes(`Captured data, marked ${PROTECTED_ATTR}`) && brief.includes('must carry its rule): src/b.js'));
 }
 {
   const { ctx } = world({ attributes: 'src/b.js redline-protected\n' });
@@ -431,7 +437,9 @@ console.log('\n  captured data (redline-protected)');
 }
 {
   const ATTRS = 'src/b.js redline-protected\n';
-  const prose = { verdict: 'REQUEST_CHANGES', summary: 'Punctuation in src/b.js.', findings: [GOOD], rule: 'reads-as-generated' };
+  const wording = { ...GOOD, rule: 'reads-as-generated' };
+  const injection = { ...GOOD, problem: 'Interpolates the request path into a shell command; a path with a semicolon runs it.', rule: 'none' };
+  const prose = { verdict: 'REQUEST_CHANGES', summary: 'Punctuation in src/b.js.', findings: [wording], rule: 'reads-as-generated' };
   {
     const { ctx, calls } = world({ attributes: ATTRS, turns: [submit(prose), submit(APPROVE)] });
     const r = await runReview(ctx);
@@ -446,14 +454,29 @@ console.log('\n  captured data (redline-protected)');
       r.verdict === 'REQUEST_CHANGES' && calls.posted[0].body.includes('every blocking finding was about the wording of captured data') && !calls.posted[0].body.includes('process.env.X'));
   }
   {
-    const injection = { ...GOOD, problem: 'Interpolates the request path into a shell command; a path with a semicolon runs it.' };
     const { ctx, calls } = world({ attributes: ATTRS, turns: [submit({ verdict: 'REQUEST_CHANGES', summary: 'Command injection in src/b.js.', findings: [injection], rule: 'none' })] });
     const r = await runReview(ctx);
     check('a security defect in protected executable code stays blocking, with no repair round',
       r.verdict === 'REQUEST_CHANGES' && calls.model.length === 1 && calls.posted[0].body.includes('process.env.X') && !calls.posted[0].body.includes('captured data'));
   }
   {
-    const { ctx, calls } = world({ attributes: ATTRS, turns: [submit({ ...prose, summary: 'A token in src/b.js.', rule: 'secret-exposure' })] });
+    // A mixed review: the wording finding goes, the security defect on the same captured file stays.
+    const mixed = { verdict: 'REQUEST_CHANGES', summary: 'Punctuation and a shell injection in src/b.js.', findings: [wording, injection], rule: 'reads-as-generated' };
+    const { ctx, calls } = world({ attributes: ATTRS, turns: [submit(mixed)] });
+    const r = await runReview(ctx);
+    const body = calls.posted[0].body;
+    check('a mixed review keeps the security defect through the repair and the drop',
+      r.verdict === 'REQUEST_CHANGES' && calls.model.length === 2 && body.includes('semicolon runs it') && body.includes('1 finding(s) dropped') && !body.includes('every blocking finding was about the wording'));
+  }
+  {
+    // No rule on a finding on captured data: asked once; still unlabeled, it stands.
+    const { ctx, calls } = world({ attributes: ATTRS, turns: [submit({ ...prose, findings: [GOOD] })] });
+    const r = await runReview(ctx);
+    check('a finding on captured data with no rule is asked about once, then stands',
+      r.verdict === 'REQUEST_CHANGES' && calls.model.length === 2 && JSON.stringify(calls.model[1].messages.at(-1)).includes('Give each finding there its rule') && calls.posted[0].body.includes('process.env.X') && !calls.posted[0].body.includes('dropped'));
+  }
+  {
+    const { ctx, calls } = world({ attributes: ATTRS, turns: [submit({ ...prose, summary: 'A token in src/b.js.', findings: [{ ...GOOD, rule: 'secret-exposure' }], rule: 'secret-exposure' })] });
     const r = await runReview(ctx);
     check('a secret in captured data is still a finding', r.verdict === 'REQUEST_CHANGES' && calls.model.length === 1 && calls.posted[0].body.includes('process.env.X'));
   }
