@@ -63,7 +63,8 @@
 // list) that the checkout and the PR cannot show; they go into the brief after the diff, as data, and
 // a set variable whose file cannot be read ends the run.
 
-import { readFileSync, readdirSync, lstatSync, realpathSync, appendFileSync, openSync, readSync, closeSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
+import { readFileSync, readdirSync, lstatSync, realpathSync, appendFileSync, openSync, readSync, closeSync, writeFileSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join, resolve, relative, isAbsolute, sep, dirname } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
@@ -271,6 +272,76 @@ export function corpusOf(brief) {
   return out;
 }
 
+/**
+ * A path the base commit marks `redline-protected` in .gitattributes is captured data (a payload
+ * copied from elsewhere, vendored code): its text is never written by hand and the fix lane never
+ * writes it, so a finding on its wording cannot be acted on and is dropped. Every other finding on
+ * it stands: a correctness or security defect, a secret. Those mean the capture must be redone.
+ */
+export const PROTECTED_ATTR = 'redline-protected';
+
+/** The paths `git check-attr -z redline-protected -- <paths>` reports as set or valued. Pure. */
+export function protectedFromCheckAttr(raw) {
+  const f = String(raw ?? '').split('\0');
+  const out = new Set();
+  for (let i = 0; i + 2 < f.length; i += 3) {
+    if (f[i] && !['unspecified', 'unset', 'false'].includes(f[i + 2])) out.add(f[i]);
+  }
+  return out;
+}
+
+/** The rules whose findings are about wording. Captured data is exempt from these and nothing else. */
+export const PROSE_RULES = new Set(['reads-as-generated', 'ai-attribution']);
+
+/**
+ * The root .gitattributes of the pull request's base commit, '' when the base has none. The marks
+ * come from the base, never from the head: a pull request cannot mark the files it adds or changes
+ * as captured for its own review. The mark lands first, in a reviewed change of its own.
+ */
+export async function baseAttributes(ctx, pr) {
+  try {
+    const r = await gh(ctx, `/repos/${ctx.repo}/contents/.gitattributes?ref=${pr.base.sha}`);
+    return r?.type === 'file' && r.encoding === 'base64' ? Buffer.from(String(r.content), 'base64').toString('utf8') : '';
+  } catch (e) {
+    if (/HTTP 404/.test(e.message)) return '';
+    throw e;
+  }
+}
+
+/**
+ * The given paths that `attributes` (a root .gitattributes text) marks redline-protected. git
+ * decides, in a scratch repository holding only that file, with no global or system config, so
+ * nothing in the checkout reaches the answer. An empty text marks nothing and asks git nothing.
+ * Throws when git cannot say.
+ */
+export function protectedIn(attributes, paths) {
+  if (!String(attributes ?? '').trim() || !paths.length) return new Set();
+  const dir = mkdtempSync(join(tmpdir(), 'redline-attrs-'));
+  try {
+    const env = { ...process.env, HOME: dir, XDG_CONFIG_HOME: dir, GIT_CONFIG_NOSYSTEM: '1' };
+    const init = spawnSync('git', ['init', '-q'], { cwd: dir, env, encoding: 'utf8' });
+    if (init.status !== 0) throw new Error(`git init failed: ${(init.stderr || init.error?.message || '').trim().slice(0, 200)}`);
+    writeFileSync(join(dir, '.gitattributes'), attributes);
+    const r = spawnSync('git', ['check-attr', '-z', PROTECTED_ATTR, '--', ...paths], { cwd: dir, env, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 });
+    if (r.status !== 0) throw new Error(`git check-attr failed: ${(r.stderr || r.error?.message || '').trim().slice(0, 200)}`);
+    return protectedFromCheckAttr(r.stdout);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+/**
+ * The findings on captured data (a path in `protectedSet`) that are about its wording: each
+ * finding carries its own rule, and one of PROSE_RULES names a wording finding. With `unlabeled`,
+ * a finding there with no rule is included too, so the repair round can ask for its rule; without
+ * it, such a finding stands, since nothing says it is about wording. A finding whose rule names
+ * anything else (a correctness or security defect, a secret) stands, protected path or not.
+ */
+export function capturedFindings(review, protectedSet, { unlabeled = false } = {}) {
+  if (!protectedSet?.size) return [];
+  return review.findings.filter((f) => protectedSet.has(f.file) && (PROSE_RULES.has(f.rule) || (unlabeled && !f.rule)));
+}
+
 /** Validate redline_submit input; returns { review } or { error }. */
 export function checkSubmission(input) {
   if (!input || typeof input !== 'object') return { error: 'redline_submit needs an object' };
@@ -280,6 +351,7 @@ export function checkSubmission(input) {
   for (const [i, f] of findings.entries()) {
     if (!f || (f.severity !== 'blocking' && f.severity !== 'minor')) return { error: `finding ${i + 1}: severity must be blocking or minor` };
     for (const k of ['file', 'quote', 'problem']) if (typeof f[k] !== 'string' || !f[k].trim()) return { error: `finding ${i + 1}: ${k} is required` };
+    if (f.rule !== undefined && !(typeof f.rule === 'string' && /^[a-z0-9-]{1,40}$/.test(f.rule))) return { error: `finding ${i + 1}: rule must be a slug such as reads-as-generated or none` };
   }
   // Prose only: the quote is copied from the diff and the rule slug is a machine field.
   const prose = [['summary', input.summary]];
@@ -408,7 +480,8 @@ export const TOOLS = [
         file: { type: 'string' }, line: { type: 'integer' },
         quote: { type: 'string', description: 'The exact lines, copied from the diff, PR text or a commit message.' },
         problem: { type: 'string', description: 'What is wrong: the input or state, and the wrong result.' },
-        suggestion: { type: 'string' } } } } } } },
+        suggestion: { type: 'string' },
+        rule: { type: 'string', description: 'This finding\'s rule slug (reads-as-generated, ai-attribution, secret-exposure, or none for a code finding). Required on a file the brief lists as captured data.' } } } } } } },
 ];
 
 export function runTool(root, name, input = {}) {
@@ -664,7 +737,7 @@ export function askForSubmit(messages) {
   }
 }
 
-export function buildBrief(pr, files, commits, diff) {
+export function buildBrief(pr, files, commits, diff, protectedFiles = []) {
   const body = (pr.body ?? '').slice(0, LIMITS.bodyChars);
   const commitLines = commits.slice(0, LIMITS.commits).map((c) => `- ${c.sha.slice(0, 7)} ${String(c.commit?.message ?? '').slice(0, LIMITS.commitChars).replace(/\n/g, '\n  ')}`);
   return [
@@ -674,6 +747,9 @@ export function buildBrief(pr, files, commits, diff) {
     '', 'PR description:', body || '(empty)',
     '', `Commits (${commits.length}):`, ...commitLines,
     '', `Changed files (${files.length}):`, ...files.map((f) => `- ${f.status} +${f.additions} -${f.deletions} ${f.filename}`),
+    ...(protectedFiles.length
+      ? ['', `Captured data, marked ${PROTECTED_ATTR} in .gitattributes (copied in, never written by hand: its wording is not a finding; a correctness or security defect or a secret in it is, and a finding there must carry its rule): ${protectedFiles.join(', ')}`]
+      : []),
     '', 'Diff:', diff,
   ].join('\n');
 }
@@ -813,7 +889,13 @@ export async function runReview(ctx) {
   }
   const commits = await ghAll(ctx, `/repos/${repo}/pulls/${n}/commits`, 3);
   const diff = planDiff(files);
-  const brief = buildBrief(pr, files, commits, diff.text) + contextSection(ctx.context);
+  let protectedSet = new Set();
+  try {
+    protectedSet = protectedIn(await baseAttributes(ctx, pr), files.filter((f) => f.status !== 'removed').map((f) => f.filename));
+  } catch (e) {
+    ctx.log?.(`no path counts as ${PROTECTED_ATTR}: ${e.message}`);
+  }
+  const brief = buildBrief(pr, files, commits, diff.text, [...protectedSet].sort()) + contextSection(ctx.context);
   const corpus = [...corpusOf(brief), ...checkoutCorpus(ctx.checkout, unshownFiles(files, diff.omitted))];
 
   // Earlier reviews reach the model but not the corpus: a line they quote may be gone from the head.
@@ -821,6 +903,7 @@ export async function runReview(ctx) {
   const started = ctx.now();
   let review = null;
   let repaired = false;
+  let repairedCaptured = false;
   let textOnly = 0;
   const notes = [];
   // A text answer is not a review: nothing in prose is graded, grounded or posted. Five of eight
@@ -897,6 +980,24 @@ export async function runReview(ctx) {
         notes.push(`${bad.length} finding(s) dropped: their quotes are not in the diff.`);
         if (checked.review.verdict === 'REQUEST_CHANGES' && !checked.review.findings.some((f) => f.severity === 'blocking')) {
           notes.push('The review asked for changes but none of its blocking findings could be grounded in the diff. Re-run the check.');
+        }
+      }
+      // One repair round covers a wording finding on captured data and a finding there with no
+      // rule; after it, only a finding that names a wording rule is dropped, the rest stand.
+      const askAbout = capturedFindings(checked.review, protectedSet, { unlabeled: true });
+      if (askAbout.length && !repairedCaptured && turn < LIMITS.turns) {
+        repairedCaptured = true;
+        ctx.log?.(`  ${askAbout.length} finding(s) on captured data: one repair round offered`);
+        results.push({ type: 'tool_result', tool_use_id: u.id, is_error: true, content:
+          `These findings are on captured data the repository marks ${PROTECTED_ATTR} (${[...new Set(askAbout.map((f) => f.file))].join(', ')}): its text is copied in and never written by hand, so its wording or punctuation is not a finding. Give each finding there its rule: drop one about wording (reads-as-generated, ai-attribution); keep a correctness or security defect or a secret, with the rule set to that. Then call redline_submit again.` });
+        continue;
+      }
+      const captured = capturedFindings(checked.review, protectedSet);
+      if (captured.length) {
+        checked.review.findings = checked.review.findings.filter((f) => !captured.includes(f));
+        notes.push(`${captured.length} finding(s) dropped: they are about the wording of captured data (${[...new Set(captured.map((f) => f.file))].join(', ')}), which is copied in and never written by hand.`);
+        if (checked.review.verdict === 'REQUEST_CHANGES' && !checked.review.findings.some((f) => f.severity === 'blocking')) {
+          notes.push('The review asked for changes but every blocking finding was about the wording of captured data. Re-run the check.');
         }
       }
       review = checked.review;

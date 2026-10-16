@@ -17,7 +17,13 @@ this repository; `review.test.mjs` runs it all against a stubbed GitHub and mode
 stand-in in `test-fixtures/`. `tools.json` is `TOOLS` as a file, pinned in the repository's
 `truecopy.lock` and verified by `truecopy-gate.yml`; `dump-tools.mjs --check` fails when the two
 drift apart. A finding must quote the diff, the PR text or a commit message, or, for a changed file
-the diff could not show, that file in the checkout. `redline_search` runs in a child process killed
+the diff could not show, that file in the checkout. A changed file the base commit's root
+`.gitattributes` marks `redline-protected` (captured payloads, vendored code) is named in the brief
+as captured data: a wording finding on it (its own rule `reads-as-generated` or `ai-attribution`;
+each finding carries a rule) is sent back once and then dropped, since nobody writes that text by
+hand. A correctness or security finding, or a secret, stands there as anywhere, a finding there
+with no rule is asked about once and then stands, and a mark the pull request itself adds counts
+for nothing until it has merged. `redline_search` runs in a child process killed
 after 10 seconds, so a pattern that backtracks without end cannot stall the review.
 
 ## The fix: `redline-fix-run.yml` and `fix.mjs`

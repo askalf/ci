@@ -12,6 +12,7 @@ import {
   verdictRecord, verdictProblem, saveVerdict, VERDICT_VERSION,
 } from './review.mjs';
 import * as reviewModule from './review.mjs';
+import { protectedIn, baseAttributes, capturedFindings, PROTECTED_ATTR } from './review.mjs';
 import { withRetry, OutOfTime, darioAccess, socketFetch, withDarioSocket, callModelWith } from './review.mjs';
 import { createServer as createHttpServer } from 'node:http';
 import { bumpCaller, REVIEW_WORKFLOW } from './pin.mjs';
@@ -25,6 +26,7 @@ function check(name, cond) {
 async function throws(fn) { try { await fn(); return null; } catch (e) { return e; } }
 
 const HEAD = '47536435fb5c9540d8cb36fd26d81e101955b364';
+const BASE = '1111111111111111111111111111111111111111';
 const OTHER = '34b7875f46525f7899a4e6601fbca4be75443903';
 
 console.log('\n  parseEnvFile');
@@ -264,7 +266,7 @@ console.log('\n  verdictAtHead');
 
 
 const PATCH = '@@ -1 +1,2 @@\n+export const token = process.env.X;\n const y = 2;';
-function world({ reviews = [], heads = [HEAD], turns, modelStatus = [], draft = false, files = null } = {}) {
+function world({ reviews = [], heads = [HEAD], turns, modelStatus = [], draft = false, files = null, attributes = null } = {}) {
   const calls = { posted: [], model: [], keys: [], sleeps: 0 };
   let headReads = 0;
   const json = (body, status = 200, headers = {}) => ({ ok: status < 300, status, headers: new Headers(headers), json: async () => body, text: async () => JSON.stringify(body) });
@@ -285,8 +287,9 @@ function world({ reviews = [], heads = [HEAD], turns, modelStatus = [], draft = 
     }
     const p = u.pathname;
     if (init.method === 'POST' && p.endsWith('/reviews')) { const b = JSON.parse(init.body); calls.posted.push({ ...b, auth: init.headers.authorization }); return json({ html_url: 'https://x/review/1' }); }
-    if (/\/pulls\/7$/.test(p)) { const sha = heads[Math.min(headReads++, heads.length - 1)]; return json({ number: 7, state: 'open', draft, title: 'feat: add token', body: 'Adds it.', user: { login: 'askalf' }, head: { sha, ref: 'feat/x', repo: { full_name: 'askalf/r' } }, base: { ref: 'main', repo: { full_name: 'askalf/r' } } }); }
+    if (/\/pulls\/7$/.test(p)) { const sha = heads[Math.min(headReads++, heads.length - 1)]; return json({ number: 7, state: 'open', draft, title: 'feat: add token', body: 'Adds it.', user: { login: 'askalf' }, head: { sha, ref: 'feat/x', repo: { full_name: 'askalf/r' } }, base: { ref: 'main', sha: BASE, repo: { full_name: 'askalf/r' } } }); }
     if (p.endsWith('/reviews')) return json(u.searchParams.get('page') === '1' ? reviews : []);
+    if (p.endsWith('/contents/.gitattributes')) return attributes === null ? json({ message: 'Not Found' }, 404) : json({ type: 'file', encoding: 'base64', content: Buffer.from(attributes).toString('base64') });
     if (p.endsWith('/files')) return json(u.searchParams.get('page') === '1' ? (files ?? [{ filename: 'src/b.js', status: 'modified', additions: 1, deletions: 0, patch: PATCH }]) : []);
     if (p.endsWith('/commits')) return json(u.searchParams.get('page') === '1' ? [{ sha: HEAD, commit: { message: 'feat: add token' } }] : []);
     return json({ message: `unexpected ${p}` }, 404);
@@ -400,6 +403,92 @@ console.log('\n  earlier reviews on the PR');
   const { ctx, calls } = world({ turns: [submit({ ...APPROVE, findings: [GOOD] })] });
   const r = await runReview(ctx);
   check('APPROVE with a blocking finding posts REQUEST_CHANGES', r.verdict === 'REQUEST_CHANGES' && calls.posted[0].event === 'REQUEST_CHANGES');
+}
+
+console.log('\n  captured data (redline-protected)');
+{
+  const paths = ['src/b.js', 'src/a.js'];
+  check('protectedIn: an empty .gitattributes marks nothing', protectedIn('', paths).size === 0 && protectedIn('   \n', paths).size === 0);
+  const marked = protectedIn('src/b.js redline-protected\n', paths);
+  check('protectedIn: the marked path and only it', marked.size === 1 && marked.has('src/b.js'));
+  check('protectedIn: an unset mark does not count', protectedIn('src/b.js -redline-protected\n', paths).size === 0);
+  const wording = { ...GOOD, rule: 'reads-as-generated' };
+  const prose = { verdict: 'REQUEST_CHANGES', rule: 'reads-as-generated', findings: [wording, { ...wording, file: 'src/a.js' }] };
+  const B = new Set(['src/b.js']);
+  check('capturedFindings: the wording findings on a protected path, by their own rule',
+    capturedFindings(prose, B).length === 1 && capturedFindings(prose, B)[0] === wording);
+  check('capturedFindings: ai-attribution is a wording rule too', capturedFindings({ ...prose, findings: [{ ...GOOD, rule: 'ai-attribution' }] }, B).length === 1);
+  for (const rule of ['secret-exposure', 'none', 'security']) {
+    check(`capturedFindings: a finding whose rule is ${rule} stands, whatever the review's rule`, capturedFindings({ ...prose, findings: [{ ...GOOD, rule }] }, B).length === 0);
+  }
+  check('capturedFindings: a finding with no rule stands', capturedFindings({ ...prose, findings: [GOOD] }, B).length === 0);
+  check('capturedFindings: with unlabeled, a finding with no rule is asked about', capturedFindings({ ...prose, findings: [GOOD] }, B, { unlabeled: true }).length === 1);
+  check('capturedFindings: nothing protected, nothing dropped', capturedFindings(prose, new Set()).length === 0);
+  check('checkSubmission: a malformed per-finding rule is refused', /rule must be a slug/.test(checkSubmission({ verdict: 'APPROVE', summary: 'ok', findings: [{ ...GOOD, rule: 'Not A Slug' }] }).error));
+  check('checkSubmission: a per-finding rule is kept', checkSubmission({ verdict: 'APPROVE', summary: 'ok', findings: [wording] }).review.findings[0].rule === 'reads-as-generated');
+  const brief = buildBrief({ number: 7, title: 't', body: '', user: { login: 'a' }, head: { ref: 'h', sha: HEAD }, base: { ref: 'main', repo: { full_name: 'askalf/r' } } }, [{ filename: 'src/b.js', status: 'modified', additions: 1, deletions: 0 }], [], 'diff', ['src/b.js']);
+  check('the brief names the captured files and says a defect or a secret in them still counts', brief.includes(`Captured data, marked ${PROTECTED_ATTR}`) && brief.includes('must carry its rule): src/b.js'));
+}
+{
+  const { ctx } = world({ attributes: 'src/b.js redline-protected\n' });
+  check('baseAttributes: the base commit\'s root .gitattributes', await baseAttributes(ctx, { base: { sha: BASE } }) === 'src/b.js redline-protected\n');
+  const { ctx: none } = world();
+  check('baseAttributes: a base without one reads as empty', await baseAttributes(none, { base: { sha: BASE } }) === '');
+}
+{
+  const ATTRS = 'src/b.js redline-protected\n';
+  const wording = { ...GOOD, rule: 'reads-as-generated' };
+  const injection = { ...GOOD, problem: 'Interpolates the request path into a shell command; a path with a semicolon runs it.', rule: 'none' };
+  const prose = { verdict: 'REQUEST_CHANGES', summary: 'Punctuation in src/b.js.', findings: [wording], rule: 'reads-as-generated' };
+  {
+    const { ctx, calls } = world({ attributes: ATTRS, turns: [submit(prose), submit(APPROVE)] });
+    const r = await runReview(ctx);
+    check('a wording finding on captured data gets one repair round, then the clean review posts',
+      r.verdict === 'APPROVE' && calls.model.length === 2 && JSON.stringify(calls.model[1].messages.at(-1)).includes('captured data the repository marks redline-protected (src/b.js)'));
+    check('the brief told the model which files are captured', calls.model[0].messages[0].content.includes(`Captured data, marked ${PROTECTED_ATTR}`));
+  }
+  {
+    const { ctx, calls } = world({ attributes: ATTRS, turns: [submit(prose)] });
+    const r = await runReview(ctx);
+    check('still a wording finding after the repair: dropped, and the review fails closed with a note',
+      r.verdict === 'REQUEST_CHANGES' && calls.posted[0].body.includes('every blocking finding was about the wording of captured data') && !calls.posted[0].body.includes('process.env.X'));
+  }
+  {
+    const { ctx, calls } = world({ attributes: ATTRS, turns: [submit({ verdict: 'REQUEST_CHANGES', summary: 'Command injection in src/b.js.', findings: [injection], rule: 'none' })] });
+    const r = await runReview(ctx);
+    check('a security defect in protected executable code stays blocking, with no repair round',
+      r.verdict === 'REQUEST_CHANGES' && calls.model.length === 1 && calls.posted[0].body.includes('process.env.X') && !calls.posted[0].body.includes('captured data'));
+  }
+  {
+    // A mixed review: the wording finding goes, the security defect on the same captured file stays.
+    const mixed = { verdict: 'REQUEST_CHANGES', summary: 'Punctuation and a shell injection in src/b.js.', findings: [wording, injection], rule: 'reads-as-generated' };
+    const { ctx, calls } = world({ attributes: ATTRS, turns: [submit(mixed)] });
+    const r = await runReview(ctx);
+    const body = calls.posted[0].body;
+    check('a mixed review keeps the security defect through the repair and the drop',
+      r.verdict === 'REQUEST_CHANGES' && calls.model.length === 2 && body.includes('semicolon runs it') && body.includes('1 finding(s) dropped') && !body.includes('every blocking finding was about the wording'));
+  }
+  {
+    // No rule on a finding on captured data: asked once; still unlabeled, it stands.
+    const { ctx, calls } = world({ attributes: ATTRS, turns: [submit({ ...prose, findings: [GOOD] })] });
+    const r = await runReview(ctx);
+    check('a finding on captured data with no rule is asked about once, then stands',
+      r.verdict === 'REQUEST_CHANGES' && calls.model.length === 2 && JSON.stringify(calls.model[1].messages.at(-1)).includes('Give each finding there its rule') && calls.posted[0].body.includes('process.env.X') && !calls.posted[0].body.includes('dropped'));
+  }
+  {
+    const { ctx, calls } = world({ attributes: ATTRS, turns: [submit({ ...prose, summary: 'A token in src/b.js.', findings: [{ ...GOOD, rule: 'secret-exposure' }], rule: 'secret-exposure' })] });
+    const r = await runReview(ctx);
+    check('a secret in captured data is still a finding', r.verdict === 'REQUEST_CHANGES' && calls.model.length === 1 && calls.posted[0].body.includes('process.env.X'));
+  }
+  {
+    // The head marks the file, the base does not: the mark the pull request brings does not count.
+    writeFileSync(join(root, '.gitattributes'), ATTRS);
+    const { ctx, calls } = world({ turns: [submit(prose)] });
+    const r = await runReview(ctx);
+    rmSync(join(root, '.gitattributes'), { force: true });
+    check('a mark the pull request itself adds does not exempt anything',
+      r.verdict === 'REQUEST_CHANGES' && calls.model.length === 1 && calls.posted[0].body.includes('process.env.X') && !calls.model[0].messages[0].content.includes('Captured data'));
+  }
 }
 {
   const { ctx, calls } = world({ modelStatus: [429, 503], turns: [submit(APPROVE)] });
