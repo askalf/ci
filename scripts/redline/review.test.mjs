@@ -12,6 +12,7 @@ import {
   verdictRecord, verdictProblem, saveVerdict, VERDICT_VERSION,
 } from './review.mjs';
 import * as reviewModule from './review.mjs';
+import { protectedChanged, capturedFindings, PROTECTED_ATTR } from './review.mjs';
 import { withRetry, OutOfTime, darioAccess, socketFetch, withDarioSocket, callModelWith } from './review.mjs';
 import { createServer as createHttpServer } from 'node:http';
 import { bumpCaller, REVIEW_WORKFLOW } from './pin.mjs';
@@ -400,6 +401,49 @@ console.log('\n  earlier reviews on the PR');
   const { ctx, calls } = world({ turns: [submit({ ...APPROVE, findings: [GOOD] })] });
   const r = await runReview(ctx);
   check('APPROVE with a blocking finding posts REQUEST_CHANGES', r.verdict === 'REQUEST_CHANGES' && calls.posted[0].event === 'REQUEST_CHANGES');
+}
+
+console.log('\n  captured data (redline-protected)');
+{
+  const files = [{ filename: 'src/b.js', status: 'modified' }, { filename: 'gone.js', status: 'removed' }];
+  check('no .gitattributes: nothing is protected and git is not asked', protectedChanged(root, files, (l) => { throw new Error(l); }).size === 0);
+  const prose = { verdict: 'REQUEST_CHANGES', rule: 'reads-as-generated', findings: [GOOD, { ...GOOD, file: 'src/a.js' }] };
+  check('capturedFindings: the findings on a protected path, in a review that is not about a secret',
+    capturedFindings(prose, new Set(['src/b.js'])).length === 1 && capturedFindings(prose, new Set(['src/b.js']))[0] === GOOD);
+  check('capturedFindings: a secret-exposure review keeps every finding', capturedFindings({ ...prose, rule: 'secret-exposure' }, new Set(['src/b.js'])).length === 0);
+  check('capturedFindings: nothing protected, nothing dropped', capturedFindings(prose, new Set()).length === 0);
+  const brief = buildBrief({ number: 7, title: 't', body: '', user: { login: 'a' }, head: { ref: 'h', sha: HEAD }, base: { ref: 'main', repo: { full_name: 'askalf/r' } } }, [{ filename: 'src/b.js', status: 'modified', additions: 1, deletions: 0 }], [], 'diff', ['src/b.js']);
+  check('the brief names the captured files and says a secret in them is still a finding', brief.includes(`Captured data, marked ${PROTECTED_ATTR}`) && brief.includes('rule secret-exposure): src/b.js'));
+}
+{
+  // A checkout that marks src/b.js captured: git reads the mark from the working tree.
+  const init = spawnSync('git', ['init', '-q', root], { encoding: 'utf8' });
+  check('a scratch repository for the attribute tests', init.status === 0);
+  writeFileSync(join(root, '.gitattributes'), 'src/b.js redline-protected\n');
+  const files = [{ filename: 'src/b.js', status: 'modified' }, { filename: 'src/a.js', status: 'modified' }];
+  const marked = protectedChanged(root, files);
+  check('protectedChanged: the marked path and only it', marked.size === 1 && marked.has('src/b.js'));
+  const prose = { verdict: 'REQUEST_CHANGES', summary: 'Punctuation in src/b.js.', findings: [GOOD], rule: 'reads-as-generated' };
+  {
+    const { ctx, calls } = world({ turns: [submit(prose), submit(APPROVE)] });
+    const r = await runReview(ctx);
+    check('a finding on captured data gets one repair round, then the clean review posts',
+      r.verdict === 'APPROVE' && calls.model.length === 2 && JSON.stringify(calls.model[1].messages.at(-1)).includes('captured data the repository marks redline-protected (src/b.js)'));
+    check('the brief told the model which files are captured', calls.model[0].messages[0].content.includes(`Captured data, marked ${PROTECTED_ATTR}`));
+  }
+  {
+    const { ctx, calls } = world({ turns: [submit(prose)] });
+    const r = await runReview(ctx);
+    check('still on captured data after the repair: dropped, and the review fails closed with a note',
+      r.verdict === 'REQUEST_CHANGES' && calls.posted[0].body.includes('every blocking finding was about captured data') && !calls.posted[0].body.includes('process.env.X'));
+  }
+  {
+    const { ctx, calls } = world({ turns: [submit({ ...prose, summary: 'A token in src/b.js.', rule: 'secret-exposure' })] });
+    const r = await runReview(ctx);
+    check('a secret in captured data is still a finding', r.verdict === 'REQUEST_CHANGES' && calls.model.length === 1 && calls.posted[0].body.includes('process.env.X'));
+  }
+  rmSync(join(root, '.git'), { recursive: true, force: true });
+  rmSync(join(root, '.gitattributes'), { force: true });
 }
 {
   const { ctx, calls } = world({ modelStatus: [429, 503], turns: [submit(APPROVE)] });

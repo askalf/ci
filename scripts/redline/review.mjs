@@ -271,6 +271,65 @@ export function corpusOf(brief) {
   return out;
 }
 
+/**
+ * A path the repository marks `redline-protected` in .gitattributes is captured data (a payload
+ * copied from elsewhere, vendored code): its text is never written by hand, so a finding on its
+ * wording cannot be acted on, and the fix lane never writes it. The only finding that stands on
+ * one is a secret, which means the capture itself must be redone.
+ */
+export const PROTECTED_ATTR = 'redline-protected';
+
+/** The paths `git check-attr -z redline-protected -- <paths>` reports as set or valued. Pure. */
+export function protectedFromCheckAttr(raw) {
+  const f = String(raw ?? '').split('\0');
+  const out = new Set();
+  for (let i = 0; i + 2 < f.length; i += 3) {
+    if (f[i] && !['unspecified', 'unset', 'false'].includes(f[i + 2])) out.add(f[i]);
+  }
+  return out;
+}
+
+/**
+ * True when a .gitattributes file sits in the checkout root or in a directory above one of the
+ * paths, the places git reads attributes for them from. A checkout without one has nothing to
+ * ask git about, and most have none.
+ */
+function hasAttributes(root, paths) {
+  const dirs = new Set(['']);
+  for (const p of paths) {
+    const parts = p.split('/');
+    for (let i = 1; i < parts.length; i++) dirs.add(parts.slice(0, i).join('/'));
+  }
+  for (const d of dirs) {
+    try { if (lstatSync(join(root, d, '.gitattributes')).isFile()) return true; } catch { /* none here */ }
+  }
+  return false;
+}
+
+/**
+ * The changed paths the checkout's .gitattributes marks redline-protected. The checkout is the
+ * reviewed head (the workflow checks that before this runs) and the tools here never write it, so
+ * git reads the attributes in place. When git cannot say (no repository, a failed call), the set is
+ * empty and every finding stands; `log` gets the reason.
+ */
+export function protectedChanged(root, files, log) {
+  const paths = files.filter((f) => f.status !== 'removed').map((f) => f.filename);
+  if (!paths.length || !hasAttributes(root, paths)) return new Set();
+  const r = spawnSync('git', ['check-attr', '-z', PROTECTED_ATTR, '--', ...paths], { cwd: root, encoding: 'utf8', env: { ...process.env, GIT_CONFIG_NOSYSTEM: '1' }, maxBuffer: 16 * 1024 * 1024 });
+  if (r.status !== 0) { log?.(`git check-attr failed in the checkout; no path counts as ${PROTECTED_ATTR}: ${(r.stderr || r.error?.message || '').trim().slice(0, 200)}`); return new Set(); }
+  return protectedFromCheckAttr(r.stdout);
+}
+
+/**
+ * The findings that are about captured data: on a path in `protectedSet`, in a review whose rule
+ * is not `secret-exposure`. Such text is copied in and never edited by hand, so its wording,
+ * punctuation or shape is not a finding; a secret in it is, and keeps every finding on the file.
+ */
+export function capturedFindings(review, protectedSet) {
+  if (!protectedSet?.size || review.rule === 'secret-exposure') return [];
+  return review.findings.filter((f) => protectedSet.has(f.file));
+}
+
 /** Validate redline_submit input; returns { review } or { error }. */
 export function checkSubmission(input) {
   if (!input || typeof input !== 'object') return { error: 'redline_submit needs an object' };
@@ -664,7 +723,7 @@ export function askForSubmit(messages) {
   }
 }
 
-export function buildBrief(pr, files, commits, diff) {
+export function buildBrief(pr, files, commits, diff, protectedFiles = []) {
   const body = (pr.body ?? '').slice(0, LIMITS.bodyChars);
   const commitLines = commits.slice(0, LIMITS.commits).map((c) => `- ${c.sha.slice(0, 7)} ${String(c.commit?.message ?? '').slice(0, LIMITS.commitChars).replace(/\n/g, '\n  ')}`);
   return [
@@ -674,6 +733,9 @@ export function buildBrief(pr, files, commits, diff) {
     '', 'PR description:', body || '(empty)',
     '', `Commits (${commits.length}):`, ...commitLines,
     '', `Changed files (${files.length}):`, ...files.map((f) => `- ${f.status} +${f.additions} -${f.deletions} ${f.filename}`),
+    ...(protectedFiles.length
+      ? ['', `Captured data, marked ${PROTECTED_ATTR} in .gitattributes (copied in, never written by hand; its wording is not a finding, a secret in it is, rule secret-exposure): ${protectedFiles.join(', ')}`]
+      : []),
     '', 'Diff:', diff,
   ].join('\n');
 }
@@ -813,7 +875,8 @@ export async function runReview(ctx) {
   }
   const commits = await ghAll(ctx, `/repos/${repo}/pulls/${n}/commits`, 3);
   const diff = planDiff(files);
-  const brief = buildBrief(pr, files, commits, diff.text) + contextSection(ctx.context);
+  const protectedSet = protectedChanged(ctx.checkout, files, ctx.log);
+  const brief = buildBrief(pr, files, commits, diff.text, [...protectedSet].sort()) + contextSection(ctx.context);
   const corpus = [...corpusOf(brief), ...checkoutCorpus(ctx.checkout, unshownFiles(files, diff.omitted))];
 
   // Earlier reviews reach the model but not the corpus: a line they quote may be gone from the head.
@@ -821,6 +884,7 @@ export async function runReview(ctx) {
   const started = ctx.now();
   let review = null;
   let repaired = false;
+  let repairedCaptured = false;
   let textOnly = 0;
   const notes = [];
   // A text answer is not a review: nothing in prose is graded, grounded or posted. Five of eight
@@ -897,6 +961,21 @@ export async function runReview(ctx) {
         notes.push(`${bad.length} finding(s) dropped: their quotes are not in the diff.`);
         if (checked.review.verdict === 'REQUEST_CHANGES' && !checked.review.findings.some((f) => f.severity === 'blocking')) {
           notes.push('The review asked for changes but none of its blocking findings could be grounded in the diff. Re-run the check.');
+        }
+      }
+      const captured = capturedFindings(checked.review, protectedSet);
+      if (captured.length && !repairedCaptured && turn < LIMITS.turns) {
+        repairedCaptured = true;
+        ctx.log?.(`  ${captured.length} finding(s) on captured data: one repair round offered`);
+        results.push({ type: 'tool_result', tool_use_id: u.id, is_error: true, content:
+          `These findings are about captured data the repository marks ${PROTECTED_ATTR} (${[...new Set(captured.map((f) => f.file))].join(', ')}): its text is copied in and never written by hand, so its wording, punctuation or shape is not a finding. Keep a finding there only for a secret, with rule secret-exposure; drop the others, then call redline_submit again.` });
+        continue;
+      }
+      if (captured.length) {
+        checked.review.findings = checked.review.findings.filter((f) => !captured.includes(f));
+        notes.push(`${captured.length} finding(s) dropped: they are about the text of captured data (${[...new Set(captured.map((f) => f.file))].join(', ')}), which is copied in and never written by hand.`);
+        if (checked.review.verdict === 'REQUEST_CHANGES' && !checked.review.findings.some((f) => f.severity === 'blocking')) {
+          notes.push('The review asked for changes but every blocking finding was about captured data. Re-run the check.');
         }
       }
       review = checked.review;

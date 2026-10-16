@@ -88,7 +88,8 @@ import { tmpdir, userInfo } from 'node:os';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
-import { parseEnvFile, readPrompt, safePath, runTool as readTool, rejectsForcedToolChoice, metaPhrase, gh, ghAll, callModelWith, buildDiff, OutOfTime, darioAccess, withDarioSocket } from './review.mjs';
+import { parseEnvFile, readPrompt, safePath, runTool as readTool, rejectsForcedToolChoice, metaPhrase, gh, ghAll, callModelWith, buildDiff, OutOfTime, darioAccess, withDarioSocket, PROTECTED_ATTR, protectedFromCheckAttr } from './review.mjs';
+export { PROTECTED_ATTR, protectedFromCheckAttr };
 
 export const AUTHOR = { name: 'askalf', email: '263217947+askalf@users.noreply.github.com' };
 export const DEFAULT_MODEL = 'claude-opus-5-5';
@@ -261,17 +262,7 @@ export function allowedArgv(command, plan, root) {
  * (dario's src/cc-template-data.json is Claude Code's own request as captured; a hand edit would
  * change the wire dario sends). A repository opts a path in with `<pattern> redline-protected`.
  */
-export const PROTECTED_ATTR = 'redline-protected';
-
-/** The paths `git check-attr -z redline-protected -- <paths>` reports as set or valued. Pure. */
-export function protectedFromCheckAttr(raw) {
-  const f = String(raw ?? '').split('\0');
-  const out = new Set();
-  for (let i = 0; i + 2 < f.length; i += 3) {
-    if (f[i] && !['unspecified', 'unset', 'false'].includes(f[i + 2])) out.add(f[i]);
-  }
-  return out;
-}
+// PROTECTED_ATTR and protectedFromCheckAttr come from review.mjs: the reviewer reads the same mark.
 
 /** The review's and this lane's own workflows: never written from here, whatever the PR changes. */
 export const LANE_WORKFLOWS = /^\.github\/workflows\/redline[^/]*\.ya?ml$/;
