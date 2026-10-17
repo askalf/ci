@@ -1521,6 +1521,8 @@ console.log('\n  pin bump, both callers');
     const script = [];
     for (const l of lines.slice(runAt + 1)) { if (l.trim() && !l.startsWith('          ')) break; script.push(l.slice(10)); }
     const pinPaths = (/\n      PIN_PATHS: >-\n((?: {8}\S.*\n)+)/.exec(bump)?.[1] ?? '').split(/\s+/).filter(Boolean).join(' ');
+    const waveSize = /\n      WAVE_SIZE: (\d+)\n/.exec(bump)?.[1] ?? '';
+    check('the job sets a wave size for the pick step', waveSize !== '');
     if (!gitOk || process.platform === 'win32' || spawnSync('bash', ['-c', 'true']).status !== 0) {
       console.log('  skip the pick step run: no POSIX bash and git here');
     } else {
@@ -1543,20 +1545,20 @@ console.log('\n  pin bump, both callers');
       const out = join(d, 'out');
       writeFileSync(out, '');
       const r = spawnSync('bash', ['-c', script.join('\n')], { cwd: d, encoding: 'utf8',
-        env: { ...process.env, EVENT: 'schedule', PIN_PATHS: pinPaths, QUIET_MINUTES: '60', GITHUB_OUTPUT: out } });
+        env: { ...process.env, EVENT: 'schedule', PIN_PATHS: pinPaths, QUIET_MINUTES: '60', WAVE_SIZE: waveSize, GITHUB_OUTPUT: out } });
       const got = readFileSync(out, 'utf8');
       check('a branch merged a minute ago is picked as the merge and waits for the quiet window',
-        r.status === 0 && got.includes('ok=false') && r.stdout.includes(`newest change a caller runs: ${merge.slice(0, 7)}`));
+        r.status === 0 && got.includes('ok=false') && r.stdout.includes(`newest change a caller runs: ${merge.slice(0, 7)}`) && got.includes(`cap=${waveSize}\n`));
       const pick = (env) => {
         writeFileSync(out, '');
         const x = spawnSync('bash', ['-c', script.join('\n')], { cwd: d, encoding: 'utf8',
-          env: { ...process.env, PIN_PATHS: pinPaths, QUIET_MINUTES: '60', GITHUB_OUTPUT: out, ...env } });
+          env: { ...process.env, PIN_PATHS: pinPaths, QUIET_MINUTES: '60', WAVE_SIZE: waveSize, GITHUB_OUTPUT: out, ...env } });
         return { status: x.status, got: readFileSync(out, 'utf8') };
       };
       const waits = pick({ EVENT: 'workflow_dispatch', WAIT_FOR_QUIET: 'true' });
       check('a dispatch with wait-for-quiet waits like the schedule', waits.status === 0 && waits.got.includes('ok=false'));
       const atOnce = pick({ EVENT: 'workflow_dispatch', WAIT_FOR_QUIET: 'false' });
-      check('a dispatch without it bumps at once', atOnce.status === 0 && atOnce.got.includes('ok=true') && atOnce.got.includes(`sha=${merge}`));
+      check('a dispatch without it bumps at once, with no cap on the wave', atOnce.status === 0 && atOnce.got.includes('ok=true') && atOnce.got.includes(`sha=${merge}`) && atOnce.got.includes('cap=0\n'));
       rmSync(d, { recursive: true, force: true });
     }
   }
