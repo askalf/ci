@@ -89,6 +89,16 @@ if (spawnSync('bash', ['-c', 'true']).status !== 0 || process.platform === 'win3
   const old = caller.replaceAll(NEWSHA, OLDSHA);
   writeFileSync(join(d, 'gh'), `#!/usr/bin/env bash
 echo "$*" >> "${d}/calls"
+# A_MODE shapes askalf/a: nopin fails it before any PR, partial opens a PR for its fix caller and
+# still fails it, since its review caller is missing.
+if [ "$A_MODE" = nopin ] && [[ "$*" == *"repos/askalf/a/contents/.github/workflows/redline.yml?ref=tip0000 --jq .content" ]]; then echo "${b64('name: x'+String.fromCharCode(10))}"; exit 0; fi
+if [ "$A_MODE" = partial ]; then
+  case "$*" in
+    *"repos/askalf/a/contents/.github/workflows/redline.yml?ref="*) exit 1 ;;
+    *"repos/askalf/a/contents/.github/workflows/redline-fix.yml?ref="*" --jq .content") echo "${b64(old)}"; exit 0 ;;
+    *"repos/askalf/a/contents/.github/workflows/redline-fix.yml?ref=bot/redline-pin --jq .sha") echo blob1; exit 0 ;;
+  esac
+fi
 case "$*" in
   *"commits/${NEWSHA}/pulls"*) ;;
   "api repos/askalf/"*" --jq .default_branch") echo main ;;
@@ -107,11 +117,11 @@ esac
   chmodSync(join(d, 'gh'), 0o755);
   mkdirSync(join(d, 'work', 'scripts', 'redline'), { recursive: true });
   writeFileSync(join(d, 'work', 'scripts', 'redline', 'pin.mjs'), readFileSync(fileURLToPath(new URL('./pin.mjs', import.meta.url))));
-  const run = (cap) => {
+  const run = (cap, env = {}) => {
     rmSync(join(d, 'calls'), { force: true });
     const r = spawnSync('bash', ['-c', script.join('\n')], { encoding: 'utf8', cwd: join(d, 'work'),
       env: { ...process.env, PATH: `${d}:${process.env.PATH}`, GH_TOKEN: 't', SHA: NEWSHA, SOURCE: 'askalf/ci', CALLERS: 'askalf/a askalf/b askalf/c askalf/d',
-        BRANCH: 'bot/redline-pin', CALLER_PATHS: '.github/workflows/redline.yml', CAP: String(cap) } });
+        BRANCH: 'bot/redline-pin', CALLER_PATHS: '.github/workflows/redline.yml', CAP: String(cap), A_MODE: '', ...env } });
     const calls = existsSync(join(d, 'calls')) ? readFileSync(join(d, 'calls'), 'utf8') : '';
     return { r, calls, created: calls.split('\n').filter((l) => l.startsWith('pr create')).map((l) => / --repo (\S+)/.exec(l)[1]) };
   };
@@ -122,6 +132,14 @@ esac
     capped.r.stdout.includes('== askalf/c: left for the next run') && !/repos\/askalf\/c(\/|\s|$)/m.test(capped.calls), capped.r.stdout);
   const all = run(0);
   check('no cap bumps every caller', all.r.status === 0 && all.created.join() === 'askalf/a,askalf/b,askalf/c,askalf/d', all.r.stdout + all.r.stderr);
+  const early = run(1, { A_MODE: 'nopin' });
+  check('a caller that fails before opening a PR is reported and does not count: the next caller gets the slot',
+    early.r.status !== 0 && early.r.stdout.includes('::error::askalf/a: the bump did not complete') && early.created.join() === 'askalf/b'
+      && early.r.stdout.includes('== askalf/c: left for the next run'), early.r.stdout + early.r.stderr);
+  const partial = run(1, { A_MODE: 'partial', CALLER_PATHS: '.github/workflows/redline.yml .github/workflows/redline-fix.yml' });
+  check('a caller that opened a PR and then fails is reported and counts, since its PR loads the runners like any other',
+    partial.r.status !== 0 && partial.r.stdout.includes('::error::askalf/a: no .github/workflows/redline.yml') && partial.r.stdout.includes('::error::askalf/a: the bump did not complete')
+      && partial.created.join() === 'askalf/a' && partial.r.stdout.includes('== askalf/b: left for the next run'), partial.r.stdout + partial.r.stderr);
   rmSync(d, { recursive: true, force: true });
 }
 
