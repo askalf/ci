@@ -275,7 +275,10 @@ jobs:
           }
 
           # One caller at a time, in CALLERS order, so a capped run opens exactly the first CAP PRs
-          # still needed. A caller that fails does not stop the others and does not count toward the cap.
+          # still needed. A caller that fails does not stop the others. The cap counts PRs opened or
+          # updated, since each one loads the runner pool: a caller that fails before that point does
+          # not count, and one that opened or updated its PR and then reports a failure (a missing
+          # review caller beside a fix caller that was bumped) does.
           opened="$(mktemp)"
           failed=0
           for repo in $CALLERS; do
