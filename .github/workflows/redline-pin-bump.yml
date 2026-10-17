@@ -18,6 +18,12 @@
 # burst of merges is one wave. A dispatch bumps at once, for a fix that cannot wait, unless it sets
 # wait-for-quiet: the host's clock dispatches it that way hourly, since GitHub drops scheduled runs. An open bump PR
 # that already proposes the picked commit is left alone, so its review and checks are not restarted.
+#
+# A wave is also spread over several runs: every bump PR starts its repository's CI and review, and
+# its merge starts the CI on main again, all on the same runner pool. A scheduled run (or a dispatch
+# with wait-for-quiet) opens or updates at most WAVE_SIZE PRs, in CALLERS order; the callers after
+# that are left for the next hourly run, where the ones already bumped read as done. A dispatch
+# without wait-for-quiet bumps every caller in one run, for a fix that cannot wait.
 name: Redline pin bump
 
 on:
@@ -73,6 +79,7 @@ jobs:
         .github/workflows/redline-fix-run.yml
         .github/workflows/redline-pin-bump.yml
       QUIET_MINUTES: 60
+      WAVE_SIZE: 3
     steps:
       - name: Check for the token
         id: guard
@@ -120,6 +127,12 @@ jobs:
             echo "ok=true" >> "$GITHUB_OUTPUT"
             echo "sha=$sha" >> "$GITHUB_OUTPUT"
           fi
+          # 0 means no cap: an urgent dispatch reaches every caller now.
+          if [ "$EVENT" = schedule ] || [ "${WAIT_FOR_QUIET:-false}" = true ]; then
+            echo "cap=${WAVE_SIZE}" >> "$GITHUB_OUTPUT"
+          else
+            echo "cap=0" >> "$GITHUB_OUTPUT"
+          fi
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         if: steps.pick.outputs.ok == 'true'
@@ -131,6 +144,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.REDLINE_PIN_BUMP_TOKEN }}
           SHA: ${{ steps.pick.outputs.sha }}
+          CAP: ${{ steps.pick.outputs.cap }}
           SOURCE: ${{ github.repository }}
         run: |
           set -euo pipefail
@@ -256,30 +270,24 @@ jobs:
             else
               gh pr create --repo "$repo" --base "$base" --head "$BRANCH" --title "$title" --body "$body"
             fi
+            echo "$repo" >> "$opened"
             return "$bad"
           }
 
-          # The callers are independent, so they are bumped side by side, a few at a time to stay
-          # clear of GitHub's secondary rate limits. Each one's output is held in its own log and
-          # printed in caller order once all are done, so the run log reads the same as a serial run.
-          logs="$(mktemp -d)"
-          i=0
-          for repo in $CALLERS; do
-            i=$((i + 1))
-            if [ "$(jobs -rp | wc -l)" -ge 4 ]; then wait -n || true; fi
-            (
-              set +e
-              echo "== ${repo}"
-              ( set -e; bump "$repo" )
-              rc=$?
-              if [ "$rc" -ne 0 ]; then echo "::error::${repo}: the bump did not complete (exit ${rc})"; fi
-              echo "$rc" > "${logs}/${i}.rc"
-            ) > "${logs}/${i}.log" 2>&1 &
-          done
-          wait || true
+          # One caller at a time, in CALLERS order, so a capped run opens exactly the first CAP PRs
+          # still needed. A caller that fails does not stop the others and does not count toward the cap.
+          opened="$(mktemp)"
           failed=0
-          for n in $(seq 1 "$i"); do
-            cat "${logs}/${n}.log"
-            if [ "$(cat "${logs}/${n}.rc" 2>/dev/null || echo 1)" -ne 0 ]; then failed=1; fi
+          for repo in $CALLERS; do
+            if [ "${CAP:-0}" -gt 0 ] && [ "$(wc -l < "$opened")" -ge "$CAP" ]; then
+              echo "== ${repo}: left for the next run (this run opened or updated ${CAP} bump PRs)"
+              continue
+            fi
+            echo "== ${repo}"
+            set +e
+            ( set -e; bump "$repo" )
+            rc=$?
+            set -e
+            if [ "$rc" -ne 0 ]; then echo "::error::${repo}: the bump did not complete (exit ${rc})"; failed=1; fi
           done
           exit "$failed"
