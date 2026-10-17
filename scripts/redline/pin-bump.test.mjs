@@ -119,7 +119,7 @@ esac
   check('a cap of 2 opens PRs in the first two callers only, and the run is green',
     capped.r.status === 0 && capped.created.join() === 'askalf/a,askalf/b', capped.r.stdout + capped.r.stderr + capped.calls);
   check('the callers past the cap are named as left for the next run and never read',
-    capped.r.stdout.includes('== askalf/c: left for the next run') && !capped.calls.includes('repos/askalf/c'), capped.r.stdout);
+    capped.r.stdout.includes('== askalf/c: left for the next run') && !/repos\/askalf\/c(\/|\s|$)/m.test(capped.calls), capped.r.stdout);
   const all = run(0);
   check('no cap bumps every caller', all.r.status === 0 && all.created.join() === 'askalf/a,askalf/b,askalf/c,askalf/d', all.r.stdout + all.r.stderr);
   rmSync(d, { recursive: true, force: true });
