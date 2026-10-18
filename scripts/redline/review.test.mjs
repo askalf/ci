@@ -5,7 +5,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, readFileSync, rmSyn
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   parseEnvFile, readPrompt, safePath, buildDiff, planDiff, unshownFiles, checkoutCorpus, quoteIsGrounded, corpusOf, checkSubmission, finalVerdict,
   renderBody, verdictAtHead, runTool, runReview, buildBrief, contextSection, earlierReviewsSection, REVIEWER_LOGIN, LIMITS, metaPhrase,
@@ -926,9 +926,9 @@ console.log('\n  the reusable workflow');
     steps.every((s) => !s.includes('run:') || !/\$\{\{\s*inputs\.(pr|head|reread)/.test(s.slice(s.indexOf('run:')))));
   check('the dispatch check reads the PR and refuses closed, draft and moved heads',
     ds.includes('/repos/${REPO}/pulls/${PR}') && ds.includes('pr.state !== "open"') && ds.includes('if (pr.draft)') && ds.includes('pr.head?.sha !== HEAD_SHA'));
-  check('a fork head is allowed only once its pull_request runs have run (none held at the contributor gate), and the step says fork= in its output',
+  check('a fork head is allowed only once a job of its pull_request run has run, and the step says fork= in its output',
     ds.includes('const fork = pr.head?.repo?.full_name !== REPO') && ds.includes('actions/runs?head_sha=${HEAD_SHA}&event=pull_request')
-    && ds.includes('w.conclusion !== "action_required"') && ds.includes('fail(`${REPO}#${PR} is a fork PR whose workflows') && ds.includes('appendFileSync(process.env.GITHUB_OUTPUT, `fork=') && ds.includes('\n        id: pr\n'));
+    && ds.includes('/actions/runs/${w.id}/jobs') && ds.includes('fail(`${REPO}#${PR} is a fork PR whose workflows') && ds.includes('appendFileSync(process.env.GITHUB_OUTPUT, `fork=') && ds.includes('\n        id: pr\n'));
   const forkFetch = steps[stepNamed('Fetch the fork head to read')] ?? '';
   check('a fork head is fetched from the repository own pull ref, checked against the named sha and checked out with symlinks as plain files, only when the check said fork',
     forkFetch.includes("if: steps.pr.outputs.fork == 'true'") && forkFetch.includes('refs/pull/${PR}/head') && forkFetch.includes('--depth 1 --no-tags') && forkFetch.includes('if [ "$at" != "$HEAD_SHA" ]')
@@ -951,6 +951,51 @@ console.log('\n  the reusable workflow');
     check('a dispatch off the default branch is refused before any read', refused({ REF: 'refs/heads/feat/x' }, /default branch/) && refused({ DEFAULT_BRANCH: '' }, /default branch/));
     check('a pr that is not a number is refused before any read', refused({ PR: '7; rm -rf /' }, /pull request number/) && refused({ PR: '0' }, /pull request number/));
     check('a head that is not a full sha is refused before any read', refused({ HEAD_SHA: 'main' }, /full 40-character/) && refused({ HEAD_SHA: HEAD.slice(0, 7) }, /full 40-character/));
+
+    // The contributor gate, decided against stubbed API answers: a preload replaces fetch with a
+    // lookup of the request path in API (JSON), and an unknown path answers 404.
+    const gateDir = mkdtempSync(join(tmpdir(), 'redline-gate-'));
+    const stub = join(gateDir, 'stub.mjs');
+    writeFileSync(stub, [
+      'const api = JSON.parse(process.env.API);',
+      'globalThis.fetch = async (url) => {',
+      '  const u = new URL(url);',
+      '  const body = api[u.pathname];',
+      '  return { ok: body !== undefined, status: body === undefined ? 404 : 200, json: async () => body };',
+      '};',
+      'globalThis.setTimeout = (fn) => { fn(); return 0; };',
+    ].join('\n'));
+    const forkPr = { number: 7, state: 'open', draft: false, head: { sha: HEAD, repo: { full_name: 'someone/r' } } };
+    const run = (id, conclusion, extra = {}) => ({ id, status: 'completed', conclusion, head_sha: HEAD, head_repository: { full_name: 'someone/r' }, ...extra });
+    const job = (conclusion, ran) => ({ status: 'completed', conclusion, runner_name: ran ? 'runner-1' : null, started_at: ran ? '2026-10-18T00:00:00Z' : null });
+    const gate = (runs, jobsByRun = {}) => {
+      const api = { '/repos/askalf/r/pulls/7': forkPr, '/repos/askalf/r/actions/runs': { workflow_runs: runs } };
+      for (const [id, jobs] of Object.entries(jobsByRun)) if (jobs !== undefined) api[`/repos/askalf/r/actions/runs/${id}/jobs`] = { jobs };
+      const out = join(gateDir, `out-${Math.random().toString(36).slice(2)}`);
+      writeFileSync(out, '');
+      const r = dsRun({ API: JSON.stringify(api), NODE_OPTIONS: `--import=${pathToFileURL(stub).href}`, GITHUB_OUTPUT: out });
+      return { ...r, output: readFileSync(out, 'utf8') };
+    };
+    const held = (r) => r.status === 1 && /is a fork PR whose workflows at 4753643 have not run/.test(r.stdout) && r.output === '';
+    check('a fork head with no pull_request runs is refused', held(gate([])));
+    check('a fork head whose run waits at the contributor gate (action_required) is refused',
+      held(gate([{ ...run(11, 'action_required') }], { 11: [] })));
+    check('a fork head whose run was cancelled at the gate without running is refused, though its conclusion is not action_required',
+      held(gate([run(11, 'cancelled')], { 11: [] })) && held(gate([run(11, 'cancelled')], { 11: [job('cancelled', false)] }))
+      && held(gate([run(11, 'skipped')], { 11: [job('skipped', false)] })));
+    check('a job that finished without ever being picked up by a runner does not count',
+      held(gate([run(11, 'failure')], { 11: [job('failure', false)] })));
+    check('a run for another head repository or another head does not count',
+      held(gate([run(11, 'success', { head_repository: { full_name: 'other/r' } })], { 11: [job('success', true)] }))
+      && held(gate([run(11, 'success', { head_sha: OTHER })], { 11: [job('success', true)] })));
+    check('a run whose jobs cannot be read fails the check',
+      (() => { const r = gate([run(11, 'success')]); return r.status === 1 && /could not list the jobs of run 11/.test(r.stdout) && r.output === ''; })());
+    const approved = gate([run(11, 'cancelled'), run(12, 'success')], { 11: [], 12: [job('skipped', false), job('success', true)] });
+    check('a fork head whose approved run had a job run on a runner passes and says fork=true',
+      approved.status === 0 && approved.output === 'fork=true\n' && /a fork, read only/.test(approved.stdout));
+    const failedJob = gate([run(12, 'failure')], { 12: [job('failure', true)] });
+    check('a job that ran and failed still shows the head was let through the gate', failedJob.status === 0 && failedJob.output === 'fork=true\n');
+    rmSync(gateDir, { recursive: true, force: true });
   }
   check('the PR checkout takes the dispatched head, else the event head', (steps[checkoutAt] ?? '').includes('ref: ${{ inputs.head || github.event.pull_request.head.sha }}'));
   const rs = steps[reviewAt] ?? '';
