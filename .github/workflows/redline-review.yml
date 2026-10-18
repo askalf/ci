@@ -53,7 +53,11 @@ on:
         default: false
         type: boolean
 
+# actions: read lets a fork dispatch list the head's pull_request runs and their jobs (the
+# contributor-gate check). A called workflow gets no more than its caller grants, so each caller's
+# redline.yml grants it too.
 permissions:
+  actions: read
   contents: read
   pull-requests: read
 

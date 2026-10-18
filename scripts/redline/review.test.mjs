@@ -893,7 +893,10 @@ console.log('\n  the reusable workflow');
   check('it refuses fork PRs itself', wf.includes('github.event.pull_request.head.repo.full_name == github.repository'));
   check('the PR checkout keeps no credentials', (wf.match(/persist-credentials: false/g) ?? []).length === 2);
   const permBlock = /\npermissions:\n((?: {2}.*\n)+)/.exec(wf)?.[1] ?? '';
-  check('the job token is read-only', permBlock === '  contents: read\n  pull-requests: read\n' && (wf.match(/^\s*permissions:/gm) ?? []).length === 1);
+  check('the job token is read-only', permBlock === '  actions: read\n  contents: read\n  pull-requests: read\n' && (wf.match(/^\s*permissions:/gm) ?? []).length === 1);
+  // The fork check reads the Actions API; a token without actions: read is refused there.
+  check('the token can read the runs and jobs the fork check lists',
+    wf.includes('/actions/runs?head_sha=') && wf.includes('/actions/runs/${w.id}/jobs?') && permBlock.includes('  actions: read\n'));
   check('third-party actions are pinned by sha', [...wf.matchAll(/uses: ([^\s]+)/g)].every((m) => /@[0-9a-f]{40}$/.test(m[1])));
   const reviewAt = stepNamed('Review');
   const uploadAt = stepNamed('Upload the verdict');
@@ -1057,6 +1060,9 @@ console.log('\n  pin bump');
   check('the bump job knows the eleven callers, this repository first', callers.join() === expected.join());
   check('this repo\'s caller pins askalf/ci and the same sha as redline-ref',
     /uses: askalf\/ci\/\.github\/workflows\/redline-review\.yml@([0-9a-f]{40})/.exec(own)?.[1] === refs(own)[0] && !own.includes('askalf/askalf/') && own.includes('runner-label: redline\n'));
+  // A called workflow holds no permission its caller does not grant.
+  check('this repo\'s caller grants the review what it reads, actions included',
+    (/\npermissions:\n((?: {2}.*\n)+)/.exec(own)?.[1] ?? '') === '  actions: read\n  contents: read\n  pull-requests: read\n');
 
   // Forge dispatches the caller on the default branch and
   // finds its run by this exact title, so the title and the inputs are a contract with forge.
