@@ -65,8 +65,9 @@ checks that the checkout is exactly the reviewed head, then `fix.mjs`:
 Limits: 40 turns, 30 files, 400 KB of diff; past any of them the outcome is `refused`. Wall time
 counts from the start of the run, install included: at 45 minutes the model must call `finish_fix`,
 and no command, test or model call starts past 52 minutes; a run out of time is `refused`, never `fixed`. A
-job killed at its 60-minute timeout still uploads a `fix.json` that says so. The job exits 0 only
-for `fixed`. `fix-tools.json` is the fixer's `TOOLS` as a file, pinned in `truecopy.lock` like the
+job killed at its 60-minute timeout still uploads a `fix.json` that says so. The job exits 0 for
+`fixed`, and for `no_change` with `description: true` (the fix was a new description, which the
+caller applies); 1 for anything else. `fix-tools.json` is the fixer's `TOOLS` as a file, pinned in `truecopy.lock` like the
 reviewer's. The artifact is `redline-fix`. Nothing on the runner can push:
 forge verifies the artifact and pushes the commit to the PR branch with its own token, then
 comments with the notes. The model is reached through a dario key socket named by `DARIO_SOCKET`
