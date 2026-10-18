@@ -3,7 +3,8 @@
 # head Redline reviewed and the review). The job checks out that head on the repository's own
 # non-root exec runner, lets the fix script edit and test inside it, and uploads the result as the
 # redline-fix artifact: fix.json, notes.md and, when there is a fix, fix.bundle (one commit on top
-# of the head). The job's status is the outcome: 0 for fixed, 1 for anything else.
+# of the head). The job's status is the outcome: 0 for fixed, or for a description replaced with no
+# file changed (forge applies that too); 1 for anything else.
 # Nothing here pushes or comments and no token that could is on the runner: forge verifies the
 # artifact (the run came from the pinned redline-fix.yml, the bundle is one fast-forward commit as
 # askalf with no attribution) and pushes it to the PR branch with the token it already holds.

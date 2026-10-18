@@ -1319,7 +1319,9 @@ async function main() {
   const line = `Redline fix: ${record.outcome}${record.new_head ? ` at ${record.new_head}` : ''}${record.files.length ? ` (${record.files.length} file${record.files.length === 1 ? '' : 's'})` : ''}`;
   console.log(line);
   if (env.GITHUB_STEP_SUMMARY) appendFileSync(env.GITHUB_STEP_SUMMARY, `${line}\n\n${record.notes}\n`);
-  process.exit(record.outcome === 'fixed' ? 0 : 1);
+  // The job's status is the outcome. A run that changed no file but replaced the PR description did
+  // the fix it was asked for (forge sets the description from the artifact), so it is green too.
+  process.exit(record.outcome === 'fixed' || (record.outcome === 'no_change' && record.description === true) ? 0 : 1);
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
