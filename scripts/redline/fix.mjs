@@ -602,6 +602,14 @@ export function saveFix(dir, record, description = null) {
   if (record.description === true && typeof description === 'string') writeFileSync(join(dir, 'description.md'), `${description}\n`);
 }
 
+/**
+ * The job's exit status for a record: 0 for fixed, and for a run that changed no file but replaced
+ * the PR description (forge sets the description from the artifact); 1 for anything else.
+ */
+export function exitCode(record) {
+  return record.outcome === 'fixed' || (record.outcome === 'no_change' && record.description === true) ? 0 : 1;
+}
+
 // ---------- tools ----------
 
 // Every tool name is fix_* (or finish_fix), never a common tool name. dario maps a non-Claude-Code
@@ -1319,9 +1327,7 @@ async function main() {
   const line = `Redline fix: ${record.outcome}${record.new_head ? ` at ${record.new_head}` : ''}${record.files.length ? ` (${record.files.length} file${record.files.length === 1 ? '' : 's'})` : ''}`;
   console.log(line);
   if (env.GITHUB_STEP_SUMMARY) appendFileSync(env.GITHUB_STEP_SUMMARY, `${line}\n\n${record.notes}\n`);
-  // The job's status is the outcome. A run that changed no file but replaced the PR description did
-  // the fix it was asked for (forge sets the description from the artifact), so it is green too.
-  process.exit(record.outcome === 'fixed' || (record.outcome === 'no_change' && record.description === true) ? 0 : 1);
+  process.exit(exitCode(record));
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {

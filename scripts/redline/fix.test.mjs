@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 import {
   parseReviewUrl, parseReviewBody, inlineItems, formatFinding, detectRunner, allowedCommands, allowedArgv, safeWritePath, stageable, editableGithub, LANE_WORKFLOWS,
   protectedFromCheckAttr, protectedPaths, PROTECTED_ATTR, descriptionProblem,
-  commitSubject, hasAttributionTrailer, neutraliseRefs, cleanNotes, summariseTests, renderNotes, fixRecord, fixProblem, saveFix,
+  commitSubject, hasAttributionTrailer, neutraliseRefs, cleanNotes, summariseTests, renderNotes, fixRecord, fixProblem, saveFix, exitCode,
   failingTests, FAILING_NAMES_MAX, runSecrets, leaksSecret, maskSecrets, berryInstall, runAccount, asRunAccount, proxyEnv,
   runAccountUidProblem, TOOLS, FINISH_REQUIRED, askForFinish, checkFinish, runLoop, buildBrief, childEnv, onlyOrigins, runFix,
   LIMITS, OUTCOMES, AUTHOR, FIX_VERSION, DEFAULT_MODEL, SUBJECT_BANNED,
@@ -771,6 +771,10 @@ if (!gitOk) {
     check('saveFix writes description.md next to fix.json', readFileSync(join(w.out, 'description.md'), 'utf8') === 'Adds the token, read from the environment.\n');
     check('a run without fix_describe writes no description.md', (() => { const d = mkdtempSync(join(tmpdir(), 'redline-fix-nodesc-')); saveFix(d, fixRecord({ repo: 'askalf/r', pr: 7, headSha: repo.head, outcome: 'no_change' }), null); const ok = !existsSync(join(d, 'description.md')); rmSync(d, { recursive: true, force: true }); return ok; })());
     check('fix.json refuses a description on a refusal', /carries no description/.test(fixProblem({ ...r, outcome: 'refused', description: true })));
+    check('a description-only answer exits 0', exitCode(r) === 0);
+    check('the exit status is 0 for fixed, 1 for no_change without a description and for refused',
+      exitCode({ ...r, outcome: 'fixed', description: false }) === 0 && exitCode({ ...r, description: false }) === 1
+      && exitCode({ ...r, outcome: 'refused', description: false }) === 1 && exitCode({ ...r, outcome: 'tests_failed', description: false }) === 1);
     rmSync(w.out, { recursive: true, force: true });
     rmSync(repo.dir, { recursive: true, force: true });
   }
