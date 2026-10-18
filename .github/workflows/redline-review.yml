@@ -108,10 +108,11 @@ jobs:
       # A dispatch runs the default branch's workflow files, which is the only reason forge trusts
       # its verdict, so it must be a workflow_dispatch on the default branch. The PR it names must be
       # open, not a draft and at the head given. A head in a fork is allowed here, and only here:
-      # the step says so in its `fork` output, and only once the head's pull_request workflows have
-      # run (a run held at the contributor gate reports action_required and nothing else). Every
-      # check is made before the PR's code is fetched; a failed read fails the run. The script goes
-      # to node through a quoted heredoc, so no quote in it can end a shell string early.
+      # the step says so in its `fork` output, and only once a job of a pull_request run for that
+      # head has run on a runner and finished. A run held at the contributor gate, or cancelled or
+      # skipped there, has no such job, whatever its conclusion. Every check is made before the PR's
+      # code is fetched; a failed read fails the run. The script goes to node through a quoted
+      # heredoc, so no quote in it can end a shell string early.
       - name: Check the dispatched PR
         if: inputs.pr != ''
         id: pr
@@ -132,37 +133,43 @@ jobs:
             if (!/^[1-9][0-9]*$/.test(PR)) fail(`pr must be a pull request number; got ${JSON.stringify(PR)}`);
             if (!/^[0-9a-f]{40}$/.test(HEAD_SHA)) fail(`head must be the full 40-character commit sha to review; got ${JSON.stringify(HEAD_SHA)}`);
             const headers = { authorization: `Bearer ${process.env.GH_READ_TOKEN}`, accept: "application/vnd.github+json" };
-            let pr = null;
-            for (let attempt = 1; attempt <= 3 && !pr; attempt++) {
-              try {
-                const res = await fetch(`https://api.github.com/repos/${REPO}/pulls/${PR}`, { headers });
-                if (res.ok) pr = await res.json();
-                else console.log(`attempt ${attempt}: HTTP ${res.status}`);
-              } catch (e) { console.log(`attempt ${attempt}: ${e.message}`); }
-              if (!pr && attempt < 3) await new Promise((r) => setTimeout(r, attempt * 5000));
-            }
+            const read = async (path) => {
+              for (let attempt = 1; attempt <= 3; attempt++) {
+                try {
+                  const res = await fetch(`https://api.github.com${path}`, { headers });
+                  if (res.ok) return await res.json();
+                  console.log(`attempt ${attempt}: HTTP ${res.status}`);
+                } catch (e) { console.log(`attempt ${attempt}: ${e.message}`); }
+                if (attempt < 3) await new Promise((r) => setTimeout(r, attempt * 5000));
+              }
+              return null;
+            };
+            const pr = await read(`/repos/${REPO}/pulls/${PR}`);
             if (!pr) fail(`could not read ${REPO}#${PR}`);
             if (pr.state !== "open") fail(`${REPO}#${PR} is ${pr.state}`);
             if (pr.draft) fail(`${REPO}#${PR} is a draft`);
             if (pr.head?.sha !== HEAD_SHA) fail(`${REPO}#${PR} is at ${String(pr.head?.sha).slice(0, 7)}, not ${HEAD_SHA.slice(0, 7)}; dispatch again at its head`);
             const fork = pr.head?.repo?.full_name !== REPO;
             if (fork) {
-              if (!pr.head?.repo?.full_name) fail(`${REPO}#${PR} has no readable head repository`);
+              const headRepo = pr.head?.repo?.full_name;
+              if (!headRepo) fail(`${REPO}#${PR} has no readable head repository`);
               // The contributor gate: a first-time contributor's workflows wait for "Approve and run".
-              // Until a maintainer has let this head run, its runs all report action_required (or
-              // there are none). Reading the head before that would review code nobody has looked at.
-              let runs = null;
-              for (let attempt = 1; attempt <= 3 && !runs; attempt++) {
-                try {
-                  const res = await fetch(`https://api.github.com/repos/${REPO}/actions/runs?head_sha=${HEAD_SHA}&event=pull_request&per_page=100`, { headers });
-                  if (res.ok) runs = (await res.json()).workflow_runs ?? [];
-                  else console.log(`attempt ${attempt}: HTTP ${res.status}`);
-                } catch (e) { console.log(`attempt ${attempt}: ${e.message}`); }
-                if (!runs && attempt < 3) await new Promise((r) => setTimeout(r, attempt * 5000));
+              // A run held there reports action_required; one cancelled or skipped there completes
+              // with that conclusion having run nothing. So a run's conclusion is not evidence that
+              // a maintainer let the head run: only a job that ran on a runner and finished, in a
+              // pull_request run for this head from the PR's head repository, is. Reading the head
+              // before that would review code nobody has looked at.
+              const listed = await read(`/repos/${REPO}/actions/runs?head_sha=${HEAD_SHA}&event=pull_request&per_page=100`);
+              if (!listed) fail(`could not list the pull_request runs at ${HEAD_SHA.slice(0, 7)}`);
+              const runs = (listed.workflow_runs ?? []).filter((w) => Number.isInteger(w.id) && w.head_sha === HEAD_SHA && w.head_repository?.full_name === headRepo);
+              let ran = false;
+              for (const w of runs) {
+                const listedJobs = await read(`/repos/${REPO}/actions/runs/${w.id}/jobs?filter=all&per_page=100`);
+                if (!listedJobs) fail(`could not list the jobs of run ${w.id}`);
+                ran = (listedJobs.jobs ?? []).some((j) => j.runner_name && j.started_at && (j.conclusion === "success" || j.conclusion === "failure"));
+                if (ran) break;
               }
-              if (!runs) fail(`could not list the pull_request runs at ${HEAD_SHA.slice(0, 7)}`);
-              const ran = runs.some((w) => w.status === "completed" && w.conclusion && w.conclusion !== "action_required");
-              if (!ran) fail(`${REPO}#${PR} is a fork PR whose workflows at ${HEAD_SHA.slice(0, 7)} have not run (held at the contributor gate, or none yet); not reviewed until a maintainer lets them run`);
+              if (!ran) fail(`${REPO}#${PR} is a fork PR whose workflows at ${HEAD_SHA.slice(0, 7)} have not run (held or cancelled at the contributor gate, or none yet); not reviewed until a maintainer lets them run`);
             }
             const { appendFileSync } = await import("node:fs");
             appendFileSync(process.env.GITHUB_OUTPUT, `fork=${fork ? "true" : "false"}\n`);
