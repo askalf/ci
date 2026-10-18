@@ -5,7 +5,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, readFileSync, rmSyn
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   parseEnvFile, readPrompt, safePath, buildDiff, planDiff, unshownFiles, checkoutCorpus, quoteIsGrounded, corpusOf, checkSubmission, finalVerdict,
   renderBody, verdictAtHead, runTool, runReview, buildBrief, contextSection, earlierReviewsSection, REVIEWER_LOGIN, LIMITS, metaPhrase,
@@ -266,7 +266,7 @@ console.log('\n  verdictAtHead');
 
 
 const PATCH = '@@ -1 +1,2 @@\n+export const token = process.env.X;\n const y = 2;';
-function world({ reviews = [], heads = [HEAD], turns, modelStatus = [], draft = false, files = null, attributes = null } = {}) {
+function world({ reviews = [], heads = [HEAD], turns, modelStatus = [], draft = false, files = null, attributes = null, headRepo = 'askalf/r' } = {}) {
   const calls = { posted: [], model: [], keys: [], sleeps: 0 };
   let headReads = 0;
   const json = (body, status = 200, headers = {}) => ({ ok: status < 300, status, headers: new Headers(headers), json: async () => body, text: async () => JSON.stringify(body) });
@@ -287,7 +287,7 @@ function world({ reviews = [], heads = [HEAD], turns, modelStatus = [], draft = 
     }
     const p = u.pathname;
     if (init.method === 'POST' && p.endsWith('/reviews')) { const b = JSON.parse(init.body); calls.posted.push({ ...b, auth: init.headers.authorization }); return json({ html_url: 'https://x/review/1' }); }
-    if (/\/pulls\/7$/.test(p)) { const sha = heads[Math.min(headReads++, heads.length - 1)]; return json({ number: 7, state: 'open', draft, title: 'feat: add token', body: 'Adds it.', user: { login: 'askalf' }, head: { sha, ref: 'feat/x', repo: { full_name: 'askalf/r' } }, base: { ref: 'main', sha: BASE, repo: { full_name: 'askalf/r' } } }); }
+    if (/\/pulls\/7$/.test(p)) { const sha = heads[Math.min(headReads++, heads.length - 1)]; return json({ number: 7, state: 'open', draft, title: 'feat: add token', body: 'Adds it.', user: { login: 'askalf' }, head: { sha, ref: 'feat/x', repo: { full_name: headRepo } }, base: { ref: 'main', sha: BASE, repo: { full_name: 'askalf/r' } } }); }
     if (p.endsWith('/reviews')) return json(u.searchParams.get('page') === '1' ? reviews : []);
     if (p.endsWith('/contents/.gitattributes')) return attributes === null ? json({ message: 'Not Found' }, 404) : json({ type: 'file', encoding: 'base64', content: Buffer.from(attributes).toString('base64') });
     if (p.endsWith('/files')) return json(u.searchParams.get('page') === '1' ? (files ?? [{ filename: 'src/b.js', status: 'modified', additions: 1, deletions: 0, patch: PATCH }]) : []);
@@ -373,6 +373,14 @@ console.log('\n  earlier reviews on the PR');
   const { ctx, calls } = world({ draft: true, turns: [submit(APPROVE)] });
   const r = await runReview(ctx);
   check('a draft is skipped before the model is called', r.outcome === 'skipped' && /draft/.test(r.reason) && calls.model.length === 0);
+}
+{
+  const { ctx, calls } = world({ headRepo: 'someone/r', turns: [submit(APPROVE)] });
+  const r = await runReview(ctx);
+  check('a fork head is skipped before the model is called unless the workflow said to read it', r.outcome === 'skipped' && r.reason === 'fork PR' && calls.model.length === 0);
+  const w2 = world({ headRepo: 'someone/r', turns: [submit(APPROVE)] });
+  const r2 = await runReview({ ...w2.ctx, fork: true });
+  check('with REDLINE_FORK the fork head is reviewed and the verdict posted at it', r2.outcome === 'posted' && r2.verdict === 'APPROVE' && w2.calls.model.length === 1 && w2.calls.posted[0].commit_id === HEAD);
 }
 {
   const { ctx, calls } = world({ heads: [OTHER], turns: [submit(APPROVE)] });
@@ -885,7 +893,10 @@ console.log('\n  the reusable workflow');
   check('it refuses fork PRs itself', wf.includes('github.event.pull_request.head.repo.full_name == github.repository'));
   check('the PR checkout keeps no credentials', (wf.match(/persist-credentials: false/g) ?? []).length === 2);
   const permBlock = /\npermissions:\n((?: {2}.*\n)+)/.exec(wf)?.[1] ?? '';
-  check('the job token is read-only', permBlock === '  contents: read\n  pull-requests: read\n' && (wf.match(/^\s*permissions:/gm) ?? []).length === 1);
+  check('the job token is read-only', permBlock === '  actions: read\n  contents: read\n  pull-requests: read\n' && (wf.match(/^\s*permissions:/gm) ?? []).length === 1);
+  // The fork check reads the Actions API; a token without actions: read is refused there.
+  check('the token can read the runs and jobs the fork check lists',
+    wf.includes('/actions/runs?head_sha=') && wf.includes('/actions/runs/${w.id}/jobs?') && permBlock.includes('  actions: read\n'));
   check('third-party actions are pinned by sha', [...wf.matchAll(/uses: ([^\s]+)/g)].every((m) => /@[0-9a-f]{40}$/.test(m[1])));
   const reviewAt = stepNamed('Review');
   const uploadAt = stepNamed('Upload the verdict');
@@ -916,20 +927,79 @@ console.log('\n  the reusable workflow');
     ds.startsWith("name: Check the dispatched PR\n        if: inputs.pr != ''\n") && dispatchAt > mainAt && dispatchAt < fetchAt && dispatchAt < checkoutAt);
   check('the inputs reach every run step through env, never interpolated into it',
     steps.every((s) => !s.includes('run:') || !/\$\{\{\s*inputs\.(pr|head|reread)/.test(s.slice(s.indexOf('run:')))));
-  check('the dispatch check reads the PR and refuses closed, draft, fork and moved heads',
-    ds.includes('/repos/${REPO}/pulls/${PR}') && ds.includes('pr.state !== "open"') && ds.includes('if (pr.draft)')
-    && ds.includes('pr.head?.repo?.full_name !== REPO') && ds.includes('pr.head?.sha !== HEAD_SHA'));
-  const dsScript = /node --input-type=module -e '\n([\s\S]*?)\n\s*'\s*$/.exec(ds)?.[1] ?? '';
-  const dsRun = (env) => spawnSync(process.execPath, ['--input-type=module', '-e', dsScript], {
-    env: { PATH: process.env.PATH, GH_READ_TOKEN: 'x', REPO: 'askalf/r', DEFAULT_BRANCH: 'main', REF: 'refs/heads/main', EVENT_NAME: 'workflow_dispatch', PR: '7', HEAD_SHA: HEAD, ...env },
-    encoding: 'utf8', timeout: 20_000,
-  });
-  const refused = (env, why) => { const r = dsRun(env); return r.status === 1 && why.test(r.stdout); };
-  check('the dispatch check script was found', dsScript.includes('workflow_dispatch'));
-  check('a pr input on pull_request is refused before any read', refused({ EVENT_NAME: 'pull_request' }, /only on workflow_dispatch/));
-  check('a dispatch off the default branch is refused before any read', refused({ REF: 'refs/heads/feat/x' }, /default branch/) && refused({ DEFAULT_BRANCH: '' }, /default branch/));
-  check('a pr that is not a number is refused before any read', refused({ PR: '7; rm -rf /' }, /pull request number/) && refused({ PR: '0' }, /pull request number/));
-  check('a head that is not a full sha is refused before any read', refused({ HEAD_SHA: 'main' }, /full 40-character/) && refused({ HEAD_SHA: HEAD.slice(0, 7) }, /full 40-character/));
+  check('the dispatch check reads the PR and refuses closed, draft and moved heads',
+    ds.includes('/repos/${REPO}/pulls/${PR}') && ds.includes('pr.state !== "open"') && ds.includes('if (pr.draft)') && ds.includes('pr.head?.sha !== HEAD_SHA'));
+  check('a fork head is allowed only once a job of its pull_request run has run, and the step says fork= in its output',
+    ds.includes('const fork = pr.head?.repo?.full_name !== REPO') && ds.includes('actions/runs?head_sha=${HEAD_SHA}&event=pull_request')
+    && ds.includes('/actions/runs/${w.id}/jobs') && ds.includes('fail(`${REPO}#${PR} is a fork PR whose workflows') && ds.includes('appendFileSync(process.env.GITHUB_OUTPUT, `fork=') && ds.includes('\n        id: pr\n'));
+  const forkFetch = steps[stepNamed('Fetch the fork head to read')] ?? '';
+  check('a fork head is fetched from the repository own pull ref, checked against the named sha and checked out with symlinks as plain files, only when the check said fork',
+    forkFetch.includes("if: steps.pr.outputs.fork == 'true'") && forkFetch.includes('refs/pull/${PR}/head') && forkFetch.includes('--depth 1 --no-tags') && forkFetch.includes('if [ "$at" != "$HEAD_SHA" ]')
+    && forkFetch.includes('-c core.symlinks=false checkout -q --detach FETCH_HEAD') && !/\$\{\{\s*inputs\./.test(forkFetch.slice(forkFetch.indexOf('run:'))));
+  check('the same-repo checkout is skipped for a fork head, and the review step is told which it got',
+    (steps[checkoutAt] ?? '').includes("if: steps.pr.outputs.fork != 'true'") && (steps[stepNamed('Review')] ?? '').includes("REDLINE_FORK: ${{ steps.pr.outputs.fork == 'true' && '1' || '0' }}"));
+  // The step's whole run block, run by bash as the runner runs it, so the shell's quoting is tested too.
+  const dsShell = /run: \|\n((?: {10}.*\n?)+)/.exec(ds)?.[1].replace(/^ {10}/gm, '') ?? '';
+  check('the dispatch check script reaches node through a quoted heredoc', dsShell.startsWith("node --input-type=module <<'JS'\n") && /\nJS\n?$/.test(dsShell) && dsShell.includes('workflow_dispatch'));
+  if (bash.error) {
+    console.log('  skip the dispatch check\'s shell: no bash here');
+  } else {
+    const dsRun = (env) => spawnSync('bash', ['--noprofile', '--norc', '-eo', 'pipefail', '-c', dsShell], {
+      env: { PATH: process.env.PATH, GH_READ_TOKEN: 'x', REPO: 'askalf/r', DEFAULT_BRANCH: 'main', REF: 'refs/heads/main', EVENT_NAME: 'workflow_dispatch', PR: '7', HEAD_SHA: HEAD, ...env },
+      encoding: 'utf8', timeout: 20_000,
+    });
+    const refused = (env, why) => { const r = dsRun(env); return r.status === 1 && why.test(r.stdout); };
+    check('the dispatch check parses as shell', spawnSync('bash', ['-n', '-c', dsShell], { encoding: 'utf8' }).status === 0);
+    check('a pr input on pull_request is refused before any read', refused({ EVENT_NAME: 'pull_request' }, /only on workflow_dispatch/));
+    check('a dispatch off the default branch is refused before any read', refused({ REF: 'refs/heads/feat/x' }, /default branch/) && refused({ DEFAULT_BRANCH: '' }, /default branch/));
+    check('a pr that is not a number is refused before any read', refused({ PR: '7; rm -rf /' }, /pull request number/) && refused({ PR: '0' }, /pull request number/));
+    check('a head that is not a full sha is refused before any read', refused({ HEAD_SHA: 'main' }, /full 40-character/) && refused({ HEAD_SHA: HEAD.slice(0, 7) }, /full 40-character/));
+
+    // The contributor gate, decided against stubbed API answers: a preload replaces fetch with a
+    // lookup of the request path in API (JSON), and an unknown path answers 404.
+    const gateDir = mkdtempSync(join(tmpdir(), 'redline-gate-'));
+    const stub = join(gateDir, 'stub.mjs');
+    writeFileSync(stub, [
+      'const api = JSON.parse(process.env.API);',
+      'globalThis.fetch = async (url) => {',
+      '  const u = new URL(url);',
+      '  const body = api[u.pathname];',
+      '  return { ok: body !== undefined, status: body === undefined ? 404 : 200, json: async () => body };',
+      '};',
+      'globalThis.setTimeout = (fn) => { fn(); return 0; };',
+    ].join('\n'));
+    const forkPr = { number: 7, state: 'open', draft: false, head: { sha: HEAD, repo: { full_name: 'someone/r' } } };
+    const run = (id, conclusion, extra = {}) => ({ id, status: 'completed', conclusion, head_sha: HEAD, head_repository: { full_name: 'someone/r' }, ...extra });
+    const job = (conclusion, ran) => ({ status: 'completed', conclusion, runner_name: ran ? 'runner-1' : null, started_at: ran ? '2026-10-18T00:00:00Z' : null });
+    const gate = (runs, jobsByRun = {}) => {
+      const api = { '/repos/askalf/r/pulls/7': forkPr, '/repos/askalf/r/actions/runs': { workflow_runs: runs } };
+      for (const [id, jobs] of Object.entries(jobsByRun)) if (jobs !== undefined) api[`/repos/askalf/r/actions/runs/${id}/jobs`] = { jobs };
+      const out = join(gateDir, `out-${Math.random().toString(36).slice(2)}`);
+      writeFileSync(out, '');
+      const r = dsRun({ API: JSON.stringify(api), NODE_OPTIONS: `--import=${pathToFileURL(stub).href}`, GITHUB_OUTPUT: out });
+      return { ...r, output: readFileSync(out, 'utf8') };
+    };
+    const held = (r) => r.status === 1 && /is a fork PR whose workflows at 4753643 have not run/.test(r.stdout) && r.output === '';
+    check('a fork head with no pull_request runs is refused', held(gate([])));
+    check('a fork head whose run waits at the contributor gate (action_required) is refused',
+      held(gate([{ ...run(11, 'action_required') }], { 11: [] })));
+    check('a fork head whose run was cancelled at the gate without running is refused, though its conclusion is not action_required',
+      held(gate([run(11, 'cancelled')], { 11: [] })) && held(gate([run(11, 'cancelled')], { 11: [job('cancelled', false)] }))
+      && held(gate([run(11, 'skipped')], { 11: [job('skipped', false)] })));
+    check('a job that finished without ever being picked up by a runner does not count',
+      held(gate([run(11, 'failure')], { 11: [job('failure', false)] })));
+    check('a run for another head repository or another head does not count',
+      held(gate([run(11, 'success', { head_repository: { full_name: 'other/r' } })], { 11: [job('success', true)] }))
+      && held(gate([run(11, 'success', { head_sha: OTHER })], { 11: [job('success', true)] })));
+    check('a run whose jobs cannot be read fails the check',
+      (() => { const r = gate([run(11, 'success')]); return r.status === 1 && /could not list the jobs of run 11/.test(r.stdout) && r.output === ''; })());
+    const approved = gate([run(11, 'cancelled'), run(12, 'success')], { 11: [], 12: [job('skipped', false), job('success', true)] });
+    check('a fork head whose approved run had a job run on a runner passes and says fork=true',
+      approved.status === 0 && approved.output === 'fork=true\n' && /a fork, read only/.test(approved.stdout));
+    const failedJob = gate([run(12, 'failure')], { 12: [job('failure', true)] });
+    check('a job that ran and failed still shows the head was let through the gate', failedJob.status === 0 && failedJob.output === 'fork=true\n');
+    rmSync(gateDir, { recursive: true, force: true });
+  }
   check('the PR checkout takes the dispatched head, else the event head', (steps[checkoutAt] ?? '').includes('ref: ${{ inputs.head || github.event.pull_request.head.sha }}'));
   const rs = steps[reviewAt] ?? '';
   check('the review takes the dispatched PR and head, else the event\'s',
@@ -990,6 +1060,9 @@ console.log('\n  pin bump');
   check('the bump job knows the eleven callers, this repository first', callers.join() === expected.join());
   check('this repo\'s caller pins askalf/ci and the same sha as redline-ref',
     /uses: askalf\/ci\/\.github\/workflows\/redline-review\.yml@([0-9a-f]{40})/.exec(own)?.[1] === refs(own)[0] && !own.includes('askalf/askalf/') && own.includes('runner-label: redline\n'));
+  // A called workflow holds no permission its caller does not grant.
+  check('this repo\'s caller grants the review what it reads, actions included',
+    (/\npermissions:\n((?: {2}.*\n)+)/.exec(own)?.[1] ?? '') === '  actions: read\n  contents: read\n  pull-requests: read\n');
 
   // Forge dispatches the caller on the default branch and
   // finds its run by this exact title, so the title and the inputs are a contract with forge.

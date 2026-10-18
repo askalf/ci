@@ -13,6 +13,11 @@ A repository's `.github/workflows/redline.yml` calls the review at one full comm
 repository's `main`, and passes the same sha as `redline-ref`:
 
 ```yaml
+permissions:
+  actions: read
+  contents: read
+  pull-requests: read
+
 jobs:
   review:
     if: github.event.pull_request.draft == false && github.event.pull_request.head.repo.full_name == github.repository
@@ -22,7 +27,13 @@ jobs:
       runner-label: redline
 ```
 
-The two shas must be equal. GitHub gives a reusable workflow no way to learn its own commit, so the
+The two shas must be equal. The caller grants the review all three read permissions: a called
+workflow gets no permission its caller withholds, and GitHub refuses to start one that asks for
+more. `actions: read` is for the fork check, which lists the head's pull_request runs and their jobs.
+A fork PR is reviewed only on a dispatch (`redline-review.yml`'s
+dispatch mode) and only after its workflows have been let through the contributor gate: the head is
+fetched from the repository's own pull ref, compared with the sha the dispatch named, and read with
+symlinks written as plain files; nothing from it runs. GitHub gives a reusable workflow no way to learn its own commit, so the
 workflow fetches `scripts/redline` at `redline-ref`, after checking that it is a full sha and a commit
 on `main` here: a caller cannot point its review at a script from an unmerged branch. The fix caller,
 `redline-fix.yml`, has the same shape with `redline-fix-run.yml` and the repository's exec runner

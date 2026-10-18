@@ -861,7 +861,10 @@ export async function runReview(ctx) {
   const pr = await gh(ctx, `/repos/${repo}/pulls/${n}`);
   if (pr.state !== 'open') return { outcome: 'skipped', reason: `PR is ${pr.state}` };
   if (pr.head.sha !== headSha) return { outcome: 'skipped', reason: `head moved to ${pr.head.sha.slice(0, 7)}` };
-  if (pr.head.repo?.full_name !== repo) return { outcome: 'skipped', reason: 'fork PR' };
+  // A fork head is read only when the workflow said so (REDLINE_FORK=1: a dispatch that fetched
+  // the head by the repository's pull ref and checked the contributor gate). On pull_request the
+  // job never runs for a fork, and a dispatch that did not set it skips the head as before.
+  if (pr.head.repo?.full_name !== repo && !ctx.fork) return { outcome: 'skipped', reason: 'fork PR' };
   if (pr.draft) return { outcome: 'skipped', reason: 'draft PR' };
 
   // A re-read reviews the head again: the verdict standing there is the one being reconsidered.
@@ -1060,6 +1063,7 @@ async function main() {
     fetch: withDarioSocket(globalThis.fetch, dario.darioUrl, dario.darioSocket), sleep: (ms) => new Promise((r) => setTimeout(r, ms)), now: () => Date.now(),
     dryRun: env.REDLINE_DRY_RUN === '1',
     reread: env.REDLINE_REREAD === '1',
+    fork: env.REDLINE_FORK === '1',
     log: (line) => console.log(line),
   };
   let result;
