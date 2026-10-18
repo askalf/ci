@@ -935,17 +935,23 @@ console.log('\n  the reusable workflow');
     && forkFetch.includes('-c core.symlinks=false checkout -q --detach FETCH_HEAD') && !/\$\{\{\s*inputs\./.test(forkFetch.slice(forkFetch.indexOf('run:'))));
   check('the same-repo checkout is skipped for a fork head, and the review step is told which it got',
     (steps[checkoutAt] ?? '').includes("if: steps.pr.outputs.fork != 'true'") && (steps[stepNamed('Review')] ?? '').includes("REDLINE_FORK: ${{ steps.pr.outputs.fork == 'true' && '1' || '0' }}"));
-  const dsScript = /node --input-type=module -e '\n([\s\S]*?)\n\s*'\s*$/.exec(ds)?.[1] ?? '';
-  const dsRun = (env) => spawnSync(process.execPath, ['--input-type=module', '-e', dsScript], {
-    env: { PATH: process.env.PATH, GH_READ_TOKEN: 'x', REPO: 'askalf/r', DEFAULT_BRANCH: 'main', REF: 'refs/heads/main', EVENT_NAME: 'workflow_dispatch', PR: '7', HEAD_SHA: HEAD, ...env },
-    encoding: 'utf8', timeout: 20_000,
-  });
-  const refused = (env, why) => { const r = dsRun(env); return r.status === 1 && why.test(r.stdout); };
-  check('the dispatch check script was found', dsScript.includes('workflow_dispatch'));
-  check('a pr input on pull_request is refused before any read', refused({ EVENT_NAME: 'pull_request' }, /only on workflow_dispatch/));
-  check('a dispatch off the default branch is refused before any read', refused({ REF: 'refs/heads/feat/x' }, /default branch/) && refused({ DEFAULT_BRANCH: '' }, /default branch/));
-  check('a pr that is not a number is refused before any read', refused({ PR: '7; rm -rf /' }, /pull request number/) && refused({ PR: '0' }, /pull request number/));
-  check('a head that is not a full sha is refused before any read', refused({ HEAD_SHA: 'main' }, /full 40-character/) && refused({ HEAD_SHA: HEAD.slice(0, 7) }, /full 40-character/));
+  // The step's whole run block, run by bash as the runner runs it, so the shell's quoting is tested too.
+  const dsShell = /run: \|\n((?: {10}.*\n?)+)/.exec(ds)?.[1].replace(/^ {10}/gm, '') ?? '';
+  check('the dispatch check script reaches node through a quoted heredoc', dsShell.startsWith("node --input-type=module <<'JS'\n") && /\nJS\n?$/.test(dsShell) && dsShell.includes('workflow_dispatch'));
+  if (bash.error) {
+    console.log('  skip the dispatch check\'s shell: no bash here');
+  } else {
+    const dsRun = (env) => spawnSync('bash', ['--noprofile', '--norc', '-eo', 'pipefail', '-c', dsShell], {
+      env: { PATH: process.env.PATH, GH_READ_TOKEN: 'x', REPO: 'askalf/r', DEFAULT_BRANCH: 'main', REF: 'refs/heads/main', EVENT_NAME: 'workflow_dispatch', PR: '7', HEAD_SHA: HEAD, ...env },
+      encoding: 'utf8', timeout: 20_000,
+    });
+    const refused = (env, why) => { const r = dsRun(env); return r.status === 1 && why.test(r.stdout); };
+    check('the dispatch check parses as shell', spawnSync('bash', ['-n', '-c', dsShell], { encoding: 'utf8' }).status === 0);
+    check('a pr input on pull_request is refused before any read', refused({ EVENT_NAME: 'pull_request' }, /only on workflow_dispatch/));
+    check('a dispatch off the default branch is refused before any read', refused({ REF: 'refs/heads/feat/x' }, /default branch/) && refused({ DEFAULT_BRANCH: '' }, /default branch/));
+    check('a pr that is not a number is refused before any read', refused({ PR: '7; rm -rf /' }, /pull request number/) && refused({ PR: '0' }, /pull request number/));
+    check('a head that is not a full sha is refused before any read', refused({ HEAD_SHA: 'main' }, /full 40-character/) && refused({ HEAD_SHA: HEAD.slice(0, 7) }, /full 40-character/));
+  }
   check('the PR checkout takes the dispatched head, else the event head', (steps[checkoutAt] ?? '').includes('ref: ${{ inputs.head || github.event.pull_request.head.sha }}'));
   const rs = steps[reviewAt] ?? '';
   check('the review takes the dispatched PR and head, else the event\'s',
