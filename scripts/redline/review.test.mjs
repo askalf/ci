@@ -266,7 +266,7 @@ console.log('\n  verdictAtHead');
 
 
 const PATCH = '@@ -1 +1,2 @@\n+export const token = process.env.X;\n const y = 2;';
-function world({ reviews = [], heads = [HEAD], turns, modelStatus = [], draft = false, files = null, attributes = null } = {}) {
+function world({ reviews = [], heads = [HEAD], turns, modelStatus = [], draft = false, files = null, attributes = null, headRepo = 'askalf/r' } = {}) {
   const calls = { posted: [], model: [], keys: [], sleeps: 0 };
   let headReads = 0;
   const json = (body, status = 200, headers = {}) => ({ ok: status < 300, status, headers: new Headers(headers), json: async () => body, text: async () => JSON.stringify(body) });
@@ -287,7 +287,7 @@ function world({ reviews = [], heads = [HEAD], turns, modelStatus = [], draft = 
     }
     const p = u.pathname;
     if (init.method === 'POST' && p.endsWith('/reviews')) { const b = JSON.parse(init.body); calls.posted.push({ ...b, auth: init.headers.authorization }); return json({ html_url: 'https://x/review/1' }); }
-    if (/\/pulls\/7$/.test(p)) { const sha = heads[Math.min(headReads++, heads.length - 1)]; return json({ number: 7, state: 'open', draft, title: 'feat: add token', body: 'Adds it.', user: { login: 'askalf' }, head: { sha, ref: 'feat/x', repo: { full_name: 'askalf/r' } }, base: { ref: 'main', sha: BASE, repo: { full_name: 'askalf/r' } } }); }
+    if (/\/pulls\/7$/.test(p)) { const sha = heads[Math.min(headReads++, heads.length - 1)]; return json({ number: 7, state: 'open', draft, title: 'feat: add token', body: 'Adds it.', user: { login: 'askalf' }, head: { sha, ref: 'feat/x', repo: { full_name: headRepo } }, base: { ref: 'main', sha: BASE, repo: { full_name: 'askalf/r' } } }); }
     if (p.endsWith('/reviews')) return json(u.searchParams.get('page') === '1' ? reviews : []);
     if (p.endsWith('/contents/.gitattributes')) return attributes === null ? json({ message: 'Not Found' }, 404) : json({ type: 'file', encoding: 'base64', content: Buffer.from(attributes).toString('base64') });
     if (p.endsWith('/files')) return json(u.searchParams.get('page') === '1' ? (files ?? [{ filename: 'src/b.js', status: 'modified', additions: 1, deletions: 0, patch: PATCH }]) : []);
@@ -373,6 +373,14 @@ console.log('\n  earlier reviews on the PR');
   const { ctx, calls } = world({ draft: true, turns: [submit(APPROVE)] });
   const r = await runReview(ctx);
   check('a draft is skipped before the model is called', r.outcome === 'skipped' && /draft/.test(r.reason) && calls.model.length === 0);
+}
+{
+  const { ctx, calls } = world({ headRepo: 'someone/r', turns: [submit(APPROVE)] });
+  const r = await runReview(ctx);
+  check('a fork head is skipped before the model is called unless the workflow said to read it', r.outcome === 'skipped' && r.reason === 'fork PR' && calls.model.length === 0);
+  const w2 = world({ headRepo: 'someone/r', turns: [submit(APPROVE)] });
+  const r2 = await runReview({ ...w2.ctx, fork: true });
+  check('with REDLINE_FORK the fork head is reviewed and the verdict posted at it', r2.outcome === 'posted' && r2.verdict === 'APPROVE' && w2.calls.model.length === 1 && w2.calls.posted[0].commit_id === HEAD);
 }
 {
   const { ctx, calls } = world({ heads: [OTHER], turns: [submit(APPROVE)] });
@@ -916,9 +924,17 @@ console.log('\n  the reusable workflow');
     ds.startsWith("name: Check the dispatched PR\n        if: inputs.pr != ''\n") && dispatchAt > mainAt && dispatchAt < fetchAt && dispatchAt < checkoutAt);
   check('the inputs reach every run step through env, never interpolated into it',
     steps.every((s) => !s.includes('run:') || !/\$\{\{\s*inputs\.(pr|head|reread)/.test(s.slice(s.indexOf('run:')))));
-  check('the dispatch check reads the PR and refuses closed, draft, fork and moved heads',
-    ds.includes('/repos/${REPO}/pulls/${PR}') && ds.includes('pr.state !== "open"') && ds.includes('if (pr.draft)')
-    && ds.includes('pr.head?.repo?.full_name !== REPO') && ds.includes('pr.head?.sha !== HEAD_SHA'));
+  check('the dispatch check reads the PR and refuses closed, draft and moved heads',
+    ds.includes('/repos/${REPO}/pulls/${PR}') && ds.includes('pr.state !== "open"') && ds.includes('if (pr.draft)') && ds.includes('pr.head?.sha !== HEAD_SHA'));
+  check('a fork head is allowed only once its pull_request runs have run (none held at the contributor gate), and the step says fork= in its output',
+    ds.includes('const fork = pr.head?.repo?.full_name !== REPO') && ds.includes('actions/runs?head_sha=${HEAD_SHA}&event=pull_request')
+    && ds.includes('w.conclusion !== "action_required"') && ds.includes('fail(`${REPO}#${PR} is a fork PR whose workflows') && ds.includes('appendFileSync(process.env.GITHUB_OUTPUT, `fork=') && ds.includes('\n        id: pr\n'));
+  const forkFetch = steps[stepNamed('Fetch the fork head to read')] ?? '';
+  check('a fork head is fetched from the repository own pull ref, checked against the named sha and checked out with symlinks as plain files, only when the check said fork',
+    forkFetch.includes("if: steps.pr.outputs.fork == 'true'") && forkFetch.includes('refs/pull/${PR}/head') && forkFetch.includes('--depth 1 --no-tags') && forkFetch.includes('if [ "$at" != "$HEAD_SHA" ]')
+    && forkFetch.includes('-c core.symlinks=false checkout -q --detach FETCH_HEAD') && !/\$\{\{\s*inputs\./.test(forkFetch.slice(forkFetch.indexOf('run:'))));
+  check('the same-repo checkout is skipped for a fork head, and the review step is told which it got',
+    (steps[checkoutAt] ?? '').includes("if: steps.pr.outputs.fork != 'true'") && (steps[stepNamed('Review')] ?? '').includes("REDLINE_FORK: ${{ steps.pr.outputs.fork == 'true' && '1' || '0' }}"));
   const dsScript = /node --input-type=module -e '\n([\s\S]*?)\n\s*'\s*$/.exec(ds)?.[1] ?? '';
   const dsRun = (env) => spawnSync(process.execPath, ['--input-type=module', '-e', dsScript], {
     env: { PATH: process.env.PATH, GH_READ_TOKEN: 'x', REPO: 'askalf/r', DEFAULT_BRANCH: 'main', REF: 'refs/heads/main', EVENT_NAME: 'workflow_dispatch', PR: '7', HEAD_SHA: HEAD, ...env },
