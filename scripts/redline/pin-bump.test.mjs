@@ -238,7 +238,7 @@ if [ "$A_MODE" = nopin ] && [[ "$*" == *"repos/askalf/a/contents/.github/workflo
 if [ "$A_MODE" = partial ]; then
   case "$*" in
     *"repos/askalf/a/contents/.github/workflows/redline.yml?ref="*) exit 1 ;;
-    *"repos/askalf/a/contents/.github/workflows?ref=tip0000 --jq"*) printf '%s\n' redline-fix.yml; exit 0 ;;
+    *"repos/askalf/a/contents/.github/workflows?ref=tip0000 --jq"*) printf '%s\\n' redline-fix.yml; exit 0 ;;
     *"repos/askalf/a/contents/.github/workflows/redline-fix.yml?ref="*" --jq .content") echo "${b64(old)}"; exit 0 ;;
     *"repos/askalf/a/contents/.github/workflows/redline-fix.yml?ref=bot/redline-pin --jq .sha") echo blob1; exit 0 ;;
   esac
