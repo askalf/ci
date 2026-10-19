@@ -82,6 +82,12 @@ console.log('\n  a caller must grant what the called workflow asks for');
     throws(() => missingGrants(at('permissions: {}\n'), '<<: *base\njobs:\n  r:\n    runs-on: x\n'))
       && throws(() => missingGrants(at('permissions: {}\n'), 'jobs:\n  <<: *jobs\n  r:\n    runs-on: x\n'))
       && throws(() => missingGrants(at('permissions: {}\n'), 'jobs:\n  r:\n    <<: *job\n    runs-on: x\n')));
+  check('an escaped permissions key is read as YAML reads it, at the top and on the calling job',
+    missingGrants(at('"permiss\\u0069ons": {}\n'), called).join() === 'actions: read,contents: read,pull-requests: write'
+      && missingGrants(`${fullTop}jobs:\n  review:\n    "permiss\\u0069ons": {}\n    uses: askalf/ci/.github/workflows/redline-review.yml@${NEWSHA}\n`, called).length === 3
+      && missingGrants(at('\'permissions\': {\'actions\': \'read\', contents: "read", "pull-requests": "wr\\u0069te"}\n'), called).length === 0);
+  check('an escape only YAML has throws instead of being read as some other key',
+    throws(() => missingGrants(at('"permiss\\x69ons": {}\n'), called)));
   check('a block entry it cannot read throws instead of counting as nothing',
     (() => { try { missingGrants(at('permissions:\n  actions: maybe\n'), called); return false; } catch { return true; } })()
       && (() => { try { missingGrants(at('permissions: {}\n'), 'permissions:\n  actions: ${{ x }}\njobs:\n  r:\n    runs-on: x\n'); return false; } catch { return true; } })());

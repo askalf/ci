@@ -178,8 +178,14 @@ export function bumpActionPins(yaml, sha, note = '') {
 const LEVEL = { none: 0, read: 1, write: 2 };
 const SCOPES = ['actions', 'attestations', 'checks', 'contents', 'deployments', 'discussions', 'id-token', 'issues',
   'models', 'packages', 'pages', 'pull-requests', 'repository-projects', 'security-events', 'statuses'];
-// A YAML scalar without its quotes: 'read' and "read" are read.
-const unquote = (x) => (/^(['"]).*\1$/.test(x) ? x.slice(1, -1) : x);
+// A YAML scalar as YAML reads it: 'it''s' is it's, and "permissions" is permissions. A
+// double-quoted scalar is decoded as JSON, whose escapes YAML's include; an escape only YAML has
+// (\x41, \e and the like) throws rather than leaving a spelling YAML would read differently.
+const unquote = (x) => {
+  if (/^'.*'$/.test(x)) return x.slice(1, -1).replace(/''/g, "'");
+  if (!/^".*"$/.test(x)) return x;
+  try { return JSON.parse(x); } catch { throw new Error(`a quoted scalar this cannot decode: ${x}`); }
+};
 // A mapping key, quoted or not: "permissions": is the permissions key, "review": the review job.
 const keyOf = (l) => unquote(l.trim().split(':')[0].trim());
 const valueOf = (l) => l.replace(/\s+#.*$/, '').split(':').slice(1).join(':').trim();
