@@ -65,7 +65,9 @@ runs `redline-pin-bump.yml`. It rewrites `redline.yml` and, where a repository h
 `redline-fix.yml` in every caller in its `CALLERS` list through `pin.mjs`, and every other workflow
 file there that pins `actions/drift-report` through `pin.mjs --action`, one commit per file on
 `bot/redline-pin`, and opens or updates one pull request per repository. Each repository's own gate reviews and merges the
-bump. This repository is in the list: its own `redline.yml` moves the same way. The job needs
+bump. This repository is in the list: its own `redline.yml` moves the same way. A repository in the list
+with no `redline.yml` is bumped for its drift-report pins alone (askalf/platform, private, gated by its own
+CI); one with no pin of either kind is reported as wrong. The job needs
 `REDLINE_PIN_BUMP_TOKEN`, a fine-grained token with Contents, Pull requests and Workflows read and
 write on every repository in the list (Workflows because the pins live in `.github/workflows/`);
 without it the job says so and stops, green. A repository whose bump fails is reported and the job

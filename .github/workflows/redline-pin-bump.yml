@@ -58,10 +58,13 @@ jobs:
       CALLERS: >-
         askalf/ci askalf/askalf askalf/dario askalf/amnesia askalf/browser-bridge askalf/redstamp
         askalf/truecopy askalf/truecopy-action askalf/cordon askalf/plumbline askalf/checkout-with-retry
+        askalf/platform
       # A bot-shaped branch opened by askalf: the fleet lanes treat it as a bot PR.
       BRANCH: bot/redline-pin
-      # The review caller is in every repo; the fix caller only where the fix lane is wired, so a
-      # missing one is skipped, not an error.
+      # The review caller is in every repo but platform; the fix caller only where the fix lane is
+      # wired, so a missing one is skipped, not an error. A repository with neither is still a caller
+      # when a workflow there pins the drift-report action (platform, whose own CI gates it, not
+      # Redline): it is bumped for those pins alone, and only a repository with no pin at all is wrong.
       CALLER_PATHS: >-
         .github/workflows/redline.yml .github/workflows/redline-fix.yml
       # What a caller runs: the scripts the reusable workflows fetch, and the workflows. The tests,
@@ -172,17 +175,21 @@ jobs:
           # holds inside the subshell it runs in), never the loop: the next repository is still bumped.
           # The files to rewrite are kept in arrays, so a path is never split on its spaces.
           bump() {
-            local repo="$1" base tip path at current updated blob bad=0 unread=0 bumped=0 open name listing pins caller out called missing
-            local -a todo=() atodo=() names=()
+            local repo="$1" base tip path at current updated blob bad=0 unread=0 bumped=0 noreview=0 pinned=0 open name listing pins caller out called missing
+            local -a todo=() atodo=() names=() absent=()
             # Callers are bumped side by side, so each keeps its own file for the rewritten workflow.
             out="$(mktemp)"
             base="$(gh api "repos/${repo}" --jq .default_branch)"
             tip="$(gh api "repos/${repo}/git/ref/heads/${base}" --jq .object.sha)"
-            # Which caller files need the new pin. The review caller must exist; the fix caller may not.
+            # Which caller files need the new pin. The fix caller may be missing; the review caller too,
+            # for a repository that pins only the drift-report action. A failed read says nothing by
+            # itself (a 404 and a 500 look the same here): whether the file exists is settled against
+            # the directory listing below, so a caller that is there but could not be read stops this
+            # repository's bump instead of passing as absent.
             for path in $CALLER_PATHS; do
               at="$(uri "$path")"
               if ! current="$(gh api "repos/${repo}/contents/${at}?ref=${tip}" --jq .content 2>/dev/null | base64 -d)"; then
-                if [ "$path" = ".github/workflows/redline.yml" ]; then echo "::error::${repo}: no ${path}"; bad=1; else echo "no ${path}"; fi
+                absent+=("$path")
                 continue
               fi
               if ! printf '%s\n' "$current" | grep -Eq "$pattern"; then
@@ -219,6 +226,13 @@ jobs:
               echo "::error::${repo}: could not list .github/workflows at ${tip:0:7}"; unread=1; listing=""
             fi
             if [ -n "$listing" ]; then mapfile -t names <<< "$listing"; fi
+            for path in "${absent[@]}"; do
+              if printf '%s\n' "${names[@]}" | grep -qx "$(basename "$path")"; then
+                echo "::error::${repo}: could not read ${path} at ${tip:0:7}"; unread=1; continue
+              fi
+              if [ "$path" = ".github/workflows/redline.yml" ]; then noreview=1; fi
+              echo "no ${path}"
+            done
             for name in "${names[@]}"; do
               path=".github/workflows/${name}"
               for caller in $CALLER_PATHS; do
@@ -232,10 +246,12 @@ jobs:
                 echo "::error::${repo}: could not read the action pins in ${path}"; unread=1; continue
               fi
               [ -n "$pins" ] || continue
+              pinned=$((pinned + 1))
               if ! printf '%s\n' "$pins" | grep -vqx "$SHA"; then echo "${path} already at ${short}"; continue; fi
               atodo+=("$path")
             done
             if [ "$unread" -ne 0 ]; then echo "::error::${repo}: not every workflow could be read; nothing is bumped here this run"; return 1; fi
+            if [ "$noreview" -ne 0 ] && [ "$pinned" -eq 0 ]; then echo "::error::${repo}: no .github/workflows/redline.yml and no drift-report pin; nothing here calls ${SOURCE}"; bad=1; fi
             if [ "${#todo[@]}" -eq 0 ] && [ "${#atodo[@]}" -eq 0 ]; then return "$bad"; fi
             # An open bump PR that already proposes this commit in every file that needs it is left
             # alone: resetting its branch would restart its review and checks for no change.
