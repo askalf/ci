@@ -63,6 +63,16 @@ console.log('\n  a caller must grant what the called workflow asks for');
     missingGrants(at('permissions: {}\n'), quotedCalled).join() === 'actions: read,contents: read'
       && missingGrants(at('permissions:\n  actions: \'read\'\n  "contents": "read"\n'), quotedCalled).length === 0
       && missingGrants(at('permissions: {actions: "read", contents: \'read\'}\n'), quotedCalled).length === 0);
+  const fullTop = 'permissions: {actions: read, contents: read, pull-requests: write}\n';
+  check('a quoted job-level override is the grant: an empty one under a sufficient top level lacks everything',
+    missingGrants(`${fullTop}jobs:\n  "review":\n    "permissions": {}\n    uses: askalf/ci/.github/workflows/redline-review.yml@${NEWSHA}\n`, called).join() === 'actions: read,contents: read,pull-requests: write');
+  check('a quoted top-level permissions key is the grant: an empty one lacks everything',
+    missingGrants(at('"permissions": {}\n'), called).join() === 'actions: read,contents: read,pull-requests: write'
+      && missingGrants(at('\'permissions\':\n  contents: read\n'), called).join() === 'actions: read,pull-requests: write');
+  check('a quoted uses key still finds the calling job and its override',
+    missingGrants(`${fullTop}jobs:\n  review:\n    permissions: {}\n    "uses": "askalf/ci/.github/workflows/redline-review.yml@${NEWSHA}"\n`, called).length === 3);
+  check('a caller whose calling job cannot be found throws instead of falling back to the top level',
+    (() => { try { missingGrants(`${fullTop}jobs:\n  review: {permissions: {}, uses: askalf/ci/.github/workflows/redline-review.yml@${NEWSHA}}\n`, called); return false; } catch { return true; } })());
   check('a block entry it cannot read throws instead of counting as nothing',
     (() => { try { missingGrants(at('permissions:\n  actions: maybe\n'), called); return false; } catch { return true; } })()
       && (() => { try { missingGrants(at('permissions: {}\n'), 'permissions:\n  actions: ${{ x }}\njobs:\n  r:\n    runs-on: x\n'); return false; } catch { return true; } })());

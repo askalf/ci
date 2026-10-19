@@ -178,11 +178,11 @@ export function bumpActionPins(yaml, sha, note = '') {
 const LEVEL = { none: 0, read: 1, write: 2 };
 const SCOPES = ['actions', 'attestations', 'checks', 'contents', 'deployments', 'discussions', 'id-token', 'issues',
   'models', 'packages', 'pages', 'pull-requests', 'repository-projects', 'security-events', 'statuses'];
-const keyOf = (l) => l.trim().split(':')[0].trim();
-const valueOf = (l) => l.replace(/\s+#.*$/, '').split(':').slice(1).join(':').trim();
-
 // A YAML scalar without its quotes: 'read' and "read" are read.
 const unquote = (x) => (/^(['"]).*\1$/.test(x) ? x.slice(1, -1) : x);
+// A mapping key, quoted or not: "permissions": is the permissions key, "review": the review job.
+const keyOf = (l) => unquote(l.trim().split(':')[0].trim());
+const valueOf = (l) => l.replace(/\s+#.*$/, '').split(':').slice(1).join(':').trim();
 
 /** One `scope: level` entry, quoted or not. Anything else throws, so it never counts as nothing. */
 function permissionEntry(entry, line) {
@@ -261,7 +261,10 @@ export function permissionsOf(yaml) {
 export function missingGrants(callerYaml, calledYaml) {
   const caller = permissionsOf(callerYaml);
   const lines = callerYaml.split('\n');
-  const usesAt = lines.findIndex((l) => CALLERS.some((c) => l.trimStart().startsWith(`uses: ${c.workflow}@`)));
+  // The calling job is found from its uses line; a caller where that line cannot be found (a flow
+  // map job, say) throws, so a job-level override it might hold is never skipped for the top level.
+  const usesAt = lines.findIndex((l) => !blank(l) && keyOf(l) === 'uses' && CALLERS.some((c) => unquote(valueOf(l)).startsWith(`${c.workflow}@`)));
+  if (usesAt < 0) throw new Error(`no ${CALLERS.map((c) => c.workflow).join(' or ')} call this can read`);
   let callingJob = null;
   for (let i = usesAt - 1; usesAt > 0 && i >= 0; i--) {
     if (!blank(lines[i]) && indentOf(lines[i]) < indentOf(lines[usesAt])) { callingJob = keyOf(lines[i]); break; }
