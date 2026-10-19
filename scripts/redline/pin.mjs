@@ -186,9 +186,68 @@ const unquote = (x) => {
   if (!/^".*"$/.test(x)) return x;
   try { return JSON.parse(x); } catch { throw new Error(`a quoted scalar this cannot decode: ${x}`); }
 };
-// A mapping key, quoted or not: "permissions": is the permissions key, "review": the review job.
-const keyOf = (l) => unquote(l.trim().split(':')[0].trim());
-const valueOf = (l) => l.replace(/\s+#.*$/, '').split(':').slice(1).join(':').trim();
+// A mapping key. plainShape lets only plain keys through, so a key is its spelling.
+const keyOf = (l) => l.trim().split(':')[0].trim();
+// A line without its trailing comment: a # that starts a word, outside quotes.
+function uncommented(l) {
+  let q = '';
+  for (let i = 0; i < l.length; i++) {
+    const c = l[i];
+    if (q) { if (c === '\\' && q === '"') i++; else if (c === q) q = ''; continue; }
+    if (c === '"' || c === "'") q = c;
+    else if (c === '#' && (i === 0 || /\s/.test(l[i - 1]))) return l.slice(0, i).trimEnd();
+  }
+  return l;
+}
+const valueOf = (l) => uncommented(l).split(':').slice(1).join(':').trim();
+
+const PLAIN_KEY = /^[A-Za-z0-9_][A-Za-z0-9_.\/-]*$/;
+const QUOTED = /^(?:'(?:[^']|'')*'|"(?:[^"\\]|\\.)*")$/;
+
+/**
+ * Throws unless the workflow is in the one shape permissionsOf reads. These files are written by
+ * hand in a single plain style, and a check that half-reads YAML must never take a form it does not
+ * read for "no permissions". So every line outside a block scalar's text is a `key: value`, a bare
+ * `key:`, or a list item (`- value`, `- key: value`); keys are plain words; the root mapping sits
+ * at column 0; quoted and flow values close on their own line; and nothing is tagged, anchored,
+ * aliased, merged, or split into documents. Anything else is refused, whatever YAML would make of it.
+ * @param {string[]} lines
+ */
+function plainShape(lines) {
+  let scalarCol = -1;
+  let rooted = false;
+  lines.forEach((raw, i) => {
+    const refuse = (what) => { throw new Error(`line ${i + 1} is outside the plain workflow shape (${what}): ${raw.trim()}`); };
+    if (raw.trim() === '') return;
+    const pad = indentOf(raw);
+    if (scalarCol >= 0 && pad > scalarCol) return;
+    scalarCol = -1;
+    if (/^\s*\t/.test(raw) || /^ *\t/.test(raw)) refuse('a tab in the indent');
+    if (raw.trimStart().startsWith('#')) return;
+    if (!rooted) { if (pad !== 0) refuse('the root mapping is not at column 0'); rooted = true; }
+    const line = uncommented(raw).trim();
+    if (/^(---|\.\.\.|%|\?)/.test(line)) refuse('a document marker, directive or complex key');
+    let rest = line, col = pad;
+    if (rest === '-' || rest.startsWith('- ')) { rest = rest.slice(1).trimStart(); col = pad + (line.length - rest.length); if (rest.startsWith('- ')) refuse('a nested list item'); }
+    const listItem = col !== pad;
+    if (rest === '') return;
+    const sep = rest.search(/:(\s|$)/);
+    let value;
+    if (sep < 0) {
+      if (!listItem) refuse('a line that is not a key, a list item or block scalar text');
+      value = rest;
+    } else {
+      if (!PLAIN_KEY.test(rest.slice(0, sep))) refuse('a key that is not a plain word');
+      value = rest.slice(sep + 1).trim();
+    }
+    if (value === '') return;
+    if (/^[&*!]/.test(value)) refuse('an anchor, alias or tag');
+    if (/^[|>][-+0-9]*$/.test(value)) { scalarCol = col; return; }
+    if (/^['"]/.test(value) && !QUOTED.test(value)) refuse('a quoted value that does not close on its line');
+    if (value.startsWith('{') && !value.endsWith('}')) refuse('a flow map that does not close on its line');
+    if (value.startsWith('[') && !value.endsWith(']')) refuse('a flow list that does not close on its line');
+  });
+}
 
 /** One `scope: level` entry, quoted or not. Anything else throws, so it never counts as nothing. */
 function permissionEntry(entry, line) {
@@ -239,6 +298,7 @@ function readPermissions(lines, at) {
  */
 export function permissionsOf(yaml) {
   const lines = yaml.split('\n').map((l) => l.replace(/\r$/, ''));
+  plainShape(lines);
   let top = null;
   const jobs = {};
   let inJobs = false, job = null, jobPad = -1, keyPad = -1;

@@ -135,3 +135,6 @@ a called workflow that asks for more than its caller grants: every run ends in `
 before any job runs. So a reusable workflow that needs a new permission lands first, each caller
 grants it in a PR of its own, and the next bump moves the pin; until then the bump names each
 caller that lacks it, and so does every later run while a caller already pinned there lacks it.
+The check reads one plain workflow shape, the one these files are written in (plain keys, the
+root at column 0, block jobs, values that close on their line, no tags, anchors, aliases or merge
+keys), and refuses any other: a form it does not read is reported, never taken for no permissions.

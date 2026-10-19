@@ -58,22 +58,23 @@ console.log('\n  a caller must grant what the called workflow asks for');
   const inlineCalled = 'on:\n  workflow_call:\npermissions: {actions: read}\njobs:\n  r:\n    runs-on: x\n    steps:\n      - run: true\n';
   check('an inline map in the called workflow is an ask: a caller granting nothing is told it lacks it',
     missingGrants(at('permissions: {}\n'), inlineCalled).join() === 'actions: read');
-  const quotedCalled = 'on:\n  workflow_call:\npermissions:\n  actions: "read"\n  \'contents\': \'read\'\njobs:\n  r:\n    runs-on: x\n    steps:\n      - run: true\n';
-  check('quoted levels and scopes in a block are read: an empty caller is told it lacks both',
+  const throws = (f) => { try { f(); return false; } catch { return true; } };
+  const quotedCalled = 'on:\n  workflow_call:\npermissions:\n  actions: "read"\n  contents: \'read\'\njobs:\n  r:\n    runs-on: x\n    steps:\n      - run: true\n';
+  check('quoted levels are read: an empty caller is told it lacks both, quoted grants cover them',
     missingGrants(at('permissions: {}\n'), quotedCalled).join() === 'actions: read,contents: read'
-      && missingGrants(at('permissions:\n  actions: \'read\'\n  "contents": "read"\n'), quotedCalled).length === 0
+      && missingGrants(at('permissions:\n  actions: \'read\'\n  contents: "read"\n'), quotedCalled).length === 0
       && missingGrants(at('permissions: {actions: "read", contents: \'read\'}\n'), quotedCalled).length === 0);
   const fullTop = 'permissions: {actions: read, contents: read, pull-requests: write}\n';
-  check('a quoted job-level override is the grant: an empty one under a sufficient top level lacks everything',
-    missingGrants(`${fullTop}jobs:\n  "review":\n    "permissions": {}\n    uses: askalf/ci/.github/workflows/redline-review.yml@${NEWSHA}\n`, called).join() === 'actions: read,contents: read,pull-requests: write');
-  check('a quoted top-level permissions key is the grant: an empty one lacks everything',
-    missingGrants(at('"permissions": {}\n'), called).join() === 'actions: read,contents: read,pull-requests: write'
-      && missingGrants(at('\'permissions\':\n  contents: read\n'), called).join() === 'actions: read,pull-requests: write');
-  check('a quoted uses key still finds the calling job and its override',
-    missingGrants(`${fullTop}jobs:\n  review:\n    permissions: {}\n    "uses": "askalf/ci/.github/workflows/redline-review.yml@${NEWSHA}"\n`, called).length === 3);
+  check('a quoted or escaped key anywhere throws instead of being read as some other key',
+    throws(() => missingGrants(`${fullTop}jobs:\n  "review":\n    "permissions": {}\n    uses: askalf/ci/.github/workflows/redline-review.yml@${NEWSHA}\n`, called))
+      && throws(() => missingGrants(at('"permissions": {}\n'), called))
+      && throws(() => missingGrants(at('\'permissions\':\n  contents: read\n'), called))
+      && throws(() => missingGrants(at('"permiss\\u0069ons": {}\n'), called))
+      && throws(() => missingGrants(at('permissions: {}\n'), 'on:\n  workflow_call:\n"permiss\\u0069ons": {actions: read}\njobs:\n  r:\n    runs-on: x\n')));
+  check('a quoted uses value still finds the calling job and its override',
+    missingGrants(`${fullTop}jobs:\n  review:\n    permissions: {}\n    uses: "askalf/ci/.github/workflows/redline-review.yml@${NEWSHA}"\n`, called).length === 3);
   check('a caller whose calling job cannot be found throws instead of falling back to the top level',
-    (() => { try { missingGrants(`${fullTop}jobs:\n  review: {permissions: {}, uses: askalf/ci/.github/workflows/redline-review.yml@${NEWSHA}}\n`, called); return false; } catch { return true; } })());
-  const throws = (f) => { try { f(); return false; } catch { return true; } };
+    throws(() => missingGrants(`${fullTop}jobs:\n  review: {permissions: {}, uses: askalf/ci/.github/workflows/redline-review.yml@${NEWSHA}}\n`, called)));
   check('a called workflow whose job is written inline throws instead of asking for nothing',
     throws(() => missingGrants(at('permissions: {}\n'), 'on:\n  workflow_call:\njobs:\n  r: {runs-on: ubuntu-latest, permissions: {actions: read}, steps: [{run: echo ok}]}\n'))
       && throws(() => missingGrants(at('permissions: {}\n'), 'on:\n  workflow_call:\njobs: {r: {permissions: {actions: read}}}\n'))
@@ -82,12 +83,18 @@ console.log('\n  a caller must grant what the called workflow asks for');
     throws(() => missingGrants(at('permissions: {}\n'), '<<: *base\njobs:\n  r:\n    runs-on: x\n'))
       && throws(() => missingGrants(at('permissions: {}\n'), 'jobs:\n  <<: *jobs\n  r:\n    runs-on: x\n'))
       && throws(() => missingGrants(at('permissions: {}\n'), 'jobs:\n  r:\n    <<: *job\n    runs-on: x\n')));
-  check('an escaped permissions key is read as YAML reads it, at the top and on the calling job',
-    missingGrants(at('"permiss\\u0069ons": {}\n'), called).join() === 'actions: read,contents: read,pull-requests: write'
-      && missingGrants(`${fullTop}jobs:\n  review:\n    "permiss\\u0069ons": {}\n    uses: askalf/ci/.github/workflows/redline-review.yml@${NEWSHA}\n`, called).length === 3
-      && missingGrants(at('\'permissions\': {\'actions\': \'read\', contents: "read", "pull-requests": "wr\\u0069te"}\n'), called).length === 0);
-  check('an escape only YAML has throws instead of being read as some other key',
-    throws(() => missingGrants(at('"permiss\\x69ons": {}\n'), called)));
+  check('an indented root, a document marker, a tag, an anchor or a complex key throws',
+    throws(() => missingGrants(at('permissions: {}\n'), '  on:\n    workflow_call:\n  permissions: {actions: read}\n  jobs:\n    r:\n      runs-on: x\n'))
+      && throws(() => missingGrants(at('permissions: {}\n'), '---\npermissions: {actions: read}\n'))
+      && throws(() => missingGrants(at('permissions: {}\n'), 'permissions: !!map {actions: read}\n'))
+      && throws(() => missingGrants(at('permissions: {}\n'), 'permissions: &p {actions: read}\n'))
+      && throws(() => missingGrants(at('permissions: {}\n'), '? permissions\n: {actions: read}\n')));
+  check('a value that runs onto the next line throws instead of hiding what follows',
+    throws(() => missingGrants(at('permissions: {}\n'), 'permissions: {actions: read,\n  contents: read}\n'))
+      && throws(() => missingGrants(at('permissions: {}\n'), 'name: "two\n  lines"\npermissions: {actions: read}\n'))
+      && throws(() => missingGrants(at('permissions: {}\n'), 'name: plain\n  continued\npermissions: {actions: read}\n')));
+  check('block scalar text is skipped, whatever it holds',
+    missingGrants(at('permissions: {}\n'), 'jobs:\n  r:\n    runs-on: x\n    steps:\n      - run: |\n          "permissions": {}\n          ---\n        shell: bash\n    permissions:\n      actions: read\n').join() === 'actions: read');
   check('a block entry it cannot read throws instead of counting as nothing',
     (() => { try { missingGrants(at('permissions:\n  actions: maybe\n'), called); return false; } catch { return true; } })()
       && (() => { try { missingGrants(at('permissions: {}\n'), 'permissions:\n  actions: ${{ x }}\njobs:\n  r:\n    runs-on: x\n'); return false; } catch { return true; } })());
