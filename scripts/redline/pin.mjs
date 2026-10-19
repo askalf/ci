@@ -181,30 +181,43 @@ const SCOPES = ['actions', 'attestations', 'checks', 'contents', 'deployments', 
 const keyOf = (l) => l.trim().split(':')[0].trim();
 const valueOf = (l) => l.replace(/\s+#.*$/, '').split(':').slice(1).join(':').trim();
 
+// A YAML scalar without its quotes: 'read' and "read" are read.
+const unquote = (x) => (/^(['"]).*\1$/.test(x) ? x.slice(1, -1) : x);
+
+/** One `scope: level` entry, quoted or not. Anything else throws, so it never counts as nothing. */
+function permissionEntry(entry, line) {
+  const at = entry.indexOf(':');
+  const scope = unquote(entry.slice(0, at).trim());
+  const level = unquote(entry.slice(at + 1).trim());
+  if (at < 0 || !/^[a-z-]+$/.test(scope) || !(level in LEVEL)) throw new Error(`unreadable permissions entry at line ${line}: ${entry}`);
+  return [scope, level];
+}
+
 /**
  * The `permissions:` key at line `at` as {scope: level}: its inline value or the block under it.
  * `read-all` and `write-all` give every scope that level; a flow map (`{}`, `{actions: read}`)
- * gives its entries. Any other inline value throws: a form this cannot read must not pass for an
- * empty grant or an empty ask.
+ * and a block give their entries. Any other inline value, and any entry that is not a scope and a
+ * level (quoted or not), throws: a form this cannot read must not pass for an empty grant or ask.
  */
 function readPermissions(lines, at) {
-  const inline = valueOf(lines[at]);
+  const inline = unquote(valueOf(lines[at]));
   if (inline === 'read-all' || inline === 'write-all') {
     return Object.fromEntries(SCOPES.map((k) => [k, inline === 'read-all' ? 'read' : 'write']));
   }
   const out = {};
   if (inline.startsWith('{') && inline.endsWith('}')) {
     for (const entry of inline.slice(1, -1).split(',').map((e) => e.trim()).filter(Boolean)) {
-      const m = /^([a-z-]+)\s*:\s*(read|write|none)$/.exec(entry);
-      if (!m) throw new Error(`unreadable permissions entry at line ${at + 1}: ${entry}`);
-      out[m[1]] = m[2];
+      const [scope, level] = permissionEntry(entry, at + 1);
+      out[scope] = level;
     }
     return out;
   }
   if (inline !== '') throw new Error(`unreadable permissions at line ${at + 1}: ${inline}`);
   const pad = indentOf(lines[at]);
   for (let i = at + 1; i < lines.length && (blank(lines[i]) || indentOf(lines[i]) > pad); i++) {
-    if (!blank(lines[i])) out[keyOf(lines[i])] = valueOf(lines[i]);
+    if (blank(lines[i])) continue;
+    const [scope, level] = permissionEntry(lines[i].replace(/\s+#.*$/, '').trim(), i + 1);
+    out[scope] = level;
   }
   return out;
 }

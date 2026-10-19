@@ -58,6 +58,14 @@ console.log('\n  a caller must grant what the called workflow asks for');
   const inlineCalled = 'on:\n  workflow_call:\npermissions: {actions: read}\njobs:\n  r:\n    runs-on: x\n    steps:\n      - run: true\n';
   check('an inline map in the called workflow is an ask: a caller granting nothing is told it lacks it',
     missingGrants(at('permissions: {}\n'), inlineCalled).join() === 'actions: read');
+  const quotedCalled = 'on:\n  workflow_call:\npermissions:\n  actions: "read"\n  \'contents\': \'read\'\njobs:\n  r:\n    runs-on: x\n    steps:\n      - run: true\n';
+  check('quoted levels and scopes in a block are read: an empty caller is told it lacks both',
+    missingGrants(at('permissions: {}\n'), quotedCalled).join() === 'actions: read,contents: read'
+      && missingGrants(at('permissions:\n  actions: \'read\'\n  "contents": "read"\n'), quotedCalled).length === 0
+      && missingGrants(at('permissions: {actions: "read", contents: \'read\'}\n'), quotedCalled).length === 0);
+  check('a block entry it cannot read throws instead of counting as nothing',
+    (() => { try { missingGrants(at('permissions:\n  actions: maybe\n'), called); return false; } catch { return true; } })()
+      && (() => { try { missingGrants(at('permissions: {}\n'), 'permissions:\n  actions: ${{ x }}\njobs:\n  r:\n    runs-on: x\n'); return false; } catch { return true; } })());
   check('a permissions form it cannot read throws instead of passing for an empty grant',
     (() => { try { missingGrants(at('permissions: ${{ fromJSON(x) }}\n'), called); return false; } catch { return true; } })()
       && (() => { try { missingGrants(at('permissions: {actions: maybe}\n'), called); return false; } catch { return true; } })());
