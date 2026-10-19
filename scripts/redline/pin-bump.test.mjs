@@ -52,6 +52,15 @@ console.log('\n  a caller must grant what the called workflow asks for');
   check('read-all grants every read and no write, {} grants nothing',
     missingGrants(at('permissions: read-all\n'), called).join() === 'pull-requests: write'
       && missingGrants(at('permissions: {}\n'), called).length === 3);
+  check('an inline map grants its entries: a sufficient one lacks nothing, a short one is told what it lacks',
+    missingGrants(at('permissions: {actions: read, contents: read, pull-requests: write}\n'), called).length === 0
+      && missingGrants(at('permissions: {contents: read}\n'), called).join() === 'actions: read,pull-requests: write');
+  const inlineCalled = 'on:\n  workflow_call:\npermissions: {actions: read}\njobs:\n  r:\n    runs-on: x\n    steps:\n      - run: true\n';
+  check('an inline map in the called workflow is an ask: a caller granting nothing is told it lacks it',
+    missingGrants(at('permissions: {}\n'), inlineCalled).join() === 'actions: read');
+  check('a permissions form it cannot read throws instead of passing for an empty grant',
+    (() => { try { missingGrants(at('permissions: ${{ fromJSON(x) }}\n'), called); return false; } catch { return true; } })()
+      && (() => { try { missingGrants(at('permissions: {actions: maybe}\n'), called); return false; } catch { return true; } })());
   check('a caller with no permissions block runs on the repository default, which a file cannot show: nothing is reported',
     missingGrants(at(''), called).length === 0);
   const real = (f) => readFileSync(fileURLToPath(new URL(`../../.github/workflows/${f}`, import.meta.url)), 'utf8');

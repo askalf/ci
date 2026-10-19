@@ -183,7 +183,9 @@ const valueOf = (l) => l.replace(/\s+#.*$/, '').split(':').slice(1).join(':').tr
 
 /**
  * The `permissions:` key at line `at` as {scope: level}: its inline value or the block under it.
- * `read-all` and `write-all` give every scope that level; `{}` gives none.
+ * `read-all` and `write-all` give every scope that level; a flow map (`{}`, `{actions: read}`)
+ * gives its entries. Any other inline value throws: a form this cannot read must not pass for an
+ * empty grant or an empty ask.
  */
 function readPermissions(lines, at) {
   const inline = valueOf(lines[at]);
@@ -191,7 +193,15 @@ function readPermissions(lines, at) {
     return Object.fromEntries(SCOPES.map((k) => [k, inline === 'read-all' ? 'read' : 'write']));
   }
   const out = {};
-  if (inline !== '') return out;
+  if (inline.startsWith('{') && inline.endsWith('}')) {
+    for (const entry of inline.slice(1, -1).split(',').map((e) => e.trim()).filter(Boolean)) {
+      const m = /^([a-z-]+)\s*:\s*(read|write|none)$/.exec(entry);
+      if (!m) throw new Error(`unreadable permissions entry at line ${at + 1}: ${entry}`);
+      out[m[1]] = m[2];
+    }
+    return out;
+  }
+  if (inline !== '') throw new Error(`unreadable permissions at line ${at + 1}: ${inline}`);
   const pad = indentOf(lines[at]);
   for (let i = at + 1; i < lines.length && (blank(lines[i]) || indentOf(lines[i]) > pad); i++) {
     if (!blank(lines[i])) out[keyOf(lines[i])] = valueOf(lines[i]);
