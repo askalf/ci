@@ -211,19 +211,24 @@ const QUOTED = /^(?:'(?:[^']|'')*'|"(?:[^"\\]|\\.)*")$/;
  * `key:`, or a list item (`- value`, `- key: value`); keys are plain words; the root mapping sits
  * at column 0; quoted and flow values close on their own line; and nothing is tagged, anchored,
  * aliased, merged, or split into documents. Anything else is refused, whatever YAML would make of it.
+ * Returns, per line, whether it is structure (a key or list item, not block scalar text, a comment
+ * or blank), so a reader never takes text for a key.
  * @param {string[]} lines
+ * @returns {boolean[]}
  */
 function plainShape(lines) {
   let scalarCol = -1;
   let rooted = false;
+  const structural = lines.map(() => false);
   lines.forEach((raw, i) => {
     const refuse = (what) => { throw new Error(`line ${i + 1} is outside the plain workflow shape (${what}): ${raw.trim()}`); };
     if (raw.trim() === '') return;
     const pad = indentOf(raw);
     if (scalarCol >= 0 && pad > scalarCol) return;
     scalarCol = -1;
-    if (/^\s*\t/.test(raw) || /^ *\t/.test(raw)) refuse('a tab in the indent');
+    if (/^ *\t/.test(raw)) refuse('a tab in the indent');
     if (raw.trimStart().startsWith('#')) return;
+    structural[i] = true;
     if (!rooted) { if (pad !== 0) refuse('the root mapping is not at column 0'); rooted = true; }
     const line = uncommented(raw).trim();
     if (/^(---|\.\.\.|%|\?)/.test(line)) refuse('a document marker, directive or complex key');
@@ -247,6 +252,7 @@ function plainShape(lines) {
     if (value.startsWith('{') && !value.endsWith('}')) refuse('a flow map that does not close on its line');
     if (value.startsWith('[') && !value.endsWith(']')) refuse('a flow list that does not close on its line');
   });
+  return structural;
 }
 
 /** One `scope: level` entry, quoted or not. Anything else throws, so it never counts as nothing. */
@@ -289,22 +295,24 @@ function readPermissions(lines, at) {
 
 /**
  * A workflow's permissions: `top` is its top-level block (null when it has none), `jobs` each
- * job's own block by job name. Line based, like the rest of this file: a top-level key sits at
- * indent 0, a job name one level under `jobs:`, and a job's keys one level under its name.
- * Only that block shape is read. A form that could carry permissions this does not see throws
- * instead of reading as none: `jobs:` or a job written inline (a flow map or an alias), and a
- * `<<` merge key at any of those levels.
+ * job's own block by job name, and `uses` each job's `uses:` value by job name. Line based, like
+ * the rest of this file, over the structure plainShape finds (block scalar text is never read): a
+ * top-level key sits at indent 0, a job name one level under `jobs:`, and a job's keys one level
+ * under its name. A form that could carry permissions this does not see throws instead of reading
+ * as none: `jobs:` or a job written inline (a flow map or an alias), and a `<<` merge key at any of
+ * those levels.
  * @param {string} yaml
  */
 export function permissionsOf(yaml) {
   const lines = yaml.split('\n').map((l) => l.replace(/\r$/, ''));
-  plainShape(lines);
+  const structural = plainShape(lines);
   let top = null;
   const jobs = {};
+  const uses = {};
   let inJobs = false, job = null, jobPad = -1, keyPad = -1;
   const refuse = (i, what) => { throw new Error(`${what} at line ${i + 1} cannot be read for permissions: ${lines[i].trim()}`); };
   lines.forEach((l, i) => {
-    if (blank(l)) return;
+    if (!structural[i]) return;
     const pad = indentOf(l);
     if (pad === 0) {
       if (keyOf(l) === '<<') refuse(i, 'a merge key');
@@ -323,8 +331,9 @@ export function permissionsOf(yaml) {
     if (keyPad < 0) keyPad = pad;
     if (pad === keyPad && keyOf(l) === '<<') refuse(i, 'a merge key');
     if (pad === keyPad && keyOf(l) === 'permissions') jobs[job] = readPermissions(lines, i);
+    if (pad === keyPad && keyOf(l) === 'uses') uses[job] = unquote(valueOf(l));
   });
-  return { top, jobs };
+  return { top, jobs, uses };
 }
 
 /**
@@ -337,16 +346,13 @@ export function permissionsOf(yaml) {
  */
 export function missingGrants(callerYaml, calledYaml) {
   const caller = permissionsOf(callerYaml);
-  const lines = callerYaml.split('\n');
-  // The calling job is found from its uses line; a caller where that line cannot be found (a flow
-  // map job, say) throws, so a job-level override it might hold is never skipped for the top level.
-  const usesAt = lines.findIndex((l) => !blank(l) && keyOf(l) === 'uses' && CALLERS.some((c) => unquote(valueOf(l)).startsWith(`${c.workflow}@`)));
-  if (usesAt < 0) throw new Error(`no ${CALLERS.map((c) => c.workflow).join(' or ')} call this can read`);
-  let callingJob = null;
-  for (let i = usesAt - 1; usesAt > 0 && i >= 0; i--) {
-    if (!blank(lines[i]) && indentOf(lines[i]) < indentOf(lines[usesAt])) { callingJob = keyOf(lines[i]); break; }
-  }
-  const grant = (callingJob !== null ? caller.jobs[callingJob] : undefined) ?? caller.top;
+  // The calling job is the one job whose own uses key calls a reusable workflow of ours, read from
+  // the structure, so text that looks like a call never stands in for it. None, or more than one,
+  // throws: a job-level override is never skipped for the top level, or read off the wrong job.
+  const calling = Object.entries(caller.uses).filter(([, v]) => CALLERS.some((c) => v.startsWith(`${c.workflow}@`)));
+  if (calling.length !== 1) throw new Error(`${calling.length === 0 ? 'no' : `${calling.length}`} job-level ${CALLERS.map((c) => c.workflow).join(' or ')} call(s) this can read; expected exactly one`);
+  const callingJob = calling[0][0];
+  const grant = caller.jobs[callingJob] ?? caller.top;
   if (grant === null) return [];
   const called = permissionsOf(calledYaml);
   const asks = {};

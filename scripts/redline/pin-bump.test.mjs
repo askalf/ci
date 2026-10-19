@@ -42,7 +42,7 @@ console.log('\n  a caller must grant what the called workflow asks for');
   const called = 'on:\n  workflow_call:\npermissions:\n  actions: read # the gate check\n  contents: read\njobs:\n  r:\n    runs-on: x\n    permissions:\n      pull-requests: write\n    steps:\n      - run: true\n';
   const at = (perms) => `${perms}jobs:\n  review:\n    uses: askalf/ci/.github/workflows/redline-review.yml@${NEWSHA} # main\n    with:\n      redline-ref: ${NEWSHA}\n`;
   check('the called workflow\'s asks are its top-level block and every job\'s',
-    JSON.stringify(permissionsOf(called)) === JSON.stringify({ top: { actions: 'read', contents: 'read' }, jobs: { r: { 'pull-requests': 'write' } } }), JSON.stringify(permissionsOf(called)));
+    JSON.stringify(permissionsOf(called)) === JSON.stringify({ top: { actions: 'read', contents: 'read' }, jobs: { r: { 'pull-requests': 'write' } }, uses: {} }), JSON.stringify(permissionsOf(called)));
   check('a caller granting less is told each scope it lacks, at the level asked',
     missingGrants(at('permissions:\n  contents: read\n  pull-requests: read\n'), called).join() === 'actions: read,pull-requests: write');
   check('a caller granting all of it, or more, lacks nothing',
@@ -73,6 +73,12 @@ console.log('\n  a caller must grant what the called workflow asks for');
       && throws(() => missingGrants(at('permissions: {}\n'), 'on:\n  workflow_call:\n"permiss\\u0069ons": {actions: read}\njobs:\n  r:\n    runs-on: x\n')));
   check('a quoted uses value still finds the calling job and its override',
     missingGrants(`${fullTop}jobs:\n  review:\n    permissions: {}\n    uses: "askalf/ci/.github/workflows/redline-review.yml@${NEWSHA}"\n`, called).length === 3);
+  check('a call spelled out in block scalar text never stands in for the calling job',
+    missingGrants(`${fullTop}env:\n  NOTE: |\n    uses: "askalf/ci/.github/workflows/redline-review.yml@${NEWSHA}"\njobs:\n  review:\n    permissions: {}\n    uses: askalf/ci/.github/workflows/redline-review.yml@${NEWSHA}\n`, called).length === 3
+      && missingGrants(`${fullTop}jobs:\n  notes:\n    runs-on: x\n    steps:\n      - run: |\n          uses: askalf/ci/.github/workflows/redline-review.yml@${NEWSHA}\n  review:\n    permissions: {}\n    uses: askalf/ci/.github/workflows/redline-review.yml@${NEWSHA}\n`, called).length === 3);
+  check('two jobs calling it, or none, throws instead of picking one',
+    throws(() => missingGrants(`${fullTop}jobs:\n  a:\n    uses: askalf/ci/.github/workflows/redline-review.yml@${NEWSHA}\n  b:\n    permissions: {}\n    uses: askalf/ci/.github/workflows/redline-review.yml@${NEWSHA}\n`, called))
+      && throws(() => missingGrants(`${fullTop}jobs:\n  a:\n    runs-on: x\n`, called)));
   check('a caller whose calling job cannot be found throws instead of falling back to the top level',
     throws(() => missingGrants(`${fullTop}jobs:\n  review: {permissions: {}, uses: askalf/ci/.github/workflows/redline-review.yml@${NEWSHA}}\n`, called)));
   check('a called workflow whose job is written inline throws instead of asking for nothing',
