@@ -10,11 +10,16 @@
 //      node scripts/redline/pin.mjs --caller <sha> <runner-label> [note] > redline-fix.yml
 //      node scripts/redline/pin.mjs --action <sha> [note] < watcher.yml > watcher.yml.new
 //      node scripts/redline/pin.mjs --action-pins < watcher.yml
+//      node scripts/redline/pin.mjs --grants <called.yml> < caller.yml
 //
 // The third form moves the drift-report action pin (actions/drift-report), which a watcher
 // workflow carries as a step and not as a job, so it has no redline-ref to keep in step.
 // The fourth prints the sha of each of those pins, one per line, so a caller deciding whether a
 // file needs the third form recognises exactly the lines the third form rewrites.
+// The fifth prints each permission the called workflow asks for that the caller does not grant,
+// one `scope: level` per line. GitHub refuses to start a called workflow that asks for more than
+// its caller grants (startup_failure, before any job runs), so a pin must never move ahead of
+// the grant it needs.
 
 import { readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
@@ -170,6 +175,84 @@ export function bumpActionPins(yaml, sha, note = '') {
   }).join('\n');
 }
 
+const LEVEL = { none: 0, read: 1, write: 2 };
+const SCOPES = ['actions', 'attestations', 'checks', 'contents', 'deployments', 'discussions', 'id-token', 'issues',
+  'models', 'packages', 'pages', 'pull-requests', 'repository-projects', 'security-events', 'statuses'];
+const keyOf = (l) => l.trim().split(':')[0].trim();
+const valueOf = (l) => l.replace(/\s+#.*$/, '').split(':').slice(1).join(':').trim();
+
+/**
+ * The `permissions:` key at line `at` as {scope: level}: its inline value or the block under it.
+ * `read-all` and `write-all` give every scope that level; `{}` gives none.
+ */
+function readPermissions(lines, at) {
+  const inline = valueOf(lines[at]);
+  if (inline === 'read-all' || inline === 'write-all') {
+    return Object.fromEntries(SCOPES.map((k) => [k, inline === 'read-all' ? 'read' : 'write']));
+  }
+  const out = {};
+  if (inline !== '') return out;
+  const pad = indentOf(lines[at]);
+  for (let i = at + 1; i < lines.length && (blank(lines[i]) || indentOf(lines[i]) > pad); i++) {
+    if (!blank(lines[i])) out[keyOf(lines[i])] = valueOf(lines[i]);
+  }
+  return out;
+}
+
+/**
+ * A workflow's permissions: `top` is its top-level block (null when it has none), `jobs` each
+ * job's own block by job name. Line based, like the rest of this file: a top-level key sits at
+ * indent 0, a job name one level under `jobs:`, and a job's keys one level under its name.
+ * @param {string} yaml
+ */
+export function permissionsOf(yaml) {
+  const lines = yaml.split('\n').map((l) => l.replace(/\r$/, ''));
+  let top = null;
+  const jobs = {};
+  let inJobs = false, job = null, jobPad = -1, keyPad = -1;
+  lines.forEach((l, i) => {
+    if (blank(l)) return;
+    const pad = indentOf(l);
+    if (pad === 0) {
+      inJobs = keyOf(l) === 'jobs';
+      if (keyOf(l) === 'permissions') top = readPermissions(lines, i);
+      return;
+    }
+    if (!inJobs) return;
+    if (jobPad < 0) jobPad = pad;
+    if (pad === jobPad) { job = keyOf(l); keyPad = -1; return; }
+    if (keyPad < 0) keyPad = pad;
+    if (pad === keyPad && keyOf(l) === 'permissions') jobs[job] = readPermissions(lines, i);
+  });
+  return { top, jobs };
+}
+
+/**
+ * Each permission the called workflow asks for, at its top level or in any of its jobs, that the
+ * caller does not grant at that level or higher, as `scope: level`. The caller's grant is the
+ * calling job's own block when it has one, else its top-level block. A caller with neither runs on
+ * the repository's default token permissions, which a file cannot show: it answers nothing.
+ * @param {string} callerYaml
+ * @param {string} calledYaml
+ */
+export function missingGrants(callerYaml, calledYaml) {
+  const caller = permissionsOf(callerYaml);
+  const lines = callerYaml.split('\n');
+  const usesAt = lines.findIndex((l) => CALLERS.some((c) => l.trimStart().startsWith(`uses: ${c.workflow}@`)));
+  let callingJob = null;
+  for (let i = usesAt - 1; usesAt > 0 && i >= 0; i--) {
+    if (!blank(lines[i]) && indentOf(lines[i]) < indentOf(lines[usesAt])) { callingJob = keyOf(lines[i]); break; }
+  }
+  const grant = (callingJob !== null ? caller.jobs[callingJob] : undefined) ?? caller.top;
+  if (grant === null) return [];
+  const called = permissionsOf(calledYaml);
+  const asks = {};
+  for (const block of [called.top ?? {}, ...Object.values(called.jobs)]) {
+    for (const [k, v] of Object.entries(block)) if ((LEVEL[v] ?? 0) > (LEVEL[asks[k]] ?? 0)) asks[k] = v;
+  }
+  return Object.entries(asks).filter(([k, v]) => (LEVEL[grant[k]] ?? 0) < LEVEL[v]).map(([k, v]) => `${k}: ${v}`);
+}
+
 if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
   const args = process.argv.slice(2);
   try {
@@ -179,6 +262,10 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
     } else if (args[0] === '--action') {
       const [, sha, note = ''] = args;
       process.stdout.write(bumpActionPins(readFileSync(0, 'utf8'), sha ?? '', note));
+    } else if (args[0] === '--grants') {
+      if (!args[1]) throw new Error('--grants takes the called workflow file');
+      const missing = missingGrants(readFileSync(0, 'utf8'), readFileSync(args[1], 'utf8'));
+      process.stdout.write(missing.map((m) => `${m}\n`).join(''));
     } else if (args[0] === '--action-pins') {
       const pins = actionPins(readFileSync(0, 'utf8'));
       process.stdout.write(pins.map((p) => `${p}\n`).join(''));

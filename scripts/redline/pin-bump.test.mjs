@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { actionPins, DRIFT_REPORT_ACTION } from './pin.mjs';
+import { actionPins, DRIFT_REPORT_ACTION, missingGrants, permissionsOf } from './pin.mjs';
 
 let pass = 0;
 let fail = 0;
@@ -28,6 +28,37 @@ const NEWSHA = 'b'.repeat(40), OLDSHA = 'a'.repeat(40);
 const b64 = (x) => Buffer.from(x).toString('base64');
 const caller = `jobs:\n  review:\n    uses: askalf/ci/.github/workflows/redline-review.yml@${NEWSHA} # main\n    with:\n      redline-ref: ${NEWSHA}\n`;
 const watcher = `jobs:\n  w:\n    steps:\n      - uses: ${DRIFT_REPORT_ACTION}@${OLDSHA} # main\n`;
+
+// The bump step reads the called workflows from its checkout, as the sparse checkout leaves them.
+function calledWorkflows(work) {
+  mkdirSync(join(work, '.github', 'workflows'), { recursive: true });
+  for (const f of ['redline-review.yml', 'redline-fix-run.yml']) {
+    writeFileSync(join(work, '.github', 'workflows', f), readFileSync(fileURLToPath(new URL(`../../.github/workflows/${f}`, import.meta.url))));
+  }
+}
+
+console.log('\n  a caller must grant what the called workflow asks for');
+{
+  const called = 'on:\n  workflow_call:\npermissions:\n  actions: read # the gate check\n  contents: read\njobs:\n  r:\n    runs-on: x\n    permissions:\n      pull-requests: write\n    steps:\n      - run: true\n';
+  const at = (perms) => `${perms}jobs:\n  review:\n    uses: askalf/ci/.github/workflows/redline-review.yml@${NEWSHA} # main\n    with:\n      redline-ref: ${NEWSHA}\n`;
+  check('the called workflow\'s asks are its top-level block and every job\'s',
+    JSON.stringify(permissionsOf(called)) === JSON.stringify({ top: { actions: 'read', contents: 'read' }, jobs: { r: { 'pull-requests': 'write' } } }), JSON.stringify(permissionsOf(called)));
+  check('a caller granting less is told each scope it lacks, at the level asked',
+    missingGrants(at('permissions:\n  contents: read\n  pull-requests: read\n'), called).join() === 'actions: read,pull-requests: write');
+  check('a caller granting all of it, or more, lacks nothing',
+    missingGrants(at('permissions:\n  actions: write\n  contents: read\n  pull-requests: write\n'), called).length === 0);
+  check('the calling job\'s own block is the grant when it has one',
+    missingGrants(`permissions: {}\njobs:\n  review:\n    permissions:\n      actions: read\n      contents: read\n      pull-requests: write\n    uses: askalf/ci/.github/workflows/redline-review.yml@${NEWSHA}\n`, called).length === 0);
+  check('read-all grants every read and no write, {} grants nothing',
+    missingGrants(at('permissions: read-all\n'), called).join() === 'pull-requests: write'
+      && missingGrants(at('permissions: {}\n'), called).length === 3);
+  check('a caller with no permissions block runs on the repository default, which a file cannot show: nothing is reported',
+    missingGrants(at(''), called).length === 0);
+  const real = (f) => readFileSync(fileURLToPath(new URL(`../../.github/workflows/${f}`, import.meta.url)), 'utf8');
+  check('this repository\'s own callers grant what its called workflows ask for',
+    missingGrants(real('redline.yml'), real('redline-review.yml')).length === 0
+      && (!existsSync(fileURLToPath(new URL('../../.github/workflows/redline-fix.yml', import.meta.url))) || missingGrants(real('redline-fix.yml'), real('redline-fix-run.yml')).length === 0));
+}
 
 console.log('\n  a watcher whose file name has a space');
 if (spawnSync('bash', ['-c', 'true']).status !== 0 || process.platform === 'win32') {
@@ -58,6 +89,7 @@ esac
   // The step runs pin.mjs from the checkout and writes caller.yml in its working directory.
   mkdirSync(join(d, 'work', 'scripts', 'redline'), { recursive: true });
   writeFileSync(join(d, 'work', 'scripts', 'redline', 'pin.mjs'), readFileSync(fileURLToPath(new URL('./pin.mjs', import.meta.url))));
+  calledWorkflows(join(d, 'work'));
   const r = spawnSync('bash', ['-c', script.join('\n')], { encoding: 'utf8', cwd: join(d, 'work'),
     env: { ...process.env, PATH: `${d}:${process.env.PATH}`, GH_TOKEN: 't', SHA: NEWSHA, SOURCE: 'askalf/ci', CALLERS: 'askalf/x',
       BRANCH: 'bot/redline-pin', CALLER_PATHS: '.github/workflows/redline.yml' } });
@@ -90,7 +122,10 @@ if (spawnSync('bash', ['-c', 'true']).status !== 0 || process.platform === 'win3
   writeFileSync(join(d, 'gh'), `#!/usr/bin/env bash
 echo "$*" >> "${d}/calls"
 # A_MODE shapes askalf/a: nopin fails it before any PR, partial opens a PR for its fix caller and
-# still fails it, since its review caller is missing.
+# still fails it, since its review caller is missing, ungranted gives it a caller that grants too
+# little for the called review, granted one that grants enough.
+if [ "$A_MODE" = ungranted ] && [[ "$*" == *"repos/askalf/a/contents/.github/workflows/redline.yml?ref="*" --jq .content" ]]; then echo "${b64('permissions:\n  contents: read\n  pull-requests: read\n' + old)}"; exit 0; fi
+if [ "$A_MODE" = granted ] && [[ "$*" == *"repos/askalf/a/contents/.github/workflows/redline.yml?ref="*" --jq .content" ]]; then echo "${b64('permissions:\n  actions: read\n  contents: read\n  pull-requests: read\n' + old)}"; exit 0; fi
 if [ "$A_MODE" = nopin ] && [[ "$*" == *"repos/askalf/a/contents/.github/workflows/redline.yml?ref=tip0000 --jq .content" ]]; then echo "${b64('name: x'+String.fromCharCode(10))}"; exit 0; fi
 if [ "$A_MODE" = partial ]; then
   case "$*" in
@@ -117,6 +152,7 @@ esac
   chmodSync(join(d, 'gh'), 0o755);
   mkdirSync(join(d, 'work', 'scripts', 'redline'), { recursive: true });
   writeFileSync(join(d, 'work', 'scripts', 'redline', 'pin.mjs'), readFileSync(fileURLToPath(new URL('./pin.mjs', import.meta.url))));
+  calledWorkflows(join(d, 'work'));
   const run = (cap, env = {}) => {
     rmSync(join(d, 'calls'), { force: true });
     const r = spawnSync('bash', ['-c', script.join('\n')], { encoding: 'utf8', cwd: join(d, 'work'),
@@ -140,6 +176,13 @@ esac
   check('a caller that opened a PR and then fails is reported and counts, since its PR loads the runners like any other',
     partial.r.status !== 0 && partial.r.stdout.includes('::error::askalf/a: no .github/workflows/redline.yml') && partial.r.stdout.includes('::error::askalf/a: the bump did not complete')
       && partial.created.join() === 'askalf/a' && partial.r.stdout.includes('== askalf/b: left for the next run'), partial.r.stdout + partial.r.stderr);
+  const ungranted = run(0, { A_MODE: 'ungranted' });
+  check('a caller that does not grant what the called review asks for is named, not bumped, and the others still are',
+    ungranted.r.status !== 0 && ungranted.r.stdout.includes('::error::askalf/a: .github/workflows/redline.yml does not grant actions: read, which redline-review.yml at bbbbbbb asks for')
+      && ungranted.created.join() === 'askalf/b,askalf/c,askalf/d' && !/-X PUT repos\/askalf\/a\//.test(ungranted.calls), ungranted.r.stdout + ungranted.r.stderr);
+  const granted = run(0, { A_MODE: 'granted' });
+  check('a caller that grants it is bumped like any other',
+    granted.r.status === 0 && granted.created.join() === 'askalf/a,askalf/b,askalf/c,askalf/d', granted.r.stdout + granted.r.stderr);
   rmSync(d, { recursive: true, force: true });
 }
 

@@ -128,3 +128,10 @@ that changes any of this runs `redline-pin-bump.yml`, which rewrites `redline.ym
 repository has one, `redline-fix.yml` in every caller (this repository's own included) through
 `pin.mjs` and opens one bump PR per repository. `node scripts/redline/pin.mjs --caller <sha> <repo>-exec` prints a new repository's
 `redline-fix.yml`.
+
+A caller is bumped only when it grants every permission the reusable workflow at the new commit
+asks for (`pin.mjs --grants <called.yml> < caller.yml` prints what it lacks). GitHub will not start
+a called workflow that asks for more than its caller grants: every run ends in `startup_failure`
+before any job runs. So a reusable workflow that needs a new permission lands first, each caller
+grants it in a PR of its own, and the next bump moves the pin; until then the bump names each
+caller that lacks it, and so does every later run while a caller already pinned there lacks it.
