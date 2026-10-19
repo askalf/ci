@@ -10,11 +10,16 @@
 //      node scripts/redline/pin.mjs --caller <sha> <runner-label> [note] > redline-fix.yml
 //      node scripts/redline/pin.mjs --action <sha> [note] < watcher.yml > watcher.yml.new
 //      node scripts/redline/pin.mjs --action-pins < watcher.yml
+//      node scripts/redline/pin.mjs --grants <called.yml> < caller.yml
 //
 // The third form moves the drift-report action pin (actions/drift-report), which a watcher
 // workflow carries as a step and not as a job, so it has no redline-ref to keep in step.
 // The fourth prints the sha of each of those pins, one per line, so a caller deciding whether a
 // file needs the third form recognises exactly the lines the third form rewrites.
+// The fifth prints each permission the called workflow asks for that the caller does not grant,
+// one `scope: level` per line. GitHub refuses to start a called workflow that asks for more than
+// its caller grants (startup_failure, before any job runs), so a pin must never move ahead of
+// the grant it needs.
 
 import { readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
@@ -170,6 +175,187 @@ export function bumpActionPins(yaml, sha, note = '') {
   }).join('\n');
 }
 
+const LEVEL = { none: 0, read: 1, write: 2 };
+const SCOPES = ['actions', 'attestations', 'checks', 'contents', 'deployments', 'discussions', 'id-token', 'issues',
+  'models', 'packages', 'pages', 'pull-requests', 'repository-projects', 'security-events', 'statuses'];
+// A YAML scalar as YAML reads it: 'it''s' is it's, and "permissions" is permissions. A
+// double-quoted scalar is decoded as JSON, whose escapes YAML's include; an escape only YAML has
+// (\x41, \e and the like) throws rather than leaving a spelling YAML would read differently.
+const unquote = (x) => {
+  if (/^'.*'$/.test(x)) return x.slice(1, -1).replace(/''/g, "'");
+  if (!/^".*"$/.test(x)) return x;
+  try { return JSON.parse(x); } catch { throw new Error(`a quoted scalar this cannot decode: ${x}`); }
+};
+// A mapping key. plainShape lets only plain keys through, so a key is its spelling.
+const keyOf = (l) => l.trim().split(':')[0].trim();
+// A line without its trailing comment: a # that starts a word, outside quotes.
+function uncommented(l) {
+  let q = '';
+  for (let i = 0; i < l.length; i++) {
+    const c = l[i];
+    if (q) { if (c === '\\' && q === '"') i++; else if (c === q) q = ''; continue; }
+    if (c === '"' || c === "'") q = c;
+    else if (c === '#' && (i === 0 || /\s/.test(l[i - 1]))) return l.slice(0, i).trimEnd();
+  }
+  return l;
+}
+const valueOf = (l) => uncommented(l).split(':').slice(1).join(':').trim();
+
+const PLAIN_KEY = /^[A-Za-z0-9_][A-Za-z0-9_.\/-]*$/;
+const QUOTED = /^(?:'(?:[^']|'')*'|"(?:[^"\\]|\\.)*")$/;
+
+/**
+ * Throws unless the workflow is in the one shape permissionsOf reads. These files are written by
+ * hand in a single plain style, and a check that half-reads YAML must never take a form it does not
+ * read for "no permissions". So every line outside a block scalar's text is a `key: value`, a bare
+ * `key:`, or a list item (`- value`, `- key: value`); keys are plain words; the root mapping sits
+ * at column 0; quoted and flow values close on their own line; and nothing is tagged, anchored,
+ * aliased, merged, or split into documents. Anything else is refused, whatever YAML would make of it.
+ * @param {string[]} lines
+ */
+function plainShape(lines) {
+  let scalarCol = -1;
+  let rooted = false;
+  lines.forEach((raw, i) => {
+    const refuse = (what) => { throw new Error(`line ${i + 1} is outside the plain workflow shape (${what}): ${raw.trim()}`); };
+    if (raw.trim() === '') return;
+    const pad = indentOf(raw);
+    if (scalarCol >= 0 && pad > scalarCol) return;
+    scalarCol = -1;
+    if (/^\s*\t/.test(raw) || /^ *\t/.test(raw)) refuse('a tab in the indent');
+    if (raw.trimStart().startsWith('#')) return;
+    if (!rooted) { if (pad !== 0) refuse('the root mapping is not at column 0'); rooted = true; }
+    const line = uncommented(raw).trim();
+    if (/^(---|\.\.\.|%|\?)/.test(line)) refuse('a document marker, directive or complex key');
+    let rest = line, col = pad;
+    if (rest === '-' || rest.startsWith('- ')) { rest = rest.slice(1).trimStart(); col = pad + (line.length - rest.length); if (rest.startsWith('- ')) refuse('a nested list item'); }
+    const listItem = col !== pad;
+    if (rest === '') return;
+    const sep = rest.search(/:(\s|$)/);
+    let value;
+    if (sep < 0) {
+      if (!listItem) refuse('a line that is not a key, a list item or block scalar text');
+      value = rest;
+    } else {
+      if (!PLAIN_KEY.test(rest.slice(0, sep))) refuse('a key that is not a plain word');
+      value = rest.slice(sep + 1).trim();
+    }
+    if (value === '') return;
+    if (/^[&*!]/.test(value)) refuse('an anchor, alias or tag');
+    if (/^[|>][-+0-9]*$/.test(value)) { scalarCol = col; return; }
+    if (/^['"]/.test(value) && !QUOTED.test(value)) refuse('a quoted value that does not close on its line');
+    if (value.startsWith('{') && !value.endsWith('}')) refuse('a flow map that does not close on its line');
+    if (value.startsWith('[') && !value.endsWith(']')) refuse('a flow list that does not close on its line');
+  });
+}
+
+/** One `scope: level` entry, quoted or not. Anything else throws, so it never counts as nothing. */
+function permissionEntry(entry, line) {
+  const at = entry.indexOf(':');
+  const scope = unquote(entry.slice(0, at).trim());
+  const level = unquote(entry.slice(at + 1).trim());
+  if (at < 0 || !/^[a-z-]+$/.test(scope) || !(level in LEVEL)) throw new Error(`unreadable permissions entry at line ${line}: ${entry}`);
+  return [scope, level];
+}
+
+/**
+ * The `permissions:` key at line `at` as {scope: level}: its inline value or the block under it.
+ * `read-all` and `write-all` give every scope that level; a flow map (`{}`, `{actions: read}`)
+ * and a block give their entries. Any other inline value, and any entry that is not a scope and a
+ * level (quoted or not), throws: a form this cannot read must not pass for an empty grant or ask.
+ */
+function readPermissions(lines, at) {
+  const inline = unquote(valueOf(lines[at]));
+  if (inline === 'read-all' || inline === 'write-all') {
+    return Object.fromEntries(SCOPES.map((k) => [k, inline === 'read-all' ? 'read' : 'write']));
+  }
+  const out = {};
+  if (inline.startsWith('{') && inline.endsWith('}')) {
+    for (const entry of inline.slice(1, -1).split(',').map((e) => e.trim()).filter(Boolean)) {
+      const [scope, level] = permissionEntry(entry, at + 1);
+      out[scope] = level;
+    }
+    return out;
+  }
+  if (inline !== '') throw new Error(`unreadable permissions at line ${at + 1}: ${inline}`);
+  const pad = indentOf(lines[at]);
+  for (let i = at + 1; i < lines.length && (blank(lines[i]) || indentOf(lines[i]) > pad); i++) {
+    if (blank(lines[i])) continue;
+    const [scope, level] = permissionEntry(lines[i].replace(/\s+#.*$/, '').trim(), i + 1);
+    out[scope] = level;
+  }
+  return out;
+}
+
+/**
+ * A workflow's permissions: `top` is its top-level block (null when it has none), `jobs` each
+ * job's own block by job name. Line based, like the rest of this file: a top-level key sits at
+ * indent 0, a job name one level under `jobs:`, and a job's keys one level under its name.
+ * Only that block shape is read. A form that could carry permissions this does not see throws
+ * instead of reading as none: `jobs:` or a job written inline (a flow map or an alias), and a
+ * `<<` merge key at any of those levels.
+ * @param {string} yaml
+ */
+export function permissionsOf(yaml) {
+  const lines = yaml.split('\n').map((l) => l.replace(/\r$/, ''));
+  plainShape(lines);
+  let top = null;
+  const jobs = {};
+  let inJobs = false, job = null, jobPad = -1, keyPad = -1;
+  const refuse = (i, what) => { throw new Error(`${what} at line ${i + 1} cannot be read for permissions: ${lines[i].trim()}`); };
+  lines.forEach((l, i) => {
+    if (blank(l)) return;
+    const pad = indentOf(l);
+    if (pad === 0) {
+      if (keyOf(l) === '<<') refuse(i, 'a merge key');
+      inJobs = keyOf(l) === 'jobs';
+      if (inJobs && valueOf(l) !== '') refuse(i, 'jobs written inline');
+      if (keyOf(l) === 'permissions') top = readPermissions(lines, i);
+      return;
+    }
+    if (!inJobs) return;
+    if (jobPad < 0) jobPad = pad;
+    if (pad === jobPad) {
+      if (keyOf(l) === '<<') refuse(i, 'a merge key');
+      if (valueOf(l) !== '') refuse(i, 'a job written inline');
+      job = keyOf(l); keyPad = -1; return;
+    }
+    if (keyPad < 0) keyPad = pad;
+    if (pad === keyPad && keyOf(l) === '<<') refuse(i, 'a merge key');
+    if (pad === keyPad && keyOf(l) === 'permissions') jobs[job] = readPermissions(lines, i);
+  });
+  return { top, jobs };
+}
+
+/**
+ * Each permission the called workflow asks for, at its top level or in any of its jobs, that the
+ * caller does not grant at that level or higher, as `scope: level`. The caller's grant is the
+ * calling job's own block when it has one, else its top-level block. A caller with neither runs on
+ * the repository's default token permissions, which a file cannot show: it answers nothing.
+ * @param {string} callerYaml
+ * @param {string} calledYaml
+ */
+export function missingGrants(callerYaml, calledYaml) {
+  const caller = permissionsOf(callerYaml);
+  const lines = callerYaml.split('\n');
+  // The calling job is found from its uses line; a caller where that line cannot be found (a flow
+  // map job, say) throws, so a job-level override it might hold is never skipped for the top level.
+  const usesAt = lines.findIndex((l) => !blank(l) && keyOf(l) === 'uses' && CALLERS.some((c) => unquote(valueOf(l)).startsWith(`${c.workflow}@`)));
+  if (usesAt < 0) throw new Error(`no ${CALLERS.map((c) => c.workflow).join(' or ')} call this can read`);
+  let callingJob = null;
+  for (let i = usesAt - 1; usesAt > 0 && i >= 0; i--) {
+    if (!blank(lines[i]) && indentOf(lines[i]) < indentOf(lines[usesAt])) { callingJob = keyOf(lines[i]); break; }
+  }
+  const grant = (callingJob !== null ? caller.jobs[callingJob] : undefined) ?? caller.top;
+  if (grant === null) return [];
+  const called = permissionsOf(calledYaml);
+  const asks = {};
+  for (const block of [called.top ?? {}, ...Object.values(called.jobs)]) {
+    for (const [k, v] of Object.entries(block)) if ((LEVEL[v] ?? 0) > (LEVEL[asks[k]] ?? 0)) asks[k] = v;
+  }
+  return Object.entries(asks).filter(([k, v]) => (LEVEL[grant[k]] ?? 0) < LEVEL[v]).map(([k, v]) => `${k}: ${v}`);
+}
+
 if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
   const args = process.argv.slice(2);
   try {
@@ -179,6 +365,10 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
     } else if (args[0] === '--action') {
       const [, sha, note = ''] = args;
       process.stdout.write(bumpActionPins(readFileSync(0, 'utf8'), sha ?? '', note));
+    } else if (args[0] === '--grants') {
+      if (!args[1]) throw new Error('--grants takes the called workflow file');
+      const missing = missingGrants(readFileSync(0, 'utf8'), readFileSync(args[1], 'utf8'));
+      process.stdout.write(missing.map((m) => `${m}\n`).join(''));
     } else if (args[0] === '--action-pins') {
       const pins = actionPins(readFileSync(0, 'utf8'));
       process.stdout.write(pins.map((p) => `${p}\n`).join(''));

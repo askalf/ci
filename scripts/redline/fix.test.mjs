@@ -1600,6 +1600,11 @@ esac
         // The step runs pin.mjs from the checkout and writes caller.yml in its working directory.
         mkdirSync(join(d, 'work', 'scripts', 'redline'), { recursive: true });
         writeFileSync(join(d, 'work', 'scripts', 'redline', 'pin.mjs'), readFileSync(fileURLToPath(new URL('./pin.mjs', import.meta.url))));
+        // And the called workflows, which the step checks each caller's grants against.
+        mkdirSync(join(d, 'work', '.github', 'workflows'), { recursive: true });
+        for (const f of ['redline-review.yml', 'redline-fix-run.yml']) {
+          writeFileSync(join(d, 'work', '.github', 'workflows', f), readFileSync(fileURLToPath(new URL(`../../.github/workflows/${f}`, import.meta.url))));
+        }
         const r = spawnSync('bash', ['-c', script.join('\n')], { encoding: 'utf8', cwd: join(d, 'work'),
           env: { ...process.env, PATH: `${d}:${process.env.PATH}`, GH_TOKEN: 't', SHA: NEWSHA, SOURCE: 'askalf/ci', CALLERS: 'askalf/x',
             BRANCH: 'bot/redline-pin', CALLER_PATHS: '.github/workflows/redline.yml' } });

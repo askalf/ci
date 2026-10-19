@@ -98,7 +98,13 @@ jobs:
         uses: askalf/checkout-with-retry@115a6407547e9711edbc2e915838d495cad9583f  # v1.1.0
         with:
           fetch-depth: 0
-          sparse-checkout: scripts/redline/pin.mjs
+          # The called workflows too: the bump checks each caller grants what they ask for. The
+          # commit picked below is the newest one touching PIN_PATHS, which lists both files, so
+          # the copies here are the ones the new pin calls.
+          sparse-checkout: |
+            scripts/redline/pin.mjs
+            .github/workflows/redline-review.yml
+            .github/workflows/redline-fix-run.yml
           sparse-checkout-cone-mode: false
           persist-credentials: false
 
@@ -166,7 +172,7 @@ jobs:
           # holds inside the subshell it runs in), never the loop: the next repository is still bumped.
           # The files to rewrite are kept in arrays, so a path is never split on its spaces.
           bump() {
-            local repo="$1" base tip path at current updated blob bad=0 unread=0 bumped=0 open name listing pins caller out
+            local repo="$1" base tip path at current updated blob bad=0 unread=0 bumped=0 open name listing pins caller out called missing
             local -a todo=() atodo=() names=()
             # Callers are bumped side by side, so each keeps its own file for the rewritten workflow.
             out="$(mktemp)"
@@ -181,6 +187,21 @@ jobs:
               fi
               if ! printf '%s\n' "$current" | grep -Eq "$pattern"; then
                 echo "::error::${repo}: ${path} has no pinned ${SOURCE} call"; bad=1; continue
+              fi
+              # GitHub refuses to start a called workflow that asks for a permission its caller
+              # does not grant: every run ends in startup_failure and no job runs. So a caller that
+              # lacks a grant the called workflow at this commit asks for is not bumped, and one
+              # already pinned here is reported, until the grant lands in a PR of its own.
+              case "$path" in
+                */redline-fix.yml) called=.github/workflows/redline-fix-run.yml ;;
+                *) called=.github/workflows/redline-review.yml ;;
+              esac
+              if ! missing="$(printf '%s\n' "$current" | node scripts/redline/pin.mjs --grants "$called")"; then
+                echo "::error::${repo}: could not compare the permissions in ${path} with ${called}"; bad=1; continue
+              fi
+              if [ -n "$missing" ]; then
+                echo "::error::${repo}: ${path} does not grant $(printf '%s' "$missing" | paste -sd, -), which $(basename "$called") at ${short} asks for, so every run there fails at startup; grant it in ${path} first"
+                bad=1; continue
               fi
               if printf '%s\n' "$current" | grep -Eq "redline-(review|fix-run).yml@${SHA}" && printf '%s\n' "$current" | grep -q "redline-ref: ${SHA}"; then
                 echo "${path} already at ${short}"; continue
