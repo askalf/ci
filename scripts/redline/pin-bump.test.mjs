@@ -173,6 +173,8 @@ if (spawnSync('bash', ['-c', 'true']).status !== 0 || process.platform === 'win3
 } else {
   // askalf/w has no redline.yml and one watcher at the old commit: bumped for the watcher alone.
   // askalf/n has no redline.yml and no pin anywhere: reported, not bumped.
+  // askalf/f lists a redline.yml that cannot be read (the fake gh fails the read) beside a readable
+  // watcher at the old commit: that is a failed read, not an absent caller, so nothing is bumped there.
   const d = mkdtempSync(join(tmpdir(), 'pin-bump-watcher-only-'));
   writeFileSync(join(d, 'gh'), `#!/usr/bin/env bash
 echo "$*" >> "${d}/calls"
@@ -182,6 +184,8 @@ case "$*" in
   *"git/ref/heads/main --jq .object.sha") echo tip0000 ;;
   "api repos/askalf/w/contents/.github/workflows?ref=tip0000 --jq"*) printf '%s\\n' drift.yml ;;
   "api repos/askalf/n/contents/.github/workflows?ref=tip0000 --jq"*) printf '%s\\n' build.yml ;;
+  "api repos/askalf/f/contents/.github/workflows?ref=tip0000 --jq"*) printf '%s\\n' redline.yml drift.yml ;;
+  *"repos/askalf/f/contents/.github/workflows/drift.yml?ref=tip0000 --jq .content") echo "${b64(watcher)}" ;;
   *"repos/askalf/n/contents/.github/workflows/build.yml?ref=tip0000 --jq .content") echo "${b64('jobs:\n  b:\n    steps:\n      - run: true\n')}" ;;
   *"repos/askalf/w/contents/.github/workflows/drift.yml?ref=tip0000 --jq .content") echo "${b64(watcher)}" ;;
   *"repos/askalf/w/contents/.github/workflows/drift.yml?ref=bot/redline-pin --jq .content") echo "${b64(watcher)}" ;;
@@ -198,7 +202,7 @@ esac
   writeFileSync(join(d, 'work', 'scripts', 'redline', 'pin.mjs'), readFileSync(fileURLToPath(new URL('./pin.mjs', import.meta.url))));
   calledWorkflows(join(d, 'work'));
   const r = spawnSync('bash', ['-c', script.join('\n')], { encoding: 'utf8', cwd: join(d, 'work'),
-    env: { ...process.env, PATH: `${d}:${process.env.PATH}`, GH_TOKEN: 't', SHA: NEWSHA, SOURCE: 'askalf/ci', CALLERS: 'askalf/w askalf/n',
+    env: { ...process.env, PATH: `${d}:${process.env.PATH}`, GH_TOKEN: 't', SHA: NEWSHA, SOURCE: 'askalf/ci', CALLERS: 'askalf/w askalf/n askalf/f',
       BRANCH: 'bot/redline-pin', CALLER_PATHS: '.github/workflows/redline.yml .github/workflows/redline-fix.yml' } });
   const calls = existsSync(join(d, 'calls')) ? readFileSync(join(d, 'calls'), 'utf8') : '';
   rmSync(d, { recursive: true, force: true });
@@ -211,6 +215,9 @@ esac
     put.startsWith('api -X PUT repos/askalf/w/contents/.github/workflows/drift.yml ') && actionPins(written).join() === NEWSHA, put);
   check('a repository with no redline.yml and no drift-report pin is reported, opens nothing, and fails the run',
     r.status !== 0 && out.includes('::error::askalf/n: no .github/workflows/redline.yml and no drift-report pin') && !calls.includes('pr create --repo askalf/n'), out + calls);
+  check('a redline.yml that is listed but could not be read is a failed read, not an absent caller: nothing is bumped there',
+    out.includes('::error::askalf/f: could not read .github/workflows/redline.yml at tip0000') && out.includes('::error::askalf/f: not every workflow could be read')
+      && !out.includes('askalf/f: no .github/workflows/redline.yml') && !calls.includes('pr create --repo askalf/f') && !calls.includes('repos/askalf/f/git/refs'), out + calls);
 }
 
 console.log('\n  a capped run opens at most CAP bump PRs, in caller order');
@@ -231,6 +238,7 @@ if [ "$A_MODE" = nopin ] && [[ "$*" == *"repos/askalf/a/contents/.github/workflo
 if [ "$A_MODE" = partial ]; then
   case "$*" in
     *"repos/askalf/a/contents/.github/workflows/redline.yml?ref="*) exit 1 ;;
+    *"repos/askalf/a/contents/.github/workflows?ref=tip0000 --jq"*) printf '%s\n' redline-fix.yml; exit 0 ;;
     *"repos/askalf/a/contents/.github/workflows/redline-fix.yml?ref="*" --jq .content") echo "${b64(old)}"; exit 0 ;;
     *"repos/askalf/a/contents/.github/workflows/redline-fix.yml?ref=bot/redline-pin --jq .sha") echo blob1; exit 0 ;;
   esac

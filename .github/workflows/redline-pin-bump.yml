@@ -176,18 +176,20 @@ jobs:
           # The files to rewrite are kept in arrays, so a path is never split on its spaces.
           bump() {
             local repo="$1" base tip path at current updated blob bad=0 unread=0 bumped=0 noreview=0 pinned=0 open name listing pins caller out called missing
-            local -a todo=() atodo=() names=()
+            local -a todo=() atodo=() names=() absent=()
             # Callers are bumped side by side, so each keeps its own file for the rewritten workflow.
             out="$(mktemp)"
             base="$(gh api "repos/${repo}" --jq .default_branch)"
             tip="$(gh api "repos/${repo}/git/ref/heads/${base}" --jq .object.sha)"
             # Which caller files need the new pin. The fix caller may be missing; the review caller too,
-            # for a repository that pins only the drift-report action (checked once the watchers are read).
+            # for a repository that pins only the drift-report action. A failed read says nothing by
+            # itself (a 404 and a 500 look the same here): whether the file exists is settled against
+            # the directory listing below, so a caller that is there but could not be read stops this
+            # repository's bump instead of passing as absent.
             for path in $CALLER_PATHS; do
               at="$(uri "$path")"
               if ! current="$(gh api "repos/${repo}/contents/${at}?ref=${tip}" --jq .content 2>/dev/null | base64 -d)"; then
-                if [ "$path" = ".github/workflows/redline.yml" ]; then noreview=1; fi
-                echo "no ${path}"
+                absent+=("$path")
                 continue
               fi
               if ! printf '%s\n' "$current" | grep -Eq "$pattern"; then
@@ -224,6 +226,13 @@ jobs:
               echo "::error::${repo}: could not list .github/workflows at ${tip:0:7}"; unread=1; listing=""
             fi
             if [ -n "$listing" ]; then mapfile -t names <<< "$listing"; fi
+            for path in "${absent[@]}"; do
+              if printf '%s\n' "${names[@]}" | grep -qx "$(basename "$path")"; then
+                echo "::error::${repo}: could not read ${path} at ${tip:0:7}"; unread=1; continue
+              fi
+              if [ "$path" = ".github/workflows/redline.yml" ]; then noreview=1; fi
+              echo "no ${path}"
+            done
             for name in "${names[@]}"; do
               path=".github/workflows/${name}"
               for caller in $CALLER_PATHS; do
