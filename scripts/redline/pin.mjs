@@ -226,6 +226,9 @@ function readPermissions(lines, at) {
  * A workflow's permissions: `top` is its top-level block (null when it has none), `jobs` each
  * job's own block by job name. Line based, like the rest of this file: a top-level key sits at
  * indent 0, a job name one level under `jobs:`, and a job's keys one level under its name.
+ * Only that block shape is read. A form that could carry permissions this does not see throws
+ * instead of reading as none: `jobs:` or a job written inline (a flow map or an alias), and a
+ * `<<` merge key at any of those levels.
  * @param {string} yaml
  */
 export function permissionsOf(yaml) {
@@ -233,18 +236,26 @@ export function permissionsOf(yaml) {
   let top = null;
   const jobs = {};
   let inJobs = false, job = null, jobPad = -1, keyPad = -1;
+  const refuse = (i, what) => { throw new Error(`${what} at line ${i + 1} cannot be read for permissions: ${lines[i].trim()}`); };
   lines.forEach((l, i) => {
     if (blank(l)) return;
     const pad = indentOf(l);
     if (pad === 0) {
+      if (keyOf(l) === '<<') refuse(i, 'a merge key');
       inJobs = keyOf(l) === 'jobs';
+      if (inJobs && valueOf(l) !== '') refuse(i, 'jobs written inline');
       if (keyOf(l) === 'permissions') top = readPermissions(lines, i);
       return;
     }
     if (!inJobs) return;
     if (jobPad < 0) jobPad = pad;
-    if (pad === jobPad) { job = keyOf(l); keyPad = -1; return; }
+    if (pad === jobPad) {
+      if (keyOf(l) === '<<') refuse(i, 'a merge key');
+      if (valueOf(l) !== '') refuse(i, 'a job written inline');
+      job = keyOf(l); keyPad = -1; return;
+    }
     if (keyPad < 0) keyPad = pad;
+    if (pad === keyPad && keyOf(l) === '<<') refuse(i, 'a merge key');
     if (pad === keyPad && keyOf(l) === 'permissions') jobs[job] = readPermissions(lines, i);
   });
   return { top, jobs };

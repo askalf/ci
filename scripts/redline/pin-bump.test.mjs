@@ -73,6 +73,15 @@ console.log('\n  a caller must grant what the called workflow asks for');
     missingGrants(`${fullTop}jobs:\n  review:\n    permissions: {}\n    "uses": "askalf/ci/.github/workflows/redline-review.yml@${NEWSHA}"\n`, called).length === 3);
   check('a caller whose calling job cannot be found throws instead of falling back to the top level',
     (() => { try { missingGrants(`${fullTop}jobs:\n  review: {permissions: {}, uses: askalf/ci/.github/workflows/redline-review.yml@${NEWSHA}}\n`, called); return false; } catch { return true; } })());
+  const throws = (f) => { try { f(); return false; } catch { return true; } };
+  check('a called workflow whose job is written inline throws instead of asking for nothing',
+    throws(() => missingGrants(at('permissions: {}\n'), 'on:\n  workflow_call:\njobs:\n  r: {runs-on: ubuntu-latest, permissions: {actions: read}, steps: [{run: echo ok}]}\n'))
+      && throws(() => missingGrants(at('permissions: {}\n'), 'on:\n  workflow_call:\njobs: {r: {permissions: {actions: read}}}\n'))
+      && throws(() => missingGrants(at('permissions: {}\n'), 'on:\n  workflow_call:\njobs:\n  r: *shared\n')));
+  check('a merge key at the top, job or job-key level throws instead of hiding a block',
+    throws(() => missingGrants(at('permissions: {}\n'), '<<: *base\njobs:\n  r:\n    runs-on: x\n'))
+      && throws(() => missingGrants(at('permissions: {}\n'), 'jobs:\n  <<: *jobs\n  r:\n    runs-on: x\n'))
+      && throws(() => missingGrants(at('permissions: {}\n'), 'jobs:\n  r:\n    <<: *job\n    runs-on: x\n')));
   check('a block entry it cannot read throws instead of counting as nothing',
     (() => { try { missingGrants(at('permissions:\n  actions: maybe\n'), called); return false; } catch { return true; } })()
       && (() => { try { missingGrants(at('permissions: {}\n'), 'permissions:\n  actions: ${{ x }}\njobs:\n  r:\n    runs-on: x\n'); return false; } catch { return true; } })());
