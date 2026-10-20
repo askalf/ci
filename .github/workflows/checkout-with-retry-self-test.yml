@@ -12,11 +12,13 @@
 # the copy are written by the job into the checkout, so a local `uses:` path finds them.
 #
 # `act` proves the act path. The job fetches the act release box-ci runs, checked against its
-# published sum, writes a two-job workflow that checks out through the action from this checkout,
-# one job plain and one with a `path`, and runs it under act in host mode from the checkout's root,
-# as box-ci does: no container, no token, act's default actor nektos/act. From act's log it asserts
+# published sum, writes a two-job workflow that checks out through the action as a caller does
+# (`uses: askalf/ci/actions/checkout-with-retry@<ref>`, with act's --local-repository pointing that
+# repository and ref at this checkout; act in host mode cannot read a `./` action), one job plain
+# and one with a `path` and a `ref`, and runs it under act in host mode from the checkout's root, as
+# box-ci does: no container, no token, act's default actor nektos/act. From act's log it asserts
 # that no attempt ran, that no token was asked for, that the step after the action found the
-# workspace to be the commit, and that the `path` job was warned.
+# workspace to be the commit, and that the `path` and `ref` job was warned.
 #
 # Not path-filtered: a check from a path-filtered workflow never reports on a PR outside its paths.
 name: checkout-with-retry self-test
@@ -152,27 +154,32 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/act-wf"
-          # The step after the action proves the workspace is the commit: the action's own file is
-          # there, from the checkout act runs in, with no checkout having run.
+          # The action is named as a caller names it; --local-repository below makes act read
+          # askalf/ci at `under-test` from this checkout (act 0.2.89 in host mode cannot read a `./`
+          # action: its copy for the host executor leaves the directory out). The step after the
+          # action proves the workspace is the commit: the action's own file is there, from the
+          # checkout act runs in, with no checkout having run.
           cat > "$RUNNER_TEMP/act-wf/under-act.yml" <<'WF'
           on: push
           jobs:
             plain:
               runs-on: ubuntu-latest
               steps:
-                - uses: ./actions/checkout-with-retry
+                - uses: askalf/ci/actions/checkout-with-retry@under-test
                 - name: Prove the workspace is the commit
                   run: test -f actions/checkout-with-retry/action.yml && echo "workspace is the commit"
             pathed:
               runs-on: ubuntu-latest
               steps:
-                - uses: ./actions/checkout-with-retry
+                - uses: askalf/ci/actions/checkout-with-retry@under-test
                   with:
                     path: elsewhere
+                    ref: release
           WF
           # Host mode, as box-ci runs it: the job runs on this machine, no container. No secret is
           # passed, so the action's token input is empty, as it is in the box-ci lane.
           "$RUNNER_TEMP/act/act" push -W "$RUNNER_TEMP/act-wf/under-act.yml" -P ubuntu-latest=-self-hosted \
+            --local-repository "askalf/ci@under-test=$GITHUB_WORKSPACE" \
             --action-cache-path "$RUNNER_TEMP/act-cache" 2>&1 | tee "$RUNNER_TEMP/act.log"
           test "${PIPESTATUS[0]}" = 0
       - name: Assert the act path from the log
@@ -185,5 +192,5 @@ jobs:
           ! grep -q 'Checkout succeeded on attempt' "$log"
           ! grep -q 'Input required and not supplied: token' "$log"
           grep -q '| workspace is the commit' "$log"
-          grep -q 'checkout-with-retry under act: path and repository inputs are not honoured' "$log"
-          echo "under act: no attempt ran, no token asked for, workspace was the commit, path warned"
+          grep -q 'checkout-with-retry under act: path, repository and ref inputs are not honoured' "$log"
+          echo "under act: no attempt ran, no token asked for, workspace was the commit, path and ref warned"
