@@ -106,10 +106,11 @@ jobs:
                   echo "stub: call $n succeeds"
           STUB
           # The copy is the action with only its inner checkout swapped for the stub; the pin's
-          # version comment goes with it. Exactly three swaps, or the copy is not the action.
+          # version comment goes with it. Exactly four swaps (the act-only step is one, skipped
+          # here, as the actor is never nektos/act), or the copy is not the action.
           sed -E 's#uses: actions/checkout@[0-9a-f]{40} *(\# v[0-9.]+)?$#uses: ./.harness/stub#' \
             actions/checkout-with-retry/action.yml > .harness/retry/action.yml
-          test "$(grep -c 'uses: ./.harness/stub' .harness/retry/action.yml)" = 3
+          test "$(grep -c 'uses: ./.harness/stub' .harness/retry/action.yml)" = 4
           ! grep -q 'actions/checkout@' .harness/retry/action.yml
           # Everything but those three lines is the action, byte for byte.
           diff <(grep -v 'uses: actions/checkout@' actions/checkout-with-retry/action.yml) \
@@ -155,10 +156,10 @@ jobs:
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/act-wf"
           # The action is named as a caller names it; --local-repository below makes act read
-          # askalf/ci at `under-test` from this checkout (act 0.2.89 in host mode cannot read a `./`
-          # action: its copy for the host executor leaves the directory out). The step after the
-          # action proves the workspace is the commit: the action's own file is there, from the
-          # checkout act runs in, with no checkout having run.
+          # askalf/ci at `under-test` from this checkout. (A `./` action cannot be used: act reads it
+          # from the job's workspace, which under act is empty until a checkout step fills it.) The
+          # step after the action proves act stood in: the workspace holds this checkout's files,
+          # copied by act, with no checkout having run.
           cat > "$RUNNER_TEMP/act-wf/under-act.yml" <<'WF'
           on: push
           jobs:
@@ -166,14 +167,19 @@ jobs:
               runs-on: ubuntu-latest
               steps:
                 - uses: askalf/ci/actions/checkout-with-retry@under-test
-                - name: Prove the workspace is the commit
-                  run: test -f actions/checkout-with-retry/action.yml && echo "workspace is the commit"
+                - name: Prove the workspace is the working directory
+                  run: test -f actions/checkout-with-retry/action.yml && test -f scripts/redline/pin.mjs && echo "workspace is the working directory"
             pathed:
               runs-on: ubuntu-latest
               steps:
                 - uses: askalf/ci/actions/checkout-with-retry@under-test
                   with:
                     path: elsewhere
+            reffed:
+              runs-on: ubuntu-latest
+              steps:
+                - uses: askalf/ci/actions/checkout-with-retry@under-test
+                  with:
                     ref: release
           WF
           # Host mode, as box-ci runs it: the job runs on this machine, no container. No secret is
@@ -186,11 +192,19 @@ jobs:
         run: |
           set -euo pipefail
           log="$RUNNER_TEMP/act.log"
-          # Step output in act's log is `| <line>`; a step's name is not, so a script's text in a
-          # name cannot satisfy an assertion.
-          grep -q '| Checkout not run: under act the workspace already is the commit\.' "$log"
-          ! grep -q 'Checkout succeeded on attempt' "$log"
-          ! grep -q 'Input required and not supplied: token' "$log"
-          grep -q '| workspace is the commit' "$log"
-          grep -q 'checkout-with-retry under act: path, repository and ref inputs are not honoured' "$log"
-          echo "under act: no attempt ran, no token asked for, workspace was the commit, path and ref warned"
+          # Step output in act's log is `[workflow/job] | <line>`; a step's name is not, so a script's
+          # text in a name cannot satisfy an assertion, and the job prefix tells the three jobs apart.
+          # A forbidden line is an explicit exit: `! grep` is exempt from set -e and would not fail.
+          want() { grep -q -- "$2" "$log" || { echo "missing in act's log: $2 ($1)"; exit 1; }; }
+          forbid() { if grep -q -- "$2" "$log"; then echo "in act's log, forbidden: $2 ($1)"; exit 1; fi; }
+          want 'plain job: act stood in'    '/plain \] *| Checkout stood in by act: the workspace is a copy of the working directory'
+          want 'plain job: workspace is the working directory' '/plain \] *| workspace is the working directory'
+          forbid 'plain job: no warning for the defaults' '/plain \].*checkout-with-retry under act: path, repository and ref inputs are not honoured'
+          want 'pathed job: act stood in'   '/pathed\] *| Checkout stood in by act: the workspace is a copy of the working directory'
+          want 'pathed job: warned'         '/pathed\].*checkout-with-retry under act: path, repository and ref inputs are not honoured'
+          want 'reffed job: act stood in'   '/reffed\] *| Checkout stood in by act: the workspace is a copy of the working directory'
+          want 'reffed job: warned'         '/reffed\].*checkout-with-retry under act: path, repository and ref inputs are not honoured'
+          forbid 'no attempt succeeded'     'Checkout succeeded on attempt'
+          forbid 'no attempt ran'           'Run Main Checkout (attempt'
+          forbid 'no token asked for'       'Input required and not supplied: token'
+          echo "under act: act stood in, no attempt ran, no token asked for, the workspace was the working directory, path and ref each warned, the defaults not"
