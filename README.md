@@ -97,7 +97,8 @@ before a caller uses it. The log says which attempt succeeded and a rescued run 
 `::warning::` annotation; under act (the box-ci lane), where the workspace already is the commit and
 act stands in for a plain `actions/checkout`, no attempt runs; the third failure fails the job as a plain checkout would. The inner
 `actions/checkout` pin moves through dependabot (`.github/dependabot.yml`), and
-`checkout-with-retry-self-test.yml` runs the action from the checkout on every pull request. It
+`checkout-with-retry-self-test.yml` runs the action from the checkout on every pull request: a
+healthy checkout, the retry paths through a stub, and the act path under act itself. It
 replaces the standalone `askalf/checkout-with-retry`, now archived; `pin.mjs --action <sha>` moves
 the pin.
 

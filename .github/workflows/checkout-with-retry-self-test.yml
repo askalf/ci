@@ -1,4 +1,4 @@
-# Proves the checkout-with-retry action on a runner, on every pull request. Two jobs:
+# Proves the checkout-with-retry action on a runner, on every pull request. Three jobs:
 #
 # `checkout` runs the action from this checkout as a caller would, a whole checkout and a
 # single-file sparse one, each asserted on disk: the inputs are forwarded and a healthy checkout
@@ -10,6 +10,13 @@
 # copy changes, the waits included. The job then asserts how many attempts ran and how the action
 # ended: N below 3 is N+1 attempts and success, N of 3 is three attempts and failure. The stub and
 # the copy are written by the job into the checkout, so a local `uses:` path finds them.
+#
+# `act` proves the act path. The job fetches the act release box-ci runs, checked against its
+# published sum, writes a two-job workflow that checks out through the action from this checkout,
+# one job plain and one with a `path`, and runs it under act in host mode from the checkout's root,
+# as box-ci does: no container, no token, act's default actor nektos/act. From act's log it asserts
+# that no attempt ran, that no token was asked for, that the step after the action found the
+# workspace to be the commit, and that the `path` job was warned.
 #
 # Not path-filtered: a check from a path-filtered workflow never reports on a PR outside its paths.
 name: checkout-with-retry self-test
@@ -123,3 +130,60 @@ jobs:
           echo "failures=$FAILURES attempts=$attempts outcome=$OUTCOME (want $want_attempts, $want_outcome)"
           test "$attempts" = "$want_attempts"
           test "$OUTCOME" = "$want_outcome"
+
+  act:
+    name: under act, no attempt runs
+    runs-on: ${{ (github.repository != 'askalf/ci' || github.event.pull_request && (github.event.pull_request.head.repo.full_name != github.repository || github.event.pull_request.user.login == 'dependabot[bot]')) && 'ubuntu-latest' || fromJSON('["self-hosted","ci-exec"]') }}
+    timeout-minutes: 5
+    steps:
+      - uses: askalf/ci/actions/checkout-with-retry@bb480f4d68116c382130f8bbe255ce8eb07ff8ef # main 2026-10-20, askalf/ci#72
+        with:
+          persist-credentials: false
+      - name: Fetch act, the release box-ci runs
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/act"
+          cd "$RUNNER_TEMP/act"
+          curl -fsSL -o act.tgz https://github.com/nektos/act/releases/download/v0.2.89/act_Linux_x86_64.tar.gz
+          echo '0191d6f1f3b716b5c55820032605d05fc3c1cdbf581ebeff655019e5dd1524c0  act.tgz' | sha256sum -c -
+          tar -xzf act.tgz act
+          ./act --version
+      - name: Run a workflow that checks out through the action, under act
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/act-wf"
+          # The step after the action proves the workspace is the commit: the action's own file is
+          # there, from the checkout act runs in, with no checkout having run.
+          cat > "$RUNNER_TEMP/act-wf/under-act.yml" <<'WF'
+          on: push
+          jobs:
+            plain:
+              runs-on: ubuntu-latest
+              steps:
+                - uses: ./actions/checkout-with-retry
+                - name: Prove the workspace is the commit
+                  run: test -f actions/checkout-with-retry/action.yml && echo "workspace is the commit"
+            pathed:
+              runs-on: ubuntu-latest
+              steps:
+                - uses: ./actions/checkout-with-retry
+                  with:
+                    path: elsewhere
+          WF
+          # Host mode, as box-ci runs it: the job runs on this machine, no container. No secret is
+          # passed, so the action's token input is empty, as it is in the box-ci lane.
+          "$RUNNER_TEMP/act/act" push -W "$RUNNER_TEMP/act-wf/under-act.yml" -P ubuntu-latest=-self-hosted \
+            --action-cache-path "$RUNNER_TEMP/act-cache" 2>&1 | tee "$RUNNER_TEMP/act.log"
+          test "${PIPESTATUS[0]}" = 0
+      - name: Assert the act path from the log
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/act.log"
+          # Step output in act's log is `| <line>`; a step's name is not, so a script's text in a
+          # name cannot satisfy an assertion.
+          grep -q '| Checkout not run: under act the workspace already is the commit\.' "$log"
+          ! grep -q 'Checkout succeeded on attempt' "$log"
+          ! grep -q 'Input required and not supplied: token' "$log"
+          grep -q '| workspace is the commit' "$log"
+          grep -q 'checkout-with-retry under act: path and repository inputs are not honoured' "$log"
+          echo "under act: no attempt ran, no token asked for, workspace was the commit, path warned"
