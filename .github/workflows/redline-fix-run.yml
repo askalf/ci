@@ -148,7 +148,7 @@ jobs:
 
       # The PR's own test script needs a toolchain; node 22 comes from the exec tier's own tool
       # cache, never from the host.
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
 
@@ -172,7 +172,7 @@ jobs:
       # fix.json goes up whatever the outcome; forge reads it to know why there is no bundle.
       - name: Upload the fix
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: redline-fix
           path: fix-out
