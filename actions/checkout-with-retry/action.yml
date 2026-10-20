@@ -1,0 +1,127 @@
+# actions/checkout, tried up to three times. An ephemeral runner can start a job before its
+# credential is in place: the first `git fetch` then fails with "could not read Username for
+# 'https://github.com': terminal prompts disabled" (exit 128), and actions/checkout's own retries,
+# three inside the one step, re-use the credential it was handed. Only a new step is handed the
+# token again, so this action runs the checkout as separate steps, 8 s and then 20 s apart, and
+# fails the job only when the third one fails: by then the failure is real (auth down, token expired,
+# no permission), not the race.
+#
+# Pinned like the Redline workflows and the drift-report action: a caller names one full commit sha
+# of this repository's main,
+#   uses: askalf/ci/actions/checkout-with-retry@<sha>
+# and a change here reaches a repository only through a reviewed bump of that line (pin.mjs --action).
+#
+# A drop-in for actions/checkout: every input a workflow of ours passes is forwarded, with
+# actions/checkout's own defaults. An input not listed is not forwarded; add it here before a caller
+# uses it, since a composite action takes no input it does not declare. The inner actions/checkout
+# is pinned by sha in three places that must stay equal; dependabot moves them together.
+#
+# The run log says which attempt succeeded, and a rescued run carries a `::warning::` annotation,
+# so a widening race shows up as warnings before it shows up as failures.
+name: Checkout with retry
+description: actions/checkout in up to three steps, 8 s and 20 s apart, so a runner credential race does not fail the job
+
+inputs:
+  ref:
+    description: Ref to check out (branch, tag or sha)
+    required: false
+  repository:
+    description: Repository to check out
+    required: false
+    default: ${{ github.repository }}
+  token:
+    description: Token the fetch authenticates with
+    required: false
+    default: ${{ github.token }}
+  fetch-depth:
+    description: Commits to fetch; 0 fetches all history
+    required: false
+    default: '1'
+  path:
+    description: Directory under the workspace to check out into
+    required: false
+  sparse-checkout:
+    description: Sparse-checkout patterns, one per line
+    required: false
+  sparse-checkout-cone-mode:
+    description: >
+      Cone mode for sparse-checkout, actions/checkout's default. In cone mode every pattern must be a
+      directory; a single file ('scripts/x.sh') needs 'false'.
+    required: false
+    default: 'true'
+  persist-credentials:
+    description: Whether the token stays in the checkout's git config for later steps
+    required: false
+    default: 'true'
+
+runs:
+  using: composite
+  steps:
+    - name: Checkout (attempt 1)
+      id: c1
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      continue-on-error: true
+      with:
+        ref: ${{ inputs.ref }}
+        repository: ${{ inputs.repository }}
+        token: ${{ inputs.token }}
+        fetch-depth: ${{ inputs.fetch-depth }}
+        path: ${{ inputs.path }}
+        sparse-checkout: ${{ inputs.sparse-checkout }}
+        sparse-checkout-cone-mode: ${{ inputs.sparse-checkout-cone-mode }}
+        persist-credentials: ${{ inputs.persist-credentials }}
+
+    # The race window seen on our runners is a few seconds wide; 8 s clears it.
+    - name: Backoff before attempt 2
+      if: steps.c1.outcome == 'failure'
+      shell: bash
+      run: |
+        echo "::warning::actions/checkout attempt 1 failed (transient credential class). Backing off 8s before retry."
+        sleep 8
+
+    - name: Checkout (attempt 2)
+      id: c2
+      if: steps.c1.outcome == 'failure'
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      continue-on-error: true
+      with:
+        ref: ${{ inputs.ref }}
+        repository: ${{ inputs.repository }}
+        token: ${{ inputs.token }}
+        fetch-depth: ${{ inputs.fetch-depth }}
+        path: ${{ inputs.path }}
+        sparse-checkout: ${{ inputs.sparse-checkout }}
+        sparse-checkout-cone-mode: ${{ inputs.sparse-checkout-cone-mode }}
+        persist-credentials: ${{ inputs.persist-credentials }}
+
+    - name: Backoff before attempt 3 (final)
+      if: steps.c1.outcome == 'failure' && steps.c2.outcome == 'failure'
+      shell: bash
+      run: |
+        echo "::warning::actions/checkout attempt 2 also failed. Final retry after 20s; if this fails, the failure is real."
+        sleep 20
+
+    # No continue-on-error: the third failure fails the job as a plain checkout would.
+    - name: Checkout (attempt 3, final)
+      if: steps.c1.outcome == 'failure' && steps.c2.outcome == 'failure'
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        ref: ${{ inputs.ref }}
+        repository: ${{ inputs.repository }}
+        token: ${{ inputs.token }}
+        fetch-depth: ${{ inputs.fetch-depth }}
+        path: ${{ inputs.path }}
+        sparse-checkout: ${{ inputs.sparse-checkout }}
+        sparse-checkout-cone-mode: ${{ inputs.sparse-checkout-cone-mode }}
+        persist-credentials: ${{ inputs.persist-credentials }}
+
+    - name: Record which attempt succeeded
+      shell: bash
+      run: |
+        if [ "${{ steps.c1.outcome }}" = "success" ]; then
+          echo "Checkout succeeded on attempt 1."
+        elif [ "${{ steps.c2.outcome }}" = "success" ]; then
+          echo "Checkout succeeded on attempt 2 (transient on first try)."
+        else
+          echo "Checkout succeeded on attempt 3 (transient on first + second tries)."
+        fi

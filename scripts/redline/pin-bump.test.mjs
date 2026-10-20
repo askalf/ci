@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { actionPins, DRIFT_REPORT_ACTION, missingGrants, permissionsOf } from './pin.mjs';
+import { actionPins, bumpActionPins, CHECKOUT_RETRY_ACTION, countActionPins, DRIFT_REPORT_ACTION, missingGrants, permissionsOf } from './pin.mjs';
 
 let pass = 0;
 let fail = 0;
@@ -35,6 +35,20 @@ function calledWorkflows(work) {
   for (const f of ['redline-review.yml', 'redline-fix-run.yml']) {
     writeFileSync(join(work, '.github', 'workflows', f), readFileSync(fileURLToPath(new URL(`../../.github/workflows/${f}`, import.meta.url))));
   }
+}
+
+console.log('\n  --action moves every askalf/ci action pin, each on its own path');
+{
+  const both = `jobs:\n  w:\n    steps:\n      - uses: ${CHECKOUT_RETRY_ACTION}@${OLDSHA} # main 2026-10-01\n        with:\n          persist-credentials: false\n      - uses: actions/setup-node@${OLDSHA} # v7\n      - name: report\n        uses: ${DRIFT_REPORT_ACTION}@${OLDSHA}\n`;
+  const moved = bumpActionPins(both, NEWSHA, 'main 2026-10-20');
+  check('a checkout-with-retry pin and a drift-report pin are both pins, in file order; another action at a sha is not',
+    actionPins(both).join() === `${OLDSHA},${OLDSHA}` && countActionPins(both) === 2);
+  check('each pin moves to the commit on its own path, with the note',
+    moved.includes(`      - uses: ${CHECKOUT_RETRY_ACTION}@${NEWSHA} # main 2026-10-20\n`) && moved.includes(`        uses: ${DRIFT_REPORT_ACTION}@${NEWSHA} # main 2026-10-20\n`), moved);
+  check('the other action and every other line are unchanged',
+    moved.includes(`actions/setup-node@${OLDSHA} # v7\n`) && moved.replace(new RegExp(NEWSHA, 'g'), OLDSHA).replace(/ # main 2026-10-20/g, '') === both.replace(/ # main 2026-10-01/g, ''), moved);
+  check('a workflow with a plain actions/checkout and no askalf/ci action is not a caller and comes back unchanged',
+    countActionPins(`steps:\n  - uses: actions/checkout@${OLDSHA}\n`) === 0 && bumpActionPins(`steps:\n  - uses: actions/checkout@${OLDSHA}\n`, NEWSHA) === `steps:\n  - uses: actions/checkout@${OLDSHA}\n`);
 }
 
 console.log('\n  a caller must grant what the called workflow asks for');
@@ -159,7 +173,7 @@ esac
   check('no read asks for a piece of the split name',
     !/contents\/\.github\/workflows\/(npm|drift\.yml)\?/.test(calls) && !calls.includes('workflows/npm drift'), calls);
   check('the watcher is written at its whole path, with the commit named after the whole file',
-    put.startsWith('api -X PUT repos/askalf/x/contents/.github/workflows/npm%20drift.yml ') && put.includes('message=ci: bump drift-report to askalf/ci@bbbbbbb in npm drift.yml'), put);
+    put.startsWith('api -X PUT repos/askalf/x/contents/.github/workflows/npm%20drift.yml ') && put.includes('message=ci: bump action pins to askalf/ci@bbbbbbb in npm drift.yml'), put);
   check('what is written moves the watcher\'s pin to the commit', actionPins(written).join() === NEWSHA, written);
   // Read once as the caller; the listing's redline.yml is the caller path, so it is not read again as a watcher.
   const callerReads = calls.split('\n').filter((l) => l.includes('contents/.github/workflows/redline.yml?ref=tip0000')).length;
@@ -213,8 +227,8 @@ esac
     calls.includes('pr create --repo askalf/w') && out.includes('no .github/workflows/redline.yml') && !out.includes('::error::askalf/w'), out + calls);
   check('what is written moves the watcher\'s pin to the commit',
     put.startsWith('api -X PUT repos/askalf/w/contents/.github/workflows/drift.yml ') && actionPins(written).join() === NEWSHA, put);
-  check('a repository with no redline.yml and no drift-report pin is reported, opens nothing, and fails the run',
-    r.status !== 0 && out.includes('::error::askalf/n: no .github/workflows/redline.yml and no drift-report pin') && !calls.includes('pr create --repo askalf/n'), out + calls);
+  check('a repository with no redline.yml and no action pin is reported, opens nothing, and fails the run',
+    r.status !== 0 && out.includes('::error::askalf/n: no .github/workflows/redline.yml and no action pin') && !calls.includes('pr create --repo askalf/n'), out + calls);
   check('a redline.yml that is listed but could not be read is a failed read, not an absent caller: nothing is bumped there',
     out.includes('::error::askalf/f: could not read .github/workflows/redline.yml at tip0000') && out.includes('::error::askalf/f: not every workflow could be read')
       && !out.includes('askalf/f: no .github/workflows/redline.yml') && !calls.includes('pr create --repo askalf/f') && !calls.includes('repos/askalf/f/git/refs'), out + calls);

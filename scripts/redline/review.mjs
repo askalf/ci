@@ -769,15 +769,16 @@ export function contextSection(text) {
 const PIN_CALLERS = new Set(['.github/workflows/redline.yml', '.github/workflows/redline-fix.yml']);
 // The lines pin.mjs writes: the pinned call, the redline-ref input naming the same commit, and comments.
 const PIN_LINE = /^\s*(?:uses: askalf\/ci\/\.github\/workflows\/redline-(?:review|fix-run)\.yml@[0-9a-f]{40}|redline-ref: ['"]?[0-9a-f]{40}['"]?)?\s*(?:#.*)?$/;
-// The line `pin.mjs --action` writes in a watcher workflow: the drift-report step pinned to a
-// commit, or a comment. A bump wave moves it together with the Redline pins.
-const ACTION_PIN_LINE = /^\s*(?:(?:- )?uses: askalf\/ci\/actions\/drift-report@[0-9a-f]{40})?\s*(?:#.*)?$/;
+// The line `pin.mjs --action` writes in a workflow: one of askalf/ci's actions (the drift-report
+// step of a watcher, the checkout-with-retry step of any job) pinned to a commit, or a comment. A
+// bump wave moves them together with the Redline pins.
+const ACTION_PIN_LINE = /^\s*(?:(?:- )?uses: askalf\/ci\/actions\/(?:drift-report|checkout-with-retry)@[0-9a-f]{40})?\s*(?:#.*)?$/;
 const WORKFLOW_FILE = /^\.github\/workflows\/[^/]+\.ya?ml$/;
 
 /**
  * True when the PR changes nothing but pins: every file modified, and every added or removed line a
- * pinned Redline call or redline-ref input (in a caller file), a pinned drift-report step (in any
- * workflow file), or a comment. Pure.
+ * pinned Redline call or redline-ref input (in a caller file), a pinned askalf/ci action step (in
+ * any workflow file), or a comment. Pure.
  * @param {{ filename: string, status: string, patch?: string }[]} files
  */
 export function pinOnly(files) {

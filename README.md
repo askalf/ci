@@ -60,13 +60,14 @@ Next to the prompts the hosts hold the credential files the scripts read (`/etc/
 ## The pin bump
 
 A push to `main` that changes what a caller runs, `scripts/redline/` or `scripts/drift-report/` (their
-tests, test fixtures and READMEs aside), `actions/drift-report/` or one of the reusable workflows,
-runs `redline-pin-bump.yml`. It rewrites `redline.yml` and, where a repository has one,
+tests, test fixtures and READMEs aside), `actions/drift-report/`, `actions/checkout-with-retry/` or one
+of the reusable workflows, runs `redline-pin-bump.yml`. It rewrites `redline.yml` and, where a repository has one,
 `redline-fix.yml` in every caller in its `CALLERS` list through `pin.mjs`, and every other workflow
-file there that pins `actions/drift-report` through `pin.mjs --action`, one commit per file on
+file there that pins `actions/drift-report` or `actions/checkout-with-retry` through `pin.mjs --action`,
+one commit per file on
 `bot/redline-pin`, and opens or updates one pull request per repository. Each repository's own gate reviews and merges the
 bump. This repository is in the list: its own `redline.yml` moves the same way. A repository in the list
-with no `redline.yml` is bumped for its drift-report pins alone (askalf/platform, private, gated by its own
+with no `redline.yml` is bumped for its action pins alone (askalf/platform, private, gated by its own
 CI); one with no pin of either kind is reported as wrong. The job needs
 `REDLINE_PIN_BUMP_TOKEN`, a fine-grained token with Contents, Pull requests and Workflows read and
 write on every repository in the list (Workflows because the pins live in `.github/workflows/`);
@@ -82,6 +83,22 @@ bot pull request with the diff in its body, and closes the issues on a clean run
 with a PAT so that CI runs on it, the issue is handled with the job token so that a PAT without
 Issues rights is enough. The mechanics and the token split are in
 [scripts/drift-report/README.md](scripts/drift-report/README.md); `pin.mjs --action <sha>` moves the pin.
+
+## Checkout with retry
+
+`actions/checkout-with-retry` is `actions/checkout` run as up to three steps, 8 s and then 20 s
+apart, pinned the same way: `uses: askalf/ci/actions/checkout-with-retry@<sha>`. An ephemeral
+runner can start a job before its credential is in place; the first fetch then fails with `could not
+read Username for 'https://github.com'`, and `actions/checkout`'s own retries re-use the credential
+the step was handed, so only a new step clears it. Every input our workflows pass is forwarded
+(`ref`, `repository`, `token`, `fetch-depth`, `path`, `sparse-checkout`, `sparse-checkout-cone-mode`,
+`persist-credentials`); an input the action does not declare is not forwarded, so it is added there
+before a caller uses it. The log says which attempt succeeded and a rescued run carries a
+`::warning::` annotation; the third failure fails the job as a plain checkout would. The inner
+`actions/checkout` pin moves through dependabot (`.github/dependabot.yml`), and
+`checkout-with-retry-self-test.yml` runs the action from the checkout on every pull request. It
+replaces the standalone `askalf/checkout-with-retry`, now archived; `pin.mjs --action <sha>` moves
+the pin.
 
 ## Tests
 

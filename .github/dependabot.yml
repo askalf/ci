@@ -1,0 +1,26 @@
+# The inner actions/checkout pin in actions/checkout-with-retry/action.yml, and the action pins in
+# this repository's own workflows. One grouped PR per directory per week, so a pair that must move
+# together (codeql-action init and analyze) never lands split. The reviewed bump of our own pins
+# (askalf/ci/...@<sha>) is the pin-bump lane's, not dependabot's.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      actions:
+        patterns:
+          - "*"
+  - package-ecosystem: github-actions
+    directory: /actions/checkout-with-retry
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      actions:
+        patterns:
+          - "*"
