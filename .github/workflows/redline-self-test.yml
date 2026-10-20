@@ -24,7 +24,7 @@ jobs:
       - uses: askalf/ci/actions/checkout-with-retry@bb480f4d68116c382130f8bbe255ce8eb07ff8ef # main 2026-10-20, askalf/ci#72
         with:
           persist-credentials: false
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
       - run: node scripts/redline/review.test.mjs
@@ -62,7 +62,7 @@ jobs:
       - uses: askalf/ci/actions/checkout-with-retry@bb480f4d68116c382130f8bbe255ce8eb07ff8ef # main 2026-10-20, askalf/ci#72
         with:
           persist-credentials: false
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
       - name: Make a run account for the fix tests
