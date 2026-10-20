@@ -1,8 +1,9 @@
 # Opens a PR in each Redline caller that moves its pins, and the redline-ref input that names the
 # same commit, to the main commit that changed the review or the fix. A caller pins two reusable
 # workflows by SHA: redline.yml calls redline-review.yml and redline-fix.yml, where the repository
-# has one, calls redline-fix-run.yml. A drift watcher pins a third thing as a step, in whichever
-# workflow file it lives: uses: askalf/ci/actions/drift-report@<sha> (the report step). Each pins by
+# has one, calls redline-fix-run.yml. A workflow pins this repository's actions as steps, in
+# whichever workflow file it lives: uses: askalf/ci/actions/drift-report@<sha> (a watcher's report
+# step) and uses: askalf/ci/actions/checkout-with-retry@<sha> (any job's checkout). Each pins by
 # SHA so a change reaches it only through a reviewed bump there; this writes those bumps
 # (scripts/redline/pin.mjs), and each repo's own gate reviews and merges them.
 #
@@ -63,8 +64,9 @@ jobs:
       BRANCH: bot/redline-pin
       # The review caller is in every repo but platform; the fix caller only where the fix lane is
       # wired, so a missing one is skipped, not an error. A repository with neither is still a caller
-      # when a workflow there pins the drift-report action (platform, whose own CI gates it, not
-      # Redline): it is bumped for those pins alone, and only a repository with no pin at all is wrong.
+      # when a workflow there pins one of this repository's actions, drift-report or
+      # checkout-with-retry (platform, whose own CI gates it, not Redline): it is bumped for those
+      # pins alone, and only a repository with no pin at all is wrong.
       CALLER_PATHS: >-
         .github/workflows/redline.yml .github/workflows/redline-fix.yml
       # What a caller runs: the scripts the reusable workflows fetch, and the workflows. The tests,
@@ -78,6 +80,7 @@ jobs:
         :(exclude)scripts/drift-report/*.test.mjs
         :(exclude)scripts/drift-report/README.md
         actions/drift-report
+        actions/checkout-with-retry
         .github/workflows/redline-review.yml
         .github/workflows/redline-fix-run.yml
         .github/workflows/redline-pin-bump.yml
@@ -165,7 +168,7 @@ jobs:
           if [ -n "$pr" ]; then note="${note}, ${SOURCE}#${pr}"; fi
           pattern="uses: ${SOURCE}/.github/workflows/redline-(review|fix-run).yml@[0-9a-f]{40}"
           title="ci: bump Redline to ${SOURCE}@${short}"
-          body="Moves the pinned ${SOURCE} calls and their redline-ref inputs, and every drift-report action pin, to ${SOURCE}@${SHA}, the main commit that last changed the review, the fix or the report step (${note}). The scripts are fetched at that same commit. The pins are the only change."
+          body="Moves the pinned ${SOURCE} calls and their redline-ref inputs, and every ${SOURCE} action pin (drift-report, checkout-with-retry), to ${SOURCE}@${SHA}, the main commit that last changed the review, the fix or an action (${note}). The scripts are fetched at that same commit. The pins are the only change."
 
           # A path as the Contents API takes it: each segment percent-encoded, so a workflow named
           # with a space, a # or a ? is read and written as one whole path.
@@ -182,7 +185,7 @@ jobs:
             base="$(gh api "repos/${repo}" --jq .default_branch)"
             tip="$(gh api "repos/${repo}/git/ref/heads/${base}" --jq .object.sha)"
             # Which caller files need the new pin. The fix caller may be missing; the review caller too,
-            # for a repository that pins only the drift-report action. A failed read says nothing by
+            # for a repository that pins only an action. A failed read says nothing by
             # itself (a 404 and a 500 look the same here): whether the file exists is settled against
             # the directory listing below, so a caller that is there but could not be read stops this
             # repository's bump instead of passing as absent.
@@ -215,8 +218,8 @@ jobs:
               fi
               todo+=("$path")
             done
-            # The drift-report action is pinned as a step in whichever workflow file a watcher is, so
-            # those files are found by reading the directory, not from a list. A file whose every pin is
+            # An action (drift-report, checkout-with-retry) is pinned as a step in whichever workflow
+            # file uses it, so those files are found by reading the directory, not from a list. A file whose every pin is
             # already at the commit needs nothing. A directory or file that could not be read is not a
             # file without pins: it is reported, and this repository's bump stops for this run, so a
             # transient failure never opens a PR that moves some of the pins and reports success. The
@@ -251,7 +254,7 @@ jobs:
               atodo+=("$path")
             done
             if [ "$unread" -ne 0 ]; then echo "::error::${repo}: not every workflow could be read; nothing is bumped here this run"; return 1; fi
-            if [ "$noreview" -ne 0 ] && [ "$pinned" -eq 0 ]; then echo "::error::${repo}: no .github/workflows/redline.yml and no drift-report pin; nothing here calls ${SOURCE}"; bad=1; fi
+            if [ "$noreview" -ne 0 ] && [ "$pinned" -eq 0 ]; then echo "::error::${repo}: no .github/workflows/redline.yml and no action pin; nothing here calls ${SOURCE}"; bad=1; fi
             if [ "${#todo[@]}" -eq 0 ] && [ "${#atodo[@]}" -eq 0 ]; then return "$bad"; fi
             # An open bump PR that already proposes this commit in every file that needs it is left
             # alone: resetting its branch would restart its review and checks for no change.
@@ -296,7 +299,7 @@ jobs:
               bumped=$((bumped + 1))
             }
             for path in "${todo[@]}"; do rewrite "$path" Redline; done
-            for path in "${atodo[@]}"; do rewrite "$path" drift-report --action; done
+            for path in "${atodo[@]}"; do rewrite "$path" "action pins" --action; done
             # A branch with no new commit has nothing to propose.
             if [ "$bumped" -eq 0 ]; then return 1; fi
             open="$(gh pr list --repo "$repo" --head "$BRANCH" --state open --json number --jq '.[0].number // empty')"

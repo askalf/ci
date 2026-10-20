@@ -12,8 +12,9 @@
 //      node scripts/redline/pin.mjs --action-pins < watcher.yml
 //      node scripts/redline/pin.mjs --grants <called.yml> < caller.yml
 //
-// The third form moves the drift-report action pin (actions/drift-report), which a watcher
-// workflow carries as a step and not as a job, so it has no redline-ref to keep in step.
+// The third form moves the action pins (actions/drift-report in a drift watcher,
+// actions/checkout-with-retry in any workflow), which a workflow carries as steps and not as a
+// job, so they have no redline-ref to keep in step. Each pin keeps its own action path.
 // The fourth prints the sha of each of those pins, one per line, so a caller deciding whether a
 // file needs the third form recognises exactly the lines the third form rewrites.
 // The fifth prints each permission the called workflow asks for that the caller does not grant,
@@ -27,6 +28,9 @@ import { pathToFileURL } from 'node:url';
 export const REVIEW_WORKFLOW = 'askalf/ci/.github/workflows/redline-review.yml';
 export const FIX_WORKFLOW = 'askalf/ci/.github/workflows/redline-fix-run.yml';
 export const DRIFT_REPORT_ACTION = 'askalf/ci/actions/drift-report';
+export const CHECKOUT_RETRY_ACTION = 'askalf/ci/actions/checkout-with-retry';
+/** Every action of this repository a workflow pins as a step; `--action` moves them all. */
+export const ACTIONS = [DRIFT_REPORT_ACTION, CHECKOUT_RETRY_ACTION];
 /** Every reusable workflow a caller pins, and the caller file that pins it. */
 export const CALLERS = [
   { workflow: REVIEW_WORKFLOW, path: '.github/workflows/redline.yml' },
@@ -142,26 +146,27 @@ jobs:
 `;
 }
 
-// The action path has only letters, dashes, dots and slashes; the dots are what a pattern must escape.
-const ACTION_PATH = DRIFT_REPORT_ACTION.replace(/\./g, '\\.');
+// An action path has only letters, dashes, dots and slashes; the dots are what a pattern must escape.
+const ACTION_PATHS = ACTIONS.map((a) => a.replace(/\./g, '\\.')).join('|');
 // After the sha: spaces, an optional comment, and the carriage return a CRLF file leaves on every
 // line once it is split on '\n'. Each is matched on its own, so a pin with trailing spaces and no
-// comment, or an uncommented pin in a CRLF file, is a pin.
-const ACTION_PIN = new RegExp(`^(\\s*(?:- )?uses:\\s*)${ACTION_PATH}@([0-9a-f]{40})[ \\t]*(#[^\\r]*)?(\\r?)$`);
+// comment, or an uncommented pin in a CRLF file, is a pin. The path is captured so a bump keeps it.
+const ACTION_PIN = new RegExp(`^(\\s*(?:- )?uses:\\s*)(${ACTION_PATHS})@([0-9a-f]{40})[ \\t]*(#[^\\r]*)?(\\r?)$`);
 
-/** The sha of each drift-report action pin a workflow carries, in file order. */
+/** The sha of each action pin (any of ACTIONS) a workflow carries, in file order. */
 export function actionPins(yaml) {
-  return yaml.split('\n').map((l) => ACTION_PIN.exec(l)?.[2]).filter(Boolean);
+  return yaml.split('\n').map((l) => ACTION_PIN.exec(l)?.[3]).filter(Boolean);
 }
 
-/** How many drift-report action pins a workflow carries. Zero means the file is not a caller. */
+/** How many action pins a workflow carries. Zero means the file is not a caller. */
 export function countActionPins(yaml) {
   return actionPins(yaml).length;
 }
 
 /**
- * The workflow's yaml with every drift-report action pin at `sha`. A workflow without one comes
- * back unchanged, so a caller may pass any workflow file through without checking it first.
+ * The workflow's yaml with every action pin at `sha`, each on its own action path. A workflow
+ * without one comes back unchanged, so a caller may pass any workflow file through without
+ * checking it first.
  * @param {string} yaml
  * @param {string} sha
  * @param {string} [note] the pin's trailing comment, e.g. "main 2026-10-09, askalf/ci#37"
@@ -170,8 +175,8 @@ export function bumpActionPins(yaml, sha, note = '') {
   if (!SHA.test(sha)) throw new Error(`not a full commit sha: ${sha}`);
   return yaml.split('\n').map((l) => {
     const m = ACTION_PIN.exec(l);
-    // The line keeps its ending; the old comment gives way to the note, or to nothing.
-    return m ? `${m[1]}${DRIFT_REPORT_ACTION}@${sha}${note ? ` # ${note}` : ''}${m[4]}` : l;
+    // The line keeps its path and its ending; the old comment gives way to the note, or to nothing.
+    return m ? `${m[1]}${m[2]}@${sha}${note ? ` # ${note}` : ''}${m[5]}` : l;
   }).join('\n');
 }
 

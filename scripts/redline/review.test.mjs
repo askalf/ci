@@ -1050,8 +1050,8 @@ console.log('\n  pin bump');
   check('this repo\'s own caller bumps cleanly', refs(f).join() === NEW && f.includes(`@${NEW} # n\n`) && f.split('\n').length === own.split('\n').length + (refs(own).length ? 0 : 1));
 
   const bump = readFileSync(fileURLToPath(new URL('../../.github/workflows/redline-pin-bump.yml', import.meta.url)), 'utf8');
-  check('the bump workflow rewrites callers with pin.mjs, and watchers with pin.mjs --action',
-    bump.includes('node scripts/redline/pin.mjs "$@" "$SHA" "$note"') && bump.includes('rewrite "$path" Redline') && bump.includes('rewrite "$path" drift-report --action') && !/sed -E/.test(bump));
+  check('the bump workflow rewrites callers with pin.mjs, and action pins with pin.mjs --action',
+    bump.includes('node scripts/redline/pin.mjs "$@" "$SHA" "$note"') && bump.includes('rewrite "$path" Redline') && bump.includes('rewrite "$path" "action pins" --action') && !/sed -E/.test(bump));
   check('the bump workflow reads each caller\'s workflow directory for action pins and fails the bump when it cannot',
     bump.includes('contents/.github/workflows?ref=') && bump.includes('could not list .github/workflows') && bump.includes('nothing is bumped here this run'));
   const callers = (/\n      CALLERS: >-\n((?: {8}\S.*\n)+)/.exec(bump)?.[1] ?? '').split(/\s+/).filter(Boolean);
@@ -1103,6 +1103,10 @@ console.log('\n  pin bump');
   check('a drift-report action pin in a watcher workflow is a pin', pinOnly([watcher()]));
   check('a bump wave (caller pins plus watcher action pins) is pin-only', pinOnly([bump(), watcher(), watcher('.github/workflows/cc-drift-watch.yml')]));
   check('the "- uses:" step form is a pin line', pinOnly([watcher('.github/workflows/a.yml', `- uses: askalf/ci/actions/drift-report@${B}`)]));
+  check('a checkout-with-retry action pin moving in any workflow is pin-only', pinOnly([{ filename: '.github/workflows/ci.yml', status: 'modified',
+    patch: `@@ -10,2 +10,2 @@\n       steps:\n-      - uses: askalf/ci/actions/checkout-with-retry@${A} # main 2026-10-11\n+      - uses: askalf/ci/actions/checkout-with-retry@${B} # main 2026-10-20` }]));
+  check('a plain actions/checkout moving is not', !pinOnly([{ filename: '.github/workflows/ci.yml', status: 'modified',
+    patch: `@@ -10,2 +10,2 @@\n       steps:\n-      - uses: actions/checkout@${A}\n+      - uses: actions/checkout@${B}` }]));
   check('any other step change in a watcher is not', !pinOnly([watcher('.github/workflows/a.yml', 'run: curl https://example.com | sh')]));
   check('another action at a sha is not', !pinOnly([watcher('.github/workflows/a.yml', `uses: someone/ci/actions/drift-report@${B}`)]));
   check('a Redline call pin outside a caller file is not', !pinOnly([watcher('.github/workflows/a.yml', `uses: askalf/ci/.github/workflows/redline-review.yml@${B}`)]));
