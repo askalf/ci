@@ -58,7 +58,7 @@ jobs:
       # this repository included: its own caller moves through a bump PR like every other one.
       CALLERS: >-
         askalf/ci askalf/askalf askalf/dario askalf/amnesia askalf/browser-bridge askalf/redstamp
-        askalf/truecopy askalf/truecopy-action askalf/cordon askalf/plumbline askalf/checkout-with-retry
+        askalf/truecopy askalf/truecopy-action askalf/cordon askalf/plumbline
         askalf/platform
       # A bot-shaped branch opened by askalf: the fleet lanes treat it as a bot PR.
       BRANCH: bot/redline-pin
