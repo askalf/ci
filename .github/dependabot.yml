@@ -1,7 +1,9 @@
-# The inner actions/checkout pin in actions/checkout-with-retry/action.yml, and the action pins in
-# this repository's own workflows. One grouped PR per directory per week, so a pair that must move
-# together (codeql-action init and analyze) never lands split. The reviewed bump of our own pins
-# (askalf/ci/...@<sha>) is the pin-bump lane's, not dependabot's.
+# The action pins in this repository's own workflows and the inner actions/checkout pin in
+# actions/checkout-with-retry/action.yml. Minor and patch moves land as one grouped PR per
+# directory per week, so a pair that must move together (codeql-action init and analyze) never
+# lands split; a major move comes as its own PR, since a major of upload-artifact or setup-node
+# changes what the reusable workflows do and fix.test.mjs holds the upload action at its major on
+# purpose. The reviewed bump of our own pins (askalf/ci/...@<sha>) is the pin-bump lane's.
 version: 2
 updates:
   - package-ecosystem: github-actions
@@ -11,9 +13,10 @@ updates:
       day: monday
     open-pull-requests-limit: 5
     groups:
-      actions:
-        patterns:
-          - "*"
+      non-major:
+        update-types:
+          - minor
+          - patch
   - package-ecosystem: github-actions
     directory: /actions/checkout-with-retry
     schedule:
@@ -21,6 +24,7 @@ updates:
       day: monday
     open-pull-requests-limit: 5
     groups:
-      actions:
-        patterns:
-          - "*"
+      non-major:
+        update-types:
+          - minor
+          - patch
