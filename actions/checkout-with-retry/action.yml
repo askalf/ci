@@ -18,7 +18,9 @@
 # is pinned by sha in three places that must stay equal; dependabot moves them together.
 #
 # The run log says which attempt succeeded, and a rescued run carries a `::warning::` annotation,
-# so a widening race shows up as warnings before it shows up as failures.
+# so a widening race shows up as warnings before it shows up as failures. The retry paths are
+# proved on a runner by checkout-with-retry-self-test.yml, which swaps the inner checkout for a
+# stub that fails a set number of times and asserts the attempts and the outcome.
 name: Checkout with retry
 description: actions/checkout in up to three steps, 8 s and 20 s apart, so a runner credential race does not fail the job
 

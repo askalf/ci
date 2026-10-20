@@ -1,7 +1,16 @@
-# Runs the checkout-with-retry action from this checkout on every pull request: a whole-repository
-# checkout and a single-file sparse one, each asserted on disk. The retry path itself (a first
-# attempt that fails) cannot be forced from a workflow, so this proves the forwarding of inputs
-# and the pass-through case; a rescued run shows as a ::warning:: in a real caller's log.
+# Proves the checkout-with-retry action on a runner, on every pull request. Two jobs:
+#
+# `checkout` runs the action from this checkout as a caller would, a whole checkout and a
+# single-file sparse one, each asserted on disk: the inputs are forwarded and a healthy checkout
+# passes through on the first attempt.
+#
+# `retry` proves the retry paths, which no real checkout can be made to take on demand. A copy of
+# the action is written with its three inner actions/checkout steps swapped for a local stub that
+# counts its calls and fails the first N of them (N from the matrix, 0 to 3); nothing else in the
+# copy changes, the waits included. The job then asserts how many attempts ran and how the action
+# ended: N below 3 is N+1 attempts and success, N of 3 is three attempts and failure. The stub and
+# the copy are written by the job into the checkout, so a local `uses:` path finds them.
+#
 # Not path-filtered: a check from a path-filtered workflow never reports on a PR outside its paths.
 name: checkout-with-retry self-test
 
@@ -41,3 +50,76 @@ jobs:
           test -f one-file/actions/checkout-with-retry/action.yml
           test ! -e one-file/scripts
           echo "whole and single-file checkouts through the action OK"
+
+  retry:
+    name: retry path, ${{ matrix.failures }} failing attempt(s)
+    runs-on: ${{ (github.repository != 'askalf/ci' || github.event.pull_request && (github.event.pull_request.head.repo.full_name != github.repository || github.event.pull_request.user.login == 'dependabot[bot]')) && 'ubuntu-latest' || fromJSON('["self-hosted","ci-exec"]') }}
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        failures: [0, 1, 2, 3]
+    steps:
+      - uses: askalf/checkout-with-retry@115a6407547e9711edbc2e915838d495cad9583f  # v1.1.0
+        with:
+          persist-credentials: false
+      - name: Write the stub and a copy of the action that calls it
+        env:
+          FAILURES: ${{ matrix.failures }}
+        run: |
+          set -euo pipefail
+          rm -rf .harness && mkdir -p .harness/stub .harness/retry
+          rm -f "$RUNNER_TEMP/attempts"
+          printf '%s\n' "$FAILURES" > "$RUNNER_TEMP/failures"
+          # The stub takes the inputs the action forwards, so the copy's `with:` blocks are unchanged,
+          # and ignores them. Each call is counted in the runner's temp directory, outside the checkout.
+          cat > .harness/stub/action.yml <<'STUB'
+          name: checkout stub
+          description: fails the first N calls (N in $RUNNER_TEMP/failures), counts every call
+          inputs:
+            ref: {required: false}
+            repository: {required: false}
+            token: {required: false}
+            fetch-depth: {required: false}
+            path: {required: false}
+            sparse-checkout: {required: false}
+            sparse-checkout-cone-mode: {required: false}
+            persist-credentials: {required: false}
+          runs:
+            using: composite
+            steps:
+              - shell: bash
+                run: |
+                  n="$(cat "$RUNNER_TEMP/attempts" 2>/dev/null || echo 0)"
+                  n=$((n + 1))
+                  printf '%s\n' "$n" > "$RUNNER_TEMP/attempts"
+                  if [ "$n" -le "$(cat "$RUNNER_TEMP/failures")" ]; then echo "stub: call $n fails"; exit 1; fi
+                  echo "stub: call $n succeeds"
+          STUB
+          # The copy is the action with only its inner checkout swapped for the stub; the pin's
+          # version comment goes with it. Exactly three swaps, or the copy is not the action.
+          sed -E 's#uses: actions/checkout@[0-9a-f]{40} *(\# v[0-9.]+)?$#uses: ./.harness/stub#' \
+            actions/checkout-with-retry/action.yml > .harness/retry/action.yml
+          test "$(grep -c 'uses: ./.harness/stub' .harness/retry/action.yml)" = 3
+          ! grep -q 'actions/checkout@' .harness/retry/action.yml
+          # Everything but those three lines is the action, byte for byte.
+          diff <(grep -v 'uses: actions/checkout@' actions/checkout-with-retry/action.yml) \
+               <(grep -v 'uses: ./.harness/stub' .harness/retry/action.yml)
+      - name: Run the copy
+        id: run
+        uses: ./.harness/retry
+        continue-on-error: true
+        with:
+          path: harness-out
+          persist-credentials: false
+      - name: Assert the attempts and the outcome
+        env:
+          FAILURES: ${{ matrix.failures }}
+          OUTCOME: ${{ steps.run.outcome }}
+        run: |
+          set -euo pipefail
+          attempts="$(cat "$RUNNER_TEMP/attempts")"
+          if [ "$FAILURES" -lt 3 ]; then want_attempts=$((FAILURES + 1)); want_outcome=success; else want_attempts=3; want_outcome=failure; fi
+          echo "failures=$FAILURES attempts=$attempts outcome=$OUTCOME (want $want_attempts, $want_outcome)"
+          test "$attempts" = "$want_attempts"
+          test "$OUTCOME" = "$want_outcome"
