@@ -12,13 +12,15 @@
 # the copy are written by the job into the checkout, so a local `uses:` path finds them.
 #
 # `act` proves the act path. The job fetches the act release box-ci runs, checked against its
-# published sum, writes a two-job workflow that checks out through the action as a caller does
+# published sum, writes a three-job workflow that checks out through the action as a caller does
 # (`uses: askalf/ci/actions/checkout-with-retry@<ref>`, with act's --local-repository pointing that
-# repository and ref at this checkout; act in host mode cannot read a `./` action), one job plain
-# and one with a `path` and a `ref`, and runs it under act in host mode from the checkout's root, as
-# box-ci does: no container, no token, act's default actor nektos/act. From act's log it asserts
-# that no attempt ran, that no token was asked for, that the step after the action found the
-# workspace to be the commit, and that the `path` and `ref` job was warned.
+# repository and ref at this checkout; a `./` action is read from the job's workspace, empty under
+# act until a checkout fills it): one job plain, one with a `path`, one with a `ref`. It runs them
+# under act in host mode from the checkout's root, as box-ci does: no container, no token, act's
+# default actor nektos/act. From act's log it asserts that act stood in for each job's checkout,
+# that the plain job's next step found this checkout's files in the workspace, that the `path` job
+# and the `ref` job were each warned and the plain one not, and that no attempt ran and no token
+# was asked for.
 #
 # Not path-filtered: a check from a path-filtered workflow never reports on a PR outside its paths.
 name: checkout-with-retry self-test
