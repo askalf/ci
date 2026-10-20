@@ -739,7 +739,13 @@ export function askForSubmit(messages) {
 
 export function buildBrief(pr, files, commits, diff, protectedFiles = []) {
   const body = (pr.body ?? '').slice(0, LIMITS.bodyChars);
-  const commitLines = commits.slice(0, LIMITS.commits).map((c) => `- ${c.sha.slice(0, 7)} ${String(c.commit?.message ?? '').slice(0, LIMITS.commitChars).replace(/\n/g, '\n  ')}`);
+  // A message past LIMITS.commitChars is cut with the cut stated, as context and earlier reviews
+  // are: a bare cut reads as a message that ends mid-sentence, and is reviewed as one.
+  const commitLines = commits.slice(0, LIMITS.commits).map((c) => {
+    const message = String(c.commit?.message ?? '');
+    const text = message.length > LIMITS.commitChars ? `${message.slice(0, LIMITS.commitChars)}\n[message cut at ${LIMITS.commitChars} characters]` : message;
+    return `- ${c.sha.slice(0, 7)} ${text.replace(/\n/g, '\n  ')}`;
+  });
   return [
     `Repository: ${pr.base.repo.full_name}`,
     `PR #${pr.number}: ${pr.title}`,
