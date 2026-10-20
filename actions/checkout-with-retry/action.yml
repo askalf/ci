@@ -22,7 +22,7 @@
 # proved on a runner by checkout-with-retry-self-test.yml, which swaps the inner checkout for a
 # stub that fails a set number of times and asserts the attempts and the outcome.
 name: Checkout with retry
-description: actions/checkout in up to three steps, 8 s and 20 s apart, so a runner credential race does not fail the job
+description: actions/checkout, retried up to two more times, 8 s and then 20 s later, when an attempt fails; the third failure fails the job
 
 inputs:
   ref:
