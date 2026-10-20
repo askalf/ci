@@ -1,4 +1,4 @@
-# Proves the checkout-with-retry action on a runner, on every pull request. Two jobs:
+# Proves the checkout-with-retry action on a runner, on every pull request. Three jobs:
 #
 # `checkout` runs the action from this checkout as a caller would, a whole checkout and a
 # single-file sparse one, each asserted on disk: the inputs are forwarded and a healthy checkout
@@ -10,6 +10,17 @@
 # copy changes, the waits included. The job then asserts how many attempts ran and how the action
 # ended: N below 3 is N+1 attempts and success, N of 3 is three attempts and failure. The stub and
 # the copy are written by the job into the checkout, so a local `uses:` path finds them.
+#
+# `act` proves the act path. The job fetches the act release box-ci runs, checked against its
+# published sum, writes a three-job workflow that checks out through the action as a caller does
+# (`uses: askalf/ci/actions/checkout-with-retry@<ref>`, with act's --local-repository pointing that
+# repository and ref at this checkout; a `./` action is read from the job's workspace, empty under
+# act until a checkout fills it): one job plain, one with a `path`, one with a `ref`. It runs them
+# under act in host mode from the checkout's root, as box-ci does: no container, no token, act's
+# default actor nektos/act. From act's log it asserts that act stood in for each job's checkout,
+# that the plain job's next step found this checkout's files in the workspace, that the `path` job
+# and the `ref` job were each warned and the plain one not, and that no attempt ran and no token
+# was asked for.
 #
 # Not path-filtered: a check from a path-filtered workflow never reports on a PR outside its paths.
 name: checkout-with-retry self-test
@@ -27,7 +38,7 @@ jobs:
     runs-on: ${{ (github.repository != 'askalf/ci' || github.event.pull_request && (github.event.pull_request.head.repo.full_name != github.repository || github.event.pull_request.user.login == 'dependabot[bot]')) && 'ubuntu-latest' || fromJSON('["self-hosted","ci-exec"]') }}
     timeout-minutes: 5
     steps:
-      - uses: askalf/ci/actions/checkout-with-retry@bb480f4d68116c382130f8bbe255ce8eb07ff8ef # main 2026-10-20, askalf/ci#72
+      - uses: askalf/ci/actions/checkout-with-retry@da417cf6f69b3fb9a574a76fe8741e9bc1b2d9dd # main 2026-10-20, askalf/ci#76
         with:
           persist-credentials: false
       - name: Whole checkout through the action
@@ -60,7 +71,7 @@ jobs:
       matrix:
         failures: [0, 1, 2, 3]
     steps:
-      - uses: askalf/ci/actions/checkout-with-retry@bb480f4d68116c382130f8bbe255ce8eb07ff8ef # main 2026-10-20, askalf/ci#72
+      - uses: askalf/ci/actions/checkout-with-retry@da417cf6f69b3fb9a574a76fe8741e9bc1b2d9dd # main 2026-10-20, askalf/ci#76
         with:
           persist-credentials: false
       - name: Write the stub and a copy of the action that calls it
@@ -97,10 +108,11 @@ jobs:
                   echo "stub: call $n succeeds"
           STUB
           # The copy is the action with only its inner checkout swapped for the stub; the pin's
-          # version comment goes with it. Exactly three swaps, or the copy is not the action.
+          # version comment goes with it. Exactly four swaps (the act-only step is one, skipped
+          # here, as the actor is never nektos/act), or the copy is not the action.
           sed -E 's#uses: actions/checkout@[0-9a-f]{40} *(\# v[0-9.]+)?$#uses: ./.harness/stub#' \
             actions/checkout-with-retry/action.yml > .harness/retry/action.yml
-          test "$(grep -c 'uses: ./.harness/stub' .harness/retry/action.yml)" = 3
+          test "$(grep -c 'uses: ./.harness/stub' .harness/retry/action.yml)" = 4
           ! grep -q 'actions/checkout@' .harness/retry/action.yml
           # Everything but those three lines is the action, byte for byte.
           diff <(grep -v 'uses: actions/checkout@' actions/checkout-with-retry/action.yml) \
@@ -123,3 +135,78 @@ jobs:
           echo "failures=$FAILURES attempts=$attempts outcome=$OUTCOME (want $want_attempts, $want_outcome)"
           test "$attempts" = "$want_attempts"
           test "$OUTCOME" = "$want_outcome"
+
+  act:
+    name: under act, no attempt runs
+    runs-on: ${{ (github.repository != 'askalf/ci' || github.event.pull_request && (github.event.pull_request.head.repo.full_name != github.repository || github.event.pull_request.user.login == 'dependabot[bot]')) && 'ubuntu-latest' || fromJSON('["self-hosted","ci-exec"]') }}
+    timeout-minutes: 5
+    steps:
+      - uses: askalf/ci/actions/checkout-with-retry@bb480f4d68116c382130f8bbe255ce8eb07ff8ef # main 2026-10-20, askalf/ci#72
+        with:
+          persist-credentials: false
+      - name: Fetch act, the release box-ci runs
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/act"
+          cd "$RUNNER_TEMP/act"
+          curl -fsSL -o act.tgz https://github.com/nektos/act/releases/download/v0.2.89/act_Linux_x86_64.tar.gz
+          echo '0191d6f1f3b716b5c55820032605d05fc3c1cdbf581ebeff655019e5dd1524c0  act.tgz' | sha256sum -c -
+          tar -xzf act.tgz act
+          ./act --version
+      - name: Run a workflow that checks out through the action, under act
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/act-wf"
+          # The action is named as a caller names it; --local-repository below makes act read
+          # askalf/ci at `under-test` from this checkout. (A `./` action cannot be used: act reads it
+          # from the job's workspace, which under act is empty until a checkout step fills it.) The
+          # step after the action proves act stood in: the workspace holds this checkout's files,
+          # copied by act, with no checkout having run.
+          cat > "$RUNNER_TEMP/act-wf/under-act.yml" <<'WF'
+          on: push
+          jobs:
+            plain:
+              runs-on: ubuntu-latest
+              steps:
+                - uses: askalf/ci/actions/checkout-with-retry@under-test
+                - name: Prove the workspace is the working directory
+                  run: test -f actions/checkout-with-retry/action.yml && test -f scripts/redline/pin.mjs && echo "workspace is the working directory"
+            pathed:
+              runs-on: ubuntu-latest
+              steps:
+                - uses: askalf/ci/actions/checkout-with-retry@under-test
+                  with:
+                    path: elsewhere
+            reffed:
+              runs-on: ubuntu-latest
+              steps:
+                - uses: askalf/ci/actions/checkout-with-retry@under-test
+                  with:
+                    ref: release
+          WF
+          # Host mode, as box-ci runs it: the job runs on this machine, no container. No secret is
+          # passed, so the action's token input is empty, as it is in the box-ci lane.
+          "$RUNNER_TEMP/act/act" push -W "$RUNNER_TEMP/act-wf/under-act.yml" -P ubuntu-latest=-self-hosted \
+            --local-repository "askalf/ci@under-test=$GITHUB_WORKSPACE" \
+            --action-cache-path "$RUNNER_TEMP/act-cache" 2>&1 | tee "$RUNNER_TEMP/act.log"
+          test "${PIPESTATUS[0]}" = 0
+      - name: Assert the act path from the log
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/act.log"
+          # Step output in act's log is `[workflow/job] | <line>`; a step's name is not, so a script's
+          # text in a name cannot satisfy an assertion, and the job prefix tells the three jobs apart.
+          # A forbidden line is an explicit exit: `! grep` is exempt from set -e and would not fail.
+          want() { grep -q -- "$2" "$log" || { echo "missing in act's log: $2 ($1)"; exit 1; }; }
+          forbid() { if grep -q -- "$2" "$log"; then echo "in act's log, forbidden: $2 ($1)"; exit 1; fi; }
+          want 'plain job: act stood in'    '/plain \] *| Checkout stood in by act: the workspace is a copy of the working directory'
+          want 'plain job: workspace is the working directory' '/plain \] *| workspace is the working directory'
+          forbid 'plain job: no warning for the defaults' '/plain \].*checkout-with-retry under act: path, repository and ref inputs are not honoured'
+          want 'pathed job: act stood in'   '/pathed\] *| Checkout stood in by act: the workspace is a copy of the working directory'
+          want 'pathed job: warned'         '/pathed\].*checkout-with-retry under act: path, repository and ref inputs are not honoured'
+          want 'reffed job: act stood in'   '/reffed\] *| Checkout stood in by act: the workspace is a copy of the working directory'
+          want 'reffed job: warned'         '/reffed\].*checkout-with-retry under act: path, repository and ref inputs are not honoured'
+          forbid 'no attempt succeeded'     'Checkout succeeded on attempt'
+          forbid 'no attempt ran'           'Run Main Checkout (attempt'
+          forbid 'no token asked for'       'Input required and not supplied: token'
+          echo "under act: act stood in, no attempt ran, no token asked for, the workspace was the working directory, path and ref each warned, the defaults not"

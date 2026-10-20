@@ -341,6 +341,12 @@ console.log('\n  earlier reviews on the PR');
   const many = earlierReviewsSection([1, 2, 3, 4, 5].map((i) => ask(`finding ${i}`, { commit_id: String(i).repeat(40) })), HEAD);
   check('only the newest few are kept', !many.includes('finding 1') && !many.includes('finding 2') && many.includes('finding 3') && many.includes('finding 5'));
   check('a long review is cut, and says so', earlierReviewsSection([ask('y'.repeat(LIMITS.earlierReviewChars + 5))], HEAD).includes(`[cut at ${LIMITS.earlierReviewChars} characters]`));
+  {
+    const mk = (message) => buildBrief({ number: 1, title: 't', body: '', user: { login: 'a' }, head: { ref: 'h', sha: HEAD }, base: { ref: 'main', repo: { full_name: 'askalf/r' } } }, [], [{ sha: HEAD, commit: { message } }], 'diff');
+    const longCommit = mk(`${'z'.repeat(LIMITS.commitChars)}TAIL`);
+    check('a long commit message is cut, and says so', longCommit.includes(`\n  [message cut at ${LIMITS.commitChars} characters]`) && !longCommit.includes('TAIL'));
+    check('a commit message at the limit is not cut', !mk('z'.repeat(LIMITS.commitChars)).includes('[message cut'));
+  }
   const { ctx, calls } = world({ reviews: [ask('The loop skips the last item.')], turns: [submit(APPROVE)] });
   await runReview(ctx);
   check('the earlier request reaches the model after the diff', calls.model[0].messages[0].content.includes('The loop skips the last item.'));
