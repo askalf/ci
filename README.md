@@ -94,7 +94,8 @@ the step was handed, so only a new step clears it. Every input our workflows pas
 (`ref`, `repository`, `token`, `fetch-depth`, `path`, `sparse-checkout`, `sparse-checkout-cone-mode`,
 `persist-credentials`); an input the action does not declare is not forwarded, so it is added there
 before a caller uses it. The log says which attempt succeeded and a rescued run carries a
-`::warning::` annotation; the third failure fails the job as a plain checkout would. The inner
+`::warning::` annotation; under act (the box-ci lane), where the workspace already is the commit and
+act stands in for a plain `actions/checkout`, no attempt runs; the third failure fails the job as a plain checkout would. The inner
 `actions/checkout` pin moves through dependabot (`.github/dependabot.yml`), and
 `checkout-with-retry-self-test.yml` runs the action from the checkout on every pull request. It
 replaces the standalone `askalf/checkout-with-retry`, now archived; `pin.mjs --action <sha>` moves

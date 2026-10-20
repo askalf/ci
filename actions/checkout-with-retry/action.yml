@@ -21,6 +21,12 @@
 # so a widening race shows up as warnings before it shows up as failures. The retry paths are
 # proved on a runner by checkout-with-retry-self-test.yml, which swaps the inner checkout for a
 # stub that fails a set number of times and asserts the attempts and the outcome.
+#
+# Under act (the box-ci lane runs a repository's workflows through it, as actor nektos/act, act's
+# default) the workspace already is the commit: act stands in for a top-level actions/checkout and
+# runs none, but it does run the one inside a composite, which then asks for a token the job never
+# has. So under act no attempt runs; `path` and `repository` cannot be honoured there and are
+# warned about.
 name: Checkout with retry
 description: actions/checkout, retried up to two more times, 8 s and then 20 s later, when an attempt fails; the third failure fails the job
 
@@ -60,8 +66,10 @@ inputs:
 runs:
   using: composite
   steps:
+    # Skipped under act, and with it attempts 2 and 3, whose conditions read a failure here.
     - name: Checkout (attempt 1)
       id: c1
+      if: github.actor != 'nektos/act'
       uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       continue-on-error: true
       with:
@@ -120,8 +128,16 @@ runs:
 
     - name: Record which attempt succeeded
       shell: bash
+      env:
+        WANT_PATH: ${{ inputs.path }}
+        WANT_REPO: ${{ inputs.repository }}
       run: |
-        if [ "${{ steps.c1.outcome }}" = "success" ]; then
+        if [ "${{ steps.c1.outcome }}" = "skipped" ]; then
+          echo "Checkout not run: under act the workspace already is the commit."
+          if [ -n "$WANT_PATH" ] || { [ -n "$WANT_REPO" ] && [ "$WANT_REPO" != "${GITHUB_REPOSITORY:-}" ]; }; then
+            echo "::warning::checkout-with-retry under act: path and repository inputs are not honoured; the workspace is this repository's commit."
+          fi
+        elif [ "${{ steps.c1.outcome }}" = "success" ]; then
           echo "Checkout succeeded on attempt 1."
         elif [ "${{ steps.c2.outcome }}" = "success" ]; then
           echo "Checkout succeeded on attempt 2 (transient on first try)."
