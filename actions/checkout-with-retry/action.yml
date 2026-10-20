@@ -15,12 +15,21 @@
 # A drop-in for actions/checkout: every input a workflow of ours passes is forwarded, with
 # actions/checkout's own defaults. An input not listed is not forwarded; add it here before a caller
 # uses it, since a composite action takes no input it does not declare. The inner actions/checkout
-# is pinned by sha in three places that must stay equal; dependabot moves them together.
+# is pinned by sha in four places that must stay equal; dependabot moves them together.
 #
 # The run log says which attempt succeeded, and a rescued run carries a `::warning::` annotation,
 # so a widening race shows up as warnings before it shows up as failures. The retry paths are
 # proved on a runner by checkout-with-retry-self-test.yml, which swaps the inner checkout for a
 # stub that fails a set number of times and asserts the attempts and the outcome.
+#
+# Under act (the box-ci lane runs a repository's workflows through it, as actor nektos/act, act's
+# default) the workspace starts empty and act stands in for actions/checkout by copying the working
+# directory into it, but only for a step with no `repository` and no `ref` input at all: act
+# compares those inputs unexpanded with the event's, so a forwarded `${{ inputs.ref }}` reads as
+# another ref, the real action runs and asks for a token the job never has. So under act the first
+# step is a plain actions/checkout with no input, which act stands in for; the attempts are skipped;
+# `path`, another `repository` and a `ref` other than the commit cannot be honoured there and are
+# warned about. The inner pin is in four places, all moved together.
 name: Checkout with retry
 description: actions/checkout, retried up to two more times, 8 s and then 20 s later, when an attempt fails; the third failure fails the job
 
@@ -60,8 +69,17 @@ inputs:
 runs:
   using: composite
   steps:
+    # Under act only: no input, so act stands in (copies the working directory into the workspace)
+    # and runs nothing; its failure fails the job. On a runner of GitHub's this step is skipped.
+    - name: Checkout (under act, act stands in)
+      id: act
+      if: github.actor == 'nektos/act'
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+    # Skipped under act, and with it attempts 2 and 3, whose conditions read a failure here.
     - name: Checkout (attempt 1)
       id: c1
+      if: github.actor != 'nektos/act'
       uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       continue-on-error: true
       with:
@@ -120,8 +138,19 @@ runs:
 
     - name: Record which attempt succeeded
       shell: bash
+      env:
+        WANT_PATH: ${{ inputs.path }}
+        WANT_REPO: ${{ inputs.repository }}
+        WANT_REF: ${{ inputs.ref }}
       run: |
-        if [ "${{ steps.c1.outcome }}" = "success" ]; then
+        if [ "${{ steps.act.outcome }}" = "success" ]; then
+          echo "Checkout stood in by act: the workspace is a copy of the working directory, as after a plain actions/checkout."
+          # A path, another repository or a ref other than the commit itself asks for a workspace act
+          # cannot give: said as a warning, so a job that then tests the wrong tree says why.
+          if [ -n "$WANT_PATH" ] || { [ -n "$WANT_REPO" ] && [ "$WANT_REPO" != "${GITHUB_REPOSITORY:-}" ]; } || { [ -n "$WANT_REF" ] && [ "$WANT_REF" != "${GITHUB_SHA:-}" ]; }; then
+            echo "::warning::checkout-with-retry under act: path, repository and ref inputs are not honoured; the workspace is the working directory at ${GITHUB_SHA:-}."
+          fi
+        elif [ "${{ steps.c1.outcome }}" = "success" ]; then
           echo "Checkout succeeded on attempt 1."
         elif [ "${{ steps.c2.outcome }}" = "success" ]; then
           echo "Checkout succeeded on attempt 2 (transient on first try)."
