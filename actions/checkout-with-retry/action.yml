@@ -2,9 +2,10 @@
 # credential is in place: the first `git fetch` then fails with "could not read Username for
 # 'https://github.com': terminal prompts disabled" (exit 128), and actions/checkout's own retries,
 # three inside the one step, re-use the credential it was handed. Only a new step is handed the
-# token again, so this action runs the checkout as separate steps, 8 s and then 20 s apart, and
-# fails the job only when the third one fails: by then the failure is real (auth down, token expired,
-# no permission), not the race.
+# token again, so this action runs the checkout as separate steps, 8 s and then 20 s apart. The
+# retry is bounded, not a diagnosis: every failed attempt is retried alike whatever its cause, and
+# the third failure fails the job as a plain checkout would, whether it is a race that outlasted the
+# backoff or a persistent fault (auth down, token expired, no permission).
 #
 # Pinned like the Redline workflows and the drift-report action: a caller names one full commit sha
 # of this repository's main,
@@ -76,7 +77,7 @@ runs:
       if: steps.c1.outcome == 'failure'
       shell: bash
       run: |
-        echo "::warning::actions/checkout attempt 1 failed (transient credential class). Backing off 8s before retry."
+        echo "::warning::actions/checkout attempt 1 failed. Backing off 8s before retry."
         sleep 8
 
     - name: Checkout (attempt 2)
@@ -98,7 +99,7 @@ runs:
       if: steps.c1.outcome == 'failure' && steps.c2.outcome == 'failure'
       shell: bash
       run: |
-        echo "::warning::actions/checkout attempt 2 also failed. Final retry after 20s; if this fails, the failure is real."
+        echo "::warning::actions/checkout attempt 2 also failed. Final retry after 20s; if it fails too, the job fails with its error, whatever the cause."
         sleep 20
 
     # No continue-on-error: the third failure fails the job as a plain checkout would.
