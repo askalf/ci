@@ -1451,7 +1451,7 @@ console.log('\n  the reusable workflow');
   check('no secret from GitHub reaches the fix step', !/secrets\./.test(wf));
   const upload = steps[uploadAt] ?? '';
   check('the upload runs whatever the outcome, as redline-fix from fix-out, short-lived, overwriting',
-    upload.includes('if: always()\n') && /uses: actions\/upload-artifact@[0-9a-f]{40} # v4\./.test(upload) && upload.includes('name: redline-fix\n') && upload.includes('path: fix-out\n') && /retention-days: [1-7]\n/.test(upload) && upload.includes('overwrite: true'));
+    upload.includes('if: always()\n') && /uses: actions\/upload-artifact@[0-9a-f]{40} # v7\./.test(upload) && upload.includes('name: redline-fix\n') && upload.includes('path: fix-out\n') && /retention-days: [1-7]\n/.test(upload) && upload.includes('overwrite: true'));
   const review = readFileSync(fileURLToPath(new URL('../../.github/workflows/redline-review.yml', import.meta.url)), 'utf8');
   check('the upload action is the version redline-review.yml uses', /uses: actions\/upload-artifact@([0-9a-f]{40})/.exec(upload)?.[1] === /uses: actions\/upload-artifact@([0-9a-f]{40})/.exec(review)?.[1]);
   check('the cleanup removes the PR, the script and the output', /run: rm -rf pr \.redline fix-out\s*$/.test(steps[cleanAt] ?? '') && (steps[cleanAt] ?? '').includes('if: always()'));
