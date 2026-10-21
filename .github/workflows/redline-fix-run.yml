@@ -117,7 +117,7 @@ jobs:
           '
 
       - name: Fetch the fix script from askalf/ci
-        uses: askalf/ci/actions/checkout-with-retry@477bc48309430057477bc2b885529a08660288bd # main 2026-10-21, askalf/ci#85
+        uses: askalf/ci/actions/checkout-with-retry@7f0a0e8f439783bf9e5fa400101139e8c569b9ed # main 2026-10-21, askalf/ci#86
         with:
           repository: askalf/ci
           ref: ${{ inputs.redline-ref }}
@@ -127,7 +127,7 @@ jobs:
           persist-credentials: false
 
       - name: Check out the PR head to fix
-        uses: askalf/ci/actions/checkout-with-retry@477bc48309430057477bc2b885529a08660288bd # main 2026-10-21, askalf/ci#85
+        uses: askalf/ci/actions/checkout-with-retry@7f0a0e8f439783bf9e5fa400101139e8c569b9ed # main 2026-10-21, askalf/ci#86
         with:
           ref: ${{ inputs.head }}
           path: pr
