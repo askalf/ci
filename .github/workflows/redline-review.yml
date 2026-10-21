@@ -181,7 +181,7 @@ jobs:
           JS
 
       - name: Fetch the review script from askalf/ci
-        uses: askalf/ci/actions/checkout-with-retry@45d88862287da7afb60c116f85b1ff9c341df1a0 # main 2026-10-21, askalf/ci#87
+        uses: askalf/ci/actions/checkout-with-retry@c9945d8ff861e53c87b77858eb63a35ead05f308 # main 2026-10-21, askalf/ci#88
         with:
           repository: askalf/ci
           ref: ${{ inputs.redline-ref }}
@@ -192,7 +192,7 @@ jobs:
 
       - name: Check out the PR head to read
         if: steps.pr.outputs.fork != 'true'
-        uses: askalf/ci/actions/checkout-with-retry@45d88862287da7afb60c116f85b1ff9c341df1a0 # main 2026-10-21, askalf/ci#87
+        uses: askalf/ci/actions/checkout-with-retry@c9945d8ff861e53c87b77858eb63a35ead05f308 # main 2026-10-21, askalf/ci#88
         with:
           ref: ${{ inputs.head || github.event.pull_request.head.sha }}
           path: pr
