@@ -1513,7 +1513,7 @@ console.log('\n  pin bump, both callers');
       && bump.includes('WAIT_FOR_QUIET: ${{ inputs.wait-for-quiet }}'));
   check('a scheduled bump waits for the newest change to be quiet; a dispatch does not',
     /QUIET_MINUTES: \d+/.test(bump) && bump.includes('if { [ "$EVENT" = schedule ] || [ "${WAIT_FOR_QUIET:-false}" = true ]; } && [ "$age" -lt "$QUIET_MINUTES" ]; then')
-      && bump.includes("git log -1 --first-parent --format='%H %ct' HEAD -- $PIN_PATHS") && bump.includes('SHA: ${{ steps.pick.outputs.sha }}')
+      && bump.includes("done < <(git log --first-parent --format='%H %ct' HEAD -- $PIN_PATHS)") && bump.includes('SHA: ${{ steps.pick.outputs.sha }}')
       && bump.includes('fetch-depth: 0'));
   {
     // The pick step itself, in a scratch history: a branch whose runtime change is hours old,
@@ -1549,14 +1549,14 @@ console.log('\n  pin bump, both callers');
       const out = join(d, 'out');
       writeFileSync(out, '');
       const r = spawnSync('bash', ['-c', script.join('\n')], { cwd: d, encoding: 'utf8',
-        env: { ...process.env, EVENT: 'schedule', PIN_PATHS: pinPaths, QUIET_MINUTES: '60', WAVE_SIZE: waveSize, GITHUB_OUTPUT: out } });
+        env: { ...process.env, EVENT: 'schedule', PIN_PATHS: pinPaths, QUIET_MINUTES: '60', WAVE_SIZE: waveSize, GITHUB_OUTPUT: out, GITHUB_REPOSITORY: 'askalf/ci' } });
       const got = readFileSync(out, 'utf8');
       check('a branch merged a minute ago is picked as the merge and waits for the quiet window',
         r.status === 0 && got.includes('ok=false') && r.stdout.includes(`newest change a caller runs: ${merge.slice(0, 7)}`) && got.includes(`cap=${waveSize}\n`));
       const pick = (env) => {
         writeFileSync(out, '');
         const x = spawnSync('bash', ['-c', script.join('\n')], { cwd: d, encoding: 'utf8',
-          env: { ...process.env, PIN_PATHS: pinPaths, QUIET_MINUTES: '60', WAVE_SIZE: waveSize, GITHUB_OUTPUT: out, ...env } });
+          env: { ...process.env, PIN_PATHS: pinPaths, QUIET_MINUTES: '60', WAVE_SIZE: waveSize, GITHUB_OUTPUT: out, GITHUB_REPOSITORY: 'askalf/ci', ...env } });
         return { status: x.status, got: readFileSync(out, 'utf8') };
       };
       const waits = pick({ EVENT: 'workflow_dispatch', WAIT_FOR_QUIET: 'true' });
