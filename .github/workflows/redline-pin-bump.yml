@@ -114,6 +114,12 @@ jobs:
           sparse-checkout-cone-mode: false
           persist-credentials: false
 
+      # Before the pick: it reads each candidate commit's files through pin.mjs --mask.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        if: steps.guard.outputs.ok == 'true'
+        with:
+          node-version: 22
+
       - name: Pick the commit to pin
         if: steps.guard.outputs.ok == 'true'
         id: pick
@@ -132,15 +138,15 @@ jobs:
           # workflow). Picking that merge would make every wave start the next one: the first
           # callers in CALLERS are bumped again each time and the ones after them are never
           # reached. So a commit is skipped when every file it changes under PIN_PATHS reads the
-          # same before and after once only the revision of each pin to this repository is
-          # masked: the 40-hex commit after <this repo>/<path>@ on a uses: line or after
-          # redline-ref:, with the note the bump writes after it. Everything else on those lines
-          # (the action path, the indentation, the key) still has to match, so a commit that
-          # changes which action runs is a change. A pin to another repository
-          # (actions/setup-node@<sha>) is never masked: it alters what runs. A file added or
-          # removed is a change. The newest commit that is a change is the one to pin.
-          repo_re="${GITHUB_REPOSITORY//./\\.}"
-          mask() { sed -E "s#(${repo_re}/[^ @]+)@[0-9a-f]{40}( +\#.*)?\$#\1@PIN#; s#(redline-ref: )[0-9a-f]{40}( +\#.*)?\$#\1PIN#"; }
+          # same before and after through pin.mjs --mask, which masks only the revision (and the
+          # note after it) of exactly the pins pin.mjs rewrites: a uses: value that is one of
+          # this repository's actions or reusable workflows, and redline-ref. Everything else on
+          # those lines (the action path, the owner, the indentation, the key) still has to match,
+          # so a commit that changes which action runs is a change. A pin to any other repository
+          # (actions/setup-node@<sha>, or an owner whose name merely ends the same) is never
+          # masked: it alters what runs. A file added or removed is a change. The newest commit
+          # that is a change is the one to pin.
+          mask() { node scripts/redline/pin.mjs --mask; }
           # Succeeds when commit $1 changes more than those revisions in a file under PIN_PATHS.
           # It is called as an if condition, where set -e does not hold, so a file that cannot be
           # read ends the step by hand instead of comparing as empty and passing for pin-only.
@@ -165,7 +171,7 @@ jobs:
           # shellcheck disable=SC2086
           while read -r c t; do
             if changes_more "$c"; then sha="$c"; at="$t"; break; fi
-            echo "skipped ${c:0:7}: it changes only the revisions of pins to ${GITHUB_REPOSITORY}"
+            echo "skipped ${c:0:7}: it changes only the revisions of pins to this repository"
           done < <(git log --first-parent --format='%H %ct' HEAD -- $PIN_PATHS)
           set +f
           if [ -z "$sha" ]; then echo "::error::no commit under PIN_PATHS changes more than pins"; exit 1; fi
@@ -184,11 +190,6 @@ jobs:
           else
             echo "cap=0" >> "$GITHUB_OUTPUT"
           fi
-
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        if: steps.pick.outputs.ok == 'true'
-        with:
-          node-version: 22
 
       - name: Open or update a bump PR in each caller
         if: steps.pick.outputs.ok == 'true'

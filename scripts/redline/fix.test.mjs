@@ -1537,6 +1537,9 @@ console.log('\n  pin bump, both callers');
         GIT_AUTHOR_DATE: `${when} +0000`, GIT_COMMITTER_DATE: `${when} +0000` } });
       const put = (f, x) => { mkdirSync(join(d, f, '..'), { recursive: true }); writeFileSync(join(d, f), x); };
       git(['init', '-q', '-b', 'main'], now);
+      // The step masks through the checkout's pin.mjs, kept out of the scratch history.
+      put('scripts/redline/pin.mjs', readFileSync(fileURLToPath(new URL('./pin.mjs', import.meta.url)), 'utf8'));
+      writeFileSync(join(d, '.git', 'info', 'exclude'), 'scripts/redline/pin.mjs\nout\n');
       put('scripts/redline/review.mjs', 'v1\n'); git(['add', '-A'], now - 86400); git(['commit', '-qm', 'base'], now - 86400);
       git(['checkout', '-qb', 'topic'], now);
       put('scripts/redline/review.mjs', 'v2\n'); git(['commit', '-qam', 'runtime change, hours old'], now - 5 * 3600);

@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { actionPins, bumpActionPins, CHECKOUT_RETRY_ACTION, countActionPins, DRIFT_REPORT_ACTION, missingGrants, permissionsOf } from './pin.mjs';
+import { actionPins, bumpActionPins, CHECKOUT_RETRY_ACTION, countActionPins, DRIFT_REPORT_ACTION, maskPins, missingGrants, permissionsOf, REVIEW_WORKFLOW } from './pin.mjs';
 
 let pass = 0;
 let fail = 0;
@@ -49,6 +49,20 @@ console.log('\n  --action moves every askalf/ci action pin, each on its own path
     moved.includes(`actions/setup-node@${OLDSHA} # v7\n`) && moved.replace(new RegExp(NEWSHA, 'g'), OLDSHA).replace(/ # main 2026-10-20/g, '') === both.replace(/ # main 2026-10-01/g, ''), moved);
   check('a workflow with a plain actions/checkout and no askalf/ci action is not a caller and comes back unchanged',
     countActionPins(`steps:\n  - uses: actions/checkout@${OLDSHA}\n`) === 0 && bumpActionPins(`steps:\n  - uses: actions/checkout@${OLDSHA}\n`, NEWSHA) === `steps:\n  - uses: actions/checkout@${OLDSHA}\n`);
+}
+
+console.log('\n  --mask hides only the revision of the pins pin.mjs rewrites');
+{
+  const pinned = (sha, note) => `jobs:\n  review:\n    uses: ${REVIEW_WORKFLOW}@${sha} # ${note}\n    with:\n      redline-ref: ${sha}\n  w:\n    steps:\n      - uses: ${CHECKOUT_RETRY_ACTION}@${sha} # ${note}\n      - uses: actions/setup-node@${sha} # v7\n      - uses: notaskalf/ci/actions/checkout-with-retry@${sha}\n`;
+  const a = pinned(OLDSHA, 'main 2026-10-01'), b = pinned(NEWSHA, 'main 2026-10-22, askalf/ci#9');
+  check('two versions that differ only in those revisions and notes mask the same', maskPins(a) === maskPins(b), maskPins(a) + '\n' + maskPins(b));
+  check('the call, the redline-ref and the action keep their key, indentation and path',
+    maskPins(a).includes(`    uses: ${REVIEW_WORKFLOW}@PIN\n`) && maskPins(a).includes('      redline-ref: PIN\n') && maskPins(a).includes(`      - uses: ${CHECKOUT_RETRY_ACTION}@PIN\n`), maskPins(a));
+  check('a pin to another repository, an owner that only ends the same included, is left as it is',
+    maskPins(a).includes(`actions/setup-node@${OLDSHA} # v7\n`) && maskPins(a).includes(`notaskalf/ci/actions/checkout-with-retry@${OLDSHA}\n`), maskPins(a));
+  check('another action of this repository on a pinned line still reads differently',
+    maskPins(a) !== maskPins(a.replace(`${CHECKOUT_RETRY_ACTION}@`, `${DRIFT_REPORT_ACTION}@`)));
+  check('a CRLF line keeps its carriage return', maskPins(`      - uses: ${CHECKOUT_RETRY_ACTION}@${OLDSHA} # n\r\n`) === `      - uses: ${CHECKOUT_RETRY_ACTION}@PIN\r\n`);
 }
 
 console.log('\n  a caller must grant what the called workflow asks for');
@@ -340,6 +354,11 @@ if (spawnSync('bash', ['-c', 'true']).status !== 0 || process.platform === 'win3
     return { r, out: readFileSync(out, 'utf8') };
   };
   git('init', '-q', '-b', 'main');
+  // The step masks through the checkout's pin.mjs: the real one sits in the scratch checkout,
+  // kept out of its history like the step's output file.
+  mkdirSync(join(d, 'scripts', 'redline'), { recursive: true });
+  writeFileSync(join(d, 'scripts', 'redline', 'pin.mjs'), readFileSync(fileURLToPath(new URL('./pin.mjs', import.meta.url))));
+  writeFileSync(join(d, '.git', 'info', 'exclude'), 'scripts/redline/pin.mjs\n.out\n');
   commit({ 'scripts/redline/review.mjs': 'export const v = 1;\n', '.github/workflows/redline-review.yml': review(SHA1) }, 'root');
   const real = commit({ 'scripts/redline/review.mjs': 'export const v = 2;\n' }, 'redline: a real change');
   // The bump PR in this repository: its own caller and the action pins move, nothing else.
@@ -347,7 +366,7 @@ if (spawnSync('bash', ['-c', 'true']).status !== 0 || process.platform === 'win3
   commit({ 'README.md': 'not a path a caller runs\n' }, 'docs');
   const first = pickRun();
   check('the newest commit that changes more than pins is picked, past a bump that moves only this repository\'s pins',
-    first.r.status === 0 && first.out.includes(`sha=${real}\n`) && first.r.stdout.includes('skipped ') && first.r.stdout.includes('it changes only the revisions of pins to askalf/ci'),
+    first.r.status === 0 && first.out.includes(`sha=${real}\n`) && first.r.stdout.includes('skipped ') && first.r.stdout.includes('it changes only the revisions of pins to this repository'),
     first.r.stdout + first.r.stderr + first.out);
   const mixed = commit({ '.github/workflows/redline-review.yml': review(SHA3, '      - run: echo new step\n') }, 'redline-review: a pin and a new step');
   const second = pickRun();
@@ -370,6 +389,14 @@ if (spawnSync('bash', ['-c', 'true']).status !== 0 || process.platform === 'win3
   const fifth = pickRun();
   check('a commit that changes the indentation of a pinned line is a change',
     fifth.r.status === 0 && fifth.out.includes(`sha=${indent}\n`), fifth.r.stdout + fifth.r.stderr + fifth.out);
+  // An owner whose name ends like this repository's is another repository: its pin is not masked.
+  const lookalike = `notaskalf/ci/actions/checkout-with-retry`;
+  const withLookalike = bumped.replace(`      - run: echo new step\n`, `      - uses: ${lookalike}@${SHA1} # theirs\n      - run: echo new step\n`);
+  commit({ '.github/workflows/redline-review.yml': withLookalike }, 'redline-review: a step from another owner');
+  const lookalikeBump = commit({ '.github/workflows/redline-review.yml': withLookalike.replace(`${lookalike}@${SHA1}`, `${lookalike}@${SHA2}`) }, 'build(deps): bump notaskalf/ci');
+  const sixth = pickRun();
+  check('a pin whose owner only ends like this repository\'s is another repository\'s: moving it is a change',
+    sixth.r.status === 0 && sixth.out.includes(`sha=${lookalikeBump}\n`), sixth.r.stdout + sixth.r.stderr + sixth.out);
   rmSync(d, { recursive: true, force: true });
 }
 

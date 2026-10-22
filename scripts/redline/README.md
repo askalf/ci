@@ -129,6 +129,13 @@ repository has one, `redline-fix.yml` in every caller (this repository's own inc
 `pin.mjs` and opens one bump PR per repository. `node scripts/redline/pin.mjs --caller <sha> <repo>-exec` prints a new repository's
 `redline-fix.yml`.
 
+The commit a bump pins is the newest one on `main` that changes what a caller runs. This
+repository's own bump PR moves pins inside those same files (the action pins in the reusable
+workflows and the bump workflow), so its merge is not one: a commit whose files read the same
+before and after through `pin.mjs --mask`, which hides only the revision of the pins `pin.mjs`
+rewrites, is skipped. Without that, each of those merges would start the next wave from the
+top of `CALLERS`, and the callers after the first few would never be bumped.
+
 A caller is bumped only when it grants every permission the reusable workflow at the new commit
 asks for (`pin.mjs --grants <called.yml> < caller.yml` prints what it lacks). GitHub will not start
 a called workflow that asks for more than its caller grants: every run ends in `startup_failure`
