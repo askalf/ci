@@ -126,10 +126,32 @@ jobs:
           # the shell from globbing them, so git reads each pattern itself. --first-parent walks
           # main's own history, so a merge is picked with the time it landed, not the time of the
           # merged branch's last commit.
+          #
+          # This repository is a caller too, and its own bump PR moves pins that live in files
+          # under PIN_PATHS (the action pins in redline-review.yml, redline-fix-run.yml and this
+          # workflow). Picking that merge would make every wave start the next one: the first
+          # callers in CALLERS are bumped again each time and the ones after them are never
+          # reached. So a commit whose every changed line under PIN_PATHS is a pin to this
+          # repository (a uses: <this repo>/...@<sha> line or a redline-ref: <sha> line) is
+          # skipped, and the newest commit with any other change is the one to pin. A pin to
+          # another repository (actions/setup-node@<sha>) is a change: it alters what runs.
+          sha="" at=""
           set -f
           # shellcheck disable=SC2086
-          read -r sha at < <(git log -1 --first-parent --format='%H %ct' HEAD -- $PIN_PATHS)
+          while read -r c t; do
+            # The root commit has no parent to compare with, so it counts as a change.
+            if ! git rev-parse -q --verify "${c}^" >/dev/null; then sha="$c"; at="$t"; break; fi
+            # Captured first and filtered with grep -v (which reads all of its input), so no
+            # early exit in the pipe can kill git diff and read as "only pins" under pipefail.
+            # shellcheck disable=SC2086
+            d="$(git diff -U0 "${c}^" "$c" -- $PIN_PATHS)"
+            other="$(printf '%s\n' "$d" | grep -E '^[-+]' | grep -vE '^(\+\+\+|---) (a/|b/|/dev/null)' \
+              | grep -vE "${GITHUB_REPOSITORY}/[^ ]+@[0-9a-f]{40}|redline-ref: [0-9a-f]{40}" || true)"
+            if [ -n "$other" ]; then sha="$c"; at="$t"; break; fi
+            echo "skipped ${c:0:7}: it changes only pins to ${GITHUB_REPOSITORY}"
+          done < <(git log --first-parent --format='%H %ct' HEAD -- $PIN_PATHS)
           set +f
+          if [ -z "$sha" ]; then echo "::error::no commit under PIN_PATHS changes more than pins"; exit 1; fi
           age=$(( ( $(date +%s) - at ) / 60 ))
           echo "newest change a caller runs: ${sha:0:7}, ${age} minutes ago"
           if { [ "$EVENT" = schedule ] || [ "${WAIT_FOR_QUIET:-false}" = true ]; } && [ "$age" -lt "$QUIET_MINUTES" ]; then

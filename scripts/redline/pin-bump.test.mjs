@@ -309,5 +309,56 @@ esac
   rmSync(d, { recursive: true, force: true });
 }
 
+console.log('\n  the pick step skips a commit that only moves pins to this repository');
+if (spawnSync('bash', ['-c', 'true']).status !== 0 || process.platform === 'win32' || spawnSync('git', ['--version']).status !== 0) {
+  console.log('  skip the pick step run: no POSIX bash or git here');
+} else {
+  const pickAt = lines.findIndex((l) => l.includes('- name: Pick the commit to pin'));
+  const pickRunAt = lines.findIndex((l, i) => i > pickAt && l.trim() === 'run: |');
+  const pick = [];
+  for (const l of lines.slice(pickRunAt + 1)) { if (l.trim() && !l.startsWith('          ')) break; pick.push(l.slice(10)); }
+  // PIN_PATHS as the workflow sets it, read from the file so the test follows it.
+  const pinPaths = bump.match(/PIN_PATHS: >-\n((?: {8}\S.*\n)+)/)[1].split('\n').map((l) => l.trim()).filter(Boolean).join(' ');
+  const d = mkdtempSync(join(tmpdir(), 'pin-pick-'));
+  const git = (...a) => {
+    const r = spawnSync('git', a, { cwd: d, encoding: 'utf8', env: { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' } });
+    if (r.status !== 0) throw new Error(`git ${a.join(' ')}: ${r.stderr}`);
+    return r.stdout.trim();
+  };
+  const commit = (files, msg) => {
+    for (const [p, c] of Object.entries(files)) { mkdirSync(join(d, p, '..'), { recursive: true }); writeFileSync(join(d, p), c); }
+    git('add', '-A'); git('commit', '-q', '-m', msg);
+    return git('rev-parse', 'HEAD');
+  };
+  const SHA1 = '1'.repeat(40), SHA2 = '2'.repeat(40), SHA3 = '3'.repeat(40);
+  const review = (pin, extra = '') => `on:\n  workflow_call:\njobs:\n  r:\n    steps:\n      - uses: ${CHECKOUT_RETRY_ACTION}@${pin} # main 2026-10-20, askalf/ci#1\n      - uses: actions/setup-node@${SHA1} # v7\n${extra}`;
+  const callerFile = (pin) => `jobs:\n  review:\n    uses: askalf/ci/.github/workflows/redline-review.yml@${pin} # main\n    with:\n      redline-ref: ${pin}\n`;
+  const pickRun = () => {
+    const out = join(d, '.out'); writeFileSync(out, '');
+    const r = spawnSync('bash', ['-c', pick.join('\n')], { cwd: d, encoding: 'utf8',
+      env: { ...process.env, PIN_PATHS: pinPaths, GITHUB_REPOSITORY: 'askalf/ci', GITHUB_OUTPUT: out, EVENT: 'workflow_dispatch', WAIT_FOR_QUIET: 'false', QUIET_MINUTES: '60', WAVE_SIZE: '3' } });
+    return { r, out: readFileSync(out, 'utf8') };
+  };
+  git('init', '-q', '-b', 'main');
+  commit({ 'scripts/redline/review.mjs': 'export const v = 1;\n', '.github/workflows/redline-review.yml': review(SHA1) }, 'root');
+  const real = commit({ 'scripts/redline/review.mjs': 'export const v = 2;\n' }, 'redline: a real change');
+  // The bump PR in this repository: its own caller and the action pins move, nothing else.
+  commit({ '.github/workflows/redline-review.yml': review(SHA2).replace('askalf/ci#1', 'askalf/ci#2'), '.github/workflows/redline.yml': callerFile(SHA2) }, 'ci: bump Redline to askalf/ci@2222222');
+  commit({ 'README.md': 'not a path a caller runs\n' }, 'docs');
+  const first = pickRun();
+  check('the newest commit that changes more than pins is picked, past a bump that moves only this repository\'s pins',
+    first.r.status === 0 && first.out.includes(`sha=${real}\n`) && first.r.stdout.includes('skipped ') && first.r.stdout.includes('it changes only pins to askalf/ci'),
+    first.r.stdout + first.r.stderr + first.out);
+  const mixed = commit({ '.github/workflows/redline-review.yml': review(SHA3, '      - run: echo new step\n') }, 'redline-review: a pin and a new step');
+  const second = pickRun();
+  check('a commit that moves a pin and changes another line is a change and is picked',
+    second.r.status === 0 && second.out.includes(`sha=${mixed}\n`), second.r.stdout + second.r.stderr + second.out);
+  const other = commit({ '.github/workflows/redline-review.yml': review(SHA3, '      - run: echo new step\n').replace(`actions/setup-node@${SHA1}`, `actions/setup-node@${SHA2}`) }, 'build(deps): bump actions/setup-node');
+  const third = pickRun();
+  check('a pin to another repository is a change: it alters what a caller runs',
+    third.r.status === 0 && third.out.includes(`sha=${other}\n`), third.r.stdout + third.r.stderr + third.out);
+  rmSync(d, { recursive: true, force: true });
+}
+
 console.log(`\n  ${pass} pass, ${fail} fail`);
 if (fail > 0) process.exit(1);
