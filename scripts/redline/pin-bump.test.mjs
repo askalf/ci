@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { actionPins, bumpActionPins, CHECKOUT_RETRY_ACTION, countActionPins, DRIFT_REPORT_ACTION, missingGrants, permissionsOf } from './pin.mjs';
+import { actionPins, bumpActionPins, CHECKOUT_RETRY_ACTION, countActionPins, DRIFT_REPORT_ACTION, maskPins, missingGrants, permissionsOf, REVIEW_WORKFLOW } from './pin.mjs';
 
 let pass = 0;
 let fail = 0;
@@ -49,6 +49,22 @@ console.log('\n  --action moves every askalf/ci action pin, each on its own path
     moved.includes(`actions/setup-node@${OLDSHA} # v7\n`) && moved.replace(new RegExp(NEWSHA, 'g'), OLDSHA).replace(/ # main 2026-10-20/g, '') === both.replace(/ # main 2026-10-01/g, ''), moved);
   check('a workflow with a plain actions/checkout and no askalf/ci action is not a caller and comes back unchanged',
     countActionPins(`steps:\n  - uses: actions/checkout@${OLDSHA}\n`) === 0 && bumpActionPins(`steps:\n  - uses: actions/checkout@${OLDSHA}\n`, NEWSHA) === `steps:\n  - uses: actions/checkout@${OLDSHA}\n`);
+}
+
+console.log('\n  --mask hides only the revision of the pins pin.mjs rewrites');
+{
+  const THEIRS = 'c'.repeat(40);
+  const pinned = (sha, note) => `jobs:\n  review:\n    uses: ${REVIEW_WORKFLOW}@${sha} # ${note}\n    with:\n      redline-ref: ${sha}\n  w:\n    steps:\n      - uses: ${CHECKOUT_RETRY_ACTION}@${sha} # ${note}\n      - uses: actions/setup-node@${THEIRS} # v7\n      - uses: notaskalf/ci/actions/checkout-with-retry@${THEIRS}\n`;
+  const a = pinned(OLDSHA, 'main 2026-10-01'), b = pinned(NEWSHA, 'main 2026-10-22, askalf/ci#9');
+  check('two versions that differ only in those revisions and notes mask the same', maskPins(a) === maskPins(b), maskPins(a) + '\n' + maskPins(b));
+  check('the call, the redline-ref and the action keep their key, indentation and path',
+    maskPins(a).includes(`    uses: ${REVIEW_WORKFLOW}@PIN\n`) && maskPins(a).includes('      redline-ref: PIN\n') && maskPins(a).includes(`      - uses: ${CHECKOUT_RETRY_ACTION}@PIN\n`), maskPins(a));
+  check('a pin to another repository, an owner that only ends the same included, is left as it is',
+    maskPins(a).includes(`actions/setup-node@${THEIRS} # v7\n`) && maskPins(a).includes(`notaskalf/ci/actions/checkout-with-retry@${THEIRS}\n`)
+      && maskPins(a) !== maskPins(a.replace(`notaskalf/ci/actions/checkout-with-retry@${THEIRS}`, `notaskalf/ci/actions/checkout-with-retry@${OLDSHA}`)), maskPins(a));
+  check('another action of this repository on a pinned line still reads differently',
+    maskPins(a) !== maskPins(a.replace(`${CHECKOUT_RETRY_ACTION}@`, `${DRIFT_REPORT_ACTION}@`)));
+  check('a CRLF line keeps its carriage return', maskPins(`      - uses: ${CHECKOUT_RETRY_ACTION}@${OLDSHA} # n\r\n`) === `      - uses: ${CHECKOUT_RETRY_ACTION}@PIN\r\n`);
 }
 
 console.log('\n  a caller must grant what the called workflow asks for');
@@ -306,6 +322,83 @@ esac
   const granted = run(0, { A_MODE: 'granted' });
   check('a caller that grants it is bumped like any other',
     granted.r.status === 0 && granted.created.join() === 'askalf/a,askalf/b,askalf/c,askalf/d', granted.r.stdout + granted.r.stderr);
+  rmSync(d, { recursive: true, force: true });
+}
+
+console.log('\n  the pick step skips a commit that only moves pins to this repository');
+if (spawnSync('bash', ['-c', 'true']).status !== 0 || process.platform === 'win32' || spawnSync('git', ['--version']).status !== 0) {
+  console.log('  skip the pick step run: no POSIX bash or git here');
+} else {
+  const pickAt = lines.findIndex((l) => l.includes('- name: Pick the commit to pin'));
+  const pickRunAt = lines.findIndex((l, i) => i > pickAt && l.trim() === 'run: |');
+  const pick = [];
+  for (const l of lines.slice(pickRunAt + 1)) { if (l.trim() && !l.startsWith('          ')) break; pick.push(l.slice(10)); }
+  // PIN_PATHS as the workflow sets it, read from the file so the test follows it.
+  const pinPaths = bump.match(/PIN_PATHS: >-\n((?: {8}\S.*\n)+)/)[1].split('\n').map((l) => l.trim()).filter(Boolean).join(' ');
+  const d = mkdtempSync(join(tmpdir(), 'pin-pick-'));
+  const git = (...a) => {
+    const r = spawnSync('git', a, { cwd: d, encoding: 'utf8', env: { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' } });
+    if (r.status !== 0) throw new Error(`git ${a.join(' ')}: ${r.stderr}`);
+    return r.stdout.trim();
+  };
+  const commit = (files, msg) => {
+    for (const [p, c] of Object.entries(files)) { mkdirSync(join(d, p, '..'), { recursive: true }); writeFileSync(join(d, p), c); }
+    git('add', '-A'); git('commit', '-q', '-m', msg);
+    return git('rev-parse', 'HEAD');
+  };
+  const SHA1 = '1'.repeat(40), SHA2 = '2'.repeat(40), SHA3 = '3'.repeat(40);
+  const review = (pin, extra = '') => `on:\n  workflow_call:\njobs:\n  r:\n    steps:\n      - uses: ${CHECKOUT_RETRY_ACTION}@${pin} # main 2026-10-20, askalf/ci#1\n      - uses: actions/setup-node@${SHA1} # v7\n${extra}`;
+  const callerFile = (pin) => `jobs:\n  review:\n    uses: askalf/ci/.github/workflows/redline-review.yml@${pin} # main\n    with:\n      redline-ref: ${pin}\n`;
+  const pickRun = () => {
+    const out = join(d, '.out'); writeFileSync(out, '');
+    const r = spawnSync('bash', ['-c', pick.join('\n')], { cwd: d, encoding: 'utf8',
+      env: { ...process.env, PIN_PATHS: pinPaths, GITHUB_REPOSITORY: 'askalf/ci', GITHUB_OUTPUT: out, EVENT: 'workflow_dispatch', WAIT_FOR_QUIET: 'false', QUIET_MINUTES: '60', WAVE_SIZE: '3' } });
+    return { r, out: readFileSync(out, 'utf8') };
+  };
+  git('init', '-q', '-b', 'main');
+  // The step masks through the checkout's pin.mjs: the real one sits in the scratch checkout,
+  // kept out of its history like the step's output file.
+  mkdirSync(join(d, 'scripts', 'redline'), { recursive: true });
+  writeFileSync(join(d, 'scripts', 'redline', 'pin.mjs'), readFileSync(fileURLToPath(new URL('./pin.mjs', import.meta.url))));
+  writeFileSync(join(d, '.git', 'info', 'exclude'), 'scripts/redline/pin.mjs\n.out\n');
+  commit({ 'scripts/redline/review.mjs': 'export const v = 1;\n', '.github/workflows/redline-review.yml': review(SHA1) }, 'root');
+  const real = commit({ 'scripts/redline/review.mjs': 'export const v = 2;\n' }, 'redline: a real change');
+  // The bump PR in this repository: its own caller and the action pins move, nothing else.
+  commit({ '.github/workflows/redline-review.yml': review(SHA2).replace('askalf/ci#1', 'askalf/ci#2'), '.github/workflows/redline.yml': callerFile(SHA2) }, 'ci: bump Redline to askalf/ci@2222222');
+  commit({ 'README.md': 'not a path a caller runs\n' }, 'docs');
+  const first = pickRun();
+  check('the newest commit that changes more than pins is picked, past a bump that moves only this repository\'s pins',
+    first.r.status === 0 && first.out.includes(`sha=${real}\n`) && first.r.stdout.includes('skipped ') && first.r.stdout.includes('it changes only the revisions of pins to this repository'),
+    first.r.stdout + first.r.stderr + first.out);
+  const mixed = commit({ '.github/workflows/redline-review.yml': review(SHA3, '      - run: echo new step\n') }, 'redline-review: a pin and a new step');
+  const second = pickRun();
+  check('a commit that moves a pin and changes another line is a change and is picked',
+    second.r.status === 0 && second.out.includes(`sha=${mixed}\n`), second.r.stdout + second.r.stderr + second.out);
+  const other = commit({ '.github/workflows/redline-review.yml': review(SHA3, '      - run: echo new step\n').replace(`actions/setup-node@${SHA1}`, `actions/setup-node@${SHA2}`) }, 'build(deps): bump actions/setup-node');
+  const third = pickRun();
+  check('a pin to another repository is a change: it alters what a caller runs',
+    third.r.status === 0 && third.out.includes(`sha=${other}\n`), third.r.stdout + third.r.stderr + third.out);
+  // Only the revision and its note are masked: the rest of a pinned line still has to match.
+  const cur = review(SHA3, '      - run: echo new step\n').replace(`actions/setup-node@${SHA1}`, `actions/setup-node@${SHA2}`);
+  const swapped = cur.replace(`${CHECKOUT_RETRY_ACTION}@${SHA3}`, `${DRIFT_REPORT_ACTION}@${SHA3}`);
+  const pathChange = commit({ '.github/workflows/redline-review.yml': swapped }, 'redline-review: a pinned step calls another action');
+  const bumped = swapped.replace(`${DRIFT_REPORT_ACTION}@${SHA3} # main 2026-10-20, askalf/ci#1`, `${DRIFT_REPORT_ACTION}@${SHA1} # main 2026-10-22, askalf/ci#9`);
+  commit({ '.github/workflows/redline-review.yml': bumped }, 'ci: bump Redline to askalf/ci@1111111');
+  const fourth = pickRun();
+  check('a commit that changes which action a pinned line calls is a change, though the revision stays',
+    fourth.r.status === 0 && fourth.out.includes(`sha=${pathChange}\n`) && fourth.r.stdout.includes('skipped '), fourth.r.stdout + fourth.r.stderr + fourth.out);
+  const indent = commit({ '.github/workflows/redline-review.yml': bumped.replace(`      - uses: ${DRIFT_REPORT_ACTION}@`, `        - uses: ${DRIFT_REPORT_ACTION}@`) }, 'redline-review: a pinned line moves');
+  const fifth = pickRun();
+  check('a commit that changes the indentation of a pinned line is a change',
+    fifth.r.status === 0 && fifth.out.includes(`sha=${indent}\n`), fifth.r.stdout + fifth.r.stderr + fifth.out);
+  // An owner whose name ends like this repository's is another repository: its pin is not masked.
+  const lookalike = `notaskalf/ci/actions/checkout-with-retry`;
+  const withLookalike = bumped.replace(`      - run: echo new step\n`, `      - uses: ${lookalike}@${SHA1} # theirs\n      - run: echo new step\n`);
+  commit({ '.github/workflows/redline-review.yml': withLookalike }, 'redline-review: a step from another owner');
+  const lookalikeBump = commit({ '.github/workflows/redline-review.yml': withLookalike.replace(`${lookalike}@${SHA1}`, `${lookalike}@${SHA2}`) }, 'build(deps): bump notaskalf/ci');
+  const sixth = pickRun();
+  check('a pin whose owner only ends like this repository\'s is another repository\'s: moving it is a change',
+    sixth.r.status === 0 && sixth.out.includes(`sha=${lookalikeBump}\n`), sixth.r.stdout + sixth.r.stderr + sixth.out);
   rmSync(d, { recursive: true, force: true });
 }
 

@@ -11,6 +11,7 @@
 //      node scripts/redline/pin.mjs --action <sha> [note] < watcher.yml > watcher.yml.new
 //      node scripts/redline/pin.mjs --action-pins < watcher.yml
 //      node scripts/redline/pin.mjs --grants <called.yml> < caller.yml
+//      node scripts/redline/pin.mjs --mask < workflow.yml
 //
 // The third form moves the action pins (actions/drift-report in a drift watcher,
 // actions/checkout-with-retry in any workflow), which a workflow carries as steps and not as a
@@ -21,6 +22,10 @@
 // one `scope: level` per line. GitHub refuses to start a called workflow that asks for more than
 // its caller grants (startup_failure, before any job runs), so a pin must never move ahead of
 // the grant it needs.
+// The sixth prints the file with the revision of every pin this script rewrites replaced by PIN
+// and its trailing note dropped, so two versions of a file that differ only in those revisions
+// read the same. The bump's pick step uses it to tell this repository's own pin bump from a
+// change to what a caller runs.
 
 import { readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
@@ -177,6 +182,31 @@ export function bumpActionPins(yaml, sha, note = '') {
     const m = ACTION_PIN.exec(l);
     // The line keeps its path and its ending; the old comment gives way to the note, or to nothing.
     return m ? `${m[1]}${m[2]}@${sha}${note ? ` # ${note}` : ''}${m[5]}` : l;
+  }).join('\n');
+}
+
+// A call to one of this repository's reusable workflows, anchored like ACTION_PIN: the value of a
+// uses: key is exactly one of the CALLERS paths, so another owner's path that ends the same way
+// (notaskalf/ci/...) is not one.
+const CALLER_WORKFLOWS = CALLERS.map((c) => c.workflow.replace(/\./g, '\\.')).join('|');
+const CALLER_PIN = new RegExp(`^(\\s*(?:- )?uses:\\s*)(${CALLER_WORKFLOWS})@([0-9a-f]{40})[ \\t]*(#[^\\r]*)?(\\r?)$`);
+// The redline-ref input bumpCaller keeps in step with the call's pin.
+const REF_PIN = /^(\s*redline-ref:\s*)([0-9a-f]{40})[ \t]*(#[^\r]*)?(\r?)$/;
+
+/**
+ * The workflow's yaml with the revision of each pin this file rewrites (an action pin, a call to
+ * a reusable workflow, a redline-ref input) replaced by PIN and its trailing comment dropped.
+ * Everything else on the line, the indentation, the key and the path included, is kept, so two
+ * versions of a file read the same exactly when they differ only in those revisions and notes.
+ * A pin to any other repository is left as it is.
+ * @param {string} yaml
+ */
+export function maskPins(yaml) {
+  return yaml.split('\n').map((l) => {
+    const m = ACTION_PIN.exec(l) ?? CALLER_PIN.exec(l);
+    if (m) return `${m[1]}${m[2]}@PIN${m[5]}`;
+    const r = REF_PIN.exec(l);
+    return r ? `${r[1]}PIN${r[4]}` : l;
   }).join('\n');
 }
 
@@ -383,6 +413,8 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
     } else if (args[0] === '--action-pins') {
       const pins = actionPins(readFileSync(0, 'utf8'));
       process.stdout.write(pins.map((p) => `${p}\n`).join(''));
+    } else if (args[0] === '--mask') {
+      process.stdout.write(maskPins(readFileSync(0, 'utf8')));
     } else {
       const [sha, note = ''] = args;
       process.stdout.write(bumpCaller(readFileSync(0, 'utf8'), sha ?? '', note));
