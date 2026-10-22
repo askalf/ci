@@ -53,13 +53,15 @@ console.log('\n  --action moves every askalf/ci action pin, each on its own path
 
 console.log('\n  --mask hides only the revision of the pins pin.mjs rewrites');
 {
-  const pinned = (sha, note) => `jobs:\n  review:\n    uses: ${REVIEW_WORKFLOW}@${sha} # ${note}\n    with:\n      redline-ref: ${sha}\n  w:\n    steps:\n      - uses: ${CHECKOUT_RETRY_ACTION}@${sha} # ${note}\n      - uses: actions/setup-node@${sha} # v7\n      - uses: notaskalf/ci/actions/checkout-with-retry@${sha}\n`;
+  const THEIRS = 'c'.repeat(40);
+  const pinned = (sha, note) => `jobs:\n  review:\n    uses: ${REVIEW_WORKFLOW}@${sha} # ${note}\n    with:\n      redline-ref: ${sha}\n  w:\n    steps:\n      - uses: ${CHECKOUT_RETRY_ACTION}@${sha} # ${note}\n      - uses: actions/setup-node@${THEIRS} # v7\n      - uses: notaskalf/ci/actions/checkout-with-retry@${THEIRS}\n`;
   const a = pinned(OLDSHA, 'main 2026-10-01'), b = pinned(NEWSHA, 'main 2026-10-22, askalf/ci#9');
   check('two versions that differ only in those revisions and notes mask the same', maskPins(a) === maskPins(b), maskPins(a) + '\n' + maskPins(b));
   check('the call, the redline-ref and the action keep their key, indentation and path',
     maskPins(a).includes(`    uses: ${REVIEW_WORKFLOW}@PIN\n`) && maskPins(a).includes('      redline-ref: PIN\n') && maskPins(a).includes(`      - uses: ${CHECKOUT_RETRY_ACTION}@PIN\n`), maskPins(a));
   check('a pin to another repository, an owner that only ends the same included, is left as it is',
-    maskPins(a).includes(`actions/setup-node@${OLDSHA} # v7\n`) && maskPins(a).includes(`notaskalf/ci/actions/checkout-with-retry@${OLDSHA}\n`), maskPins(a));
+    maskPins(a).includes(`actions/setup-node@${THEIRS} # v7\n`) && maskPins(a).includes(`notaskalf/ci/actions/checkout-with-retry@${THEIRS}\n`)
+      && maskPins(a) !== maskPins(a.replace(`notaskalf/ci/actions/checkout-with-retry@${THEIRS}`, `notaskalf/ci/actions/checkout-with-retry@${OLDSHA}`)), maskPins(a));
   check('another action of this repository on a pinned line still reads differently',
     maskPins(a) !== maskPins(a.replace(`${CHECKOUT_RETRY_ACTION}@`, `${DRIFT_REPORT_ACTION}@`)));
   check('a CRLF line keeps its carriage return', maskPins(`      - uses: ${CHECKOUT_RETRY_ACTION}@${OLDSHA} # n\r\n`) === `      - uses: ${CHECKOUT_RETRY_ACTION}@PIN\r\n`);
