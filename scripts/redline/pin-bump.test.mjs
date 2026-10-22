@@ -347,7 +347,7 @@ if (spawnSync('bash', ['-c', 'true']).status !== 0 || process.platform === 'win3
   commit({ 'README.md': 'not a path a caller runs\n' }, 'docs');
   const first = pickRun();
   check('the newest commit that changes more than pins is picked, past a bump that moves only this repository\'s pins',
-    first.r.status === 0 && first.out.includes(`sha=${real}\n`) && first.r.stdout.includes('skipped ') && first.r.stdout.includes('it changes only pins to askalf/ci'),
+    first.r.status === 0 && first.out.includes(`sha=${real}\n`) && first.r.stdout.includes('skipped ') && first.r.stdout.includes('it changes only the revisions of pins to askalf/ci'),
     first.r.stdout + first.r.stderr + first.out);
   const mixed = commit({ '.github/workflows/redline-review.yml': review(SHA3, '      - run: echo new step\n') }, 'redline-review: a pin and a new step');
   const second = pickRun();
@@ -357,6 +357,19 @@ if (spawnSync('bash', ['-c', 'true']).status !== 0 || process.platform === 'win3
   const third = pickRun();
   check('a pin to another repository is a change: it alters what a caller runs',
     third.r.status === 0 && third.out.includes(`sha=${other}\n`), third.r.stdout + third.r.stderr + third.out);
+  // Only the revision and its note are masked: the rest of a pinned line still has to match.
+  const cur = review(SHA3, '      - run: echo new step\n').replace(`actions/setup-node@${SHA1}`, `actions/setup-node@${SHA2}`);
+  const swapped = cur.replace(`${CHECKOUT_RETRY_ACTION}@${SHA3}`, `${DRIFT_REPORT_ACTION}@${SHA3}`);
+  const pathChange = commit({ '.github/workflows/redline-review.yml': swapped }, 'redline-review: a pinned step calls another action');
+  const bumped = swapped.replace(`${DRIFT_REPORT_ACTION}@${SHA3} # main 2026-10-20, askalf/ci#1`, `${DRIFT_REPORT_ACTION}@${SHA1} # main 2026-10-22, askalf/ci#9`);
+  commit({ '.github/workflows/redline-review.yml': bumped }, 'ci: bump Redline to askalf/ci@1111111');
+  const fourth = pickRun();
+  check('a commit that changes which action a pinned line calls is a change, though the revision stays',
+    fourth.r.status === 0 && fourth.out.includes(`sha=${pathChange}\n`) && fourth.r.stdout.includes('skipped '), fourth.r.stdout + fourth.r.stderr + fourth.out);
+  const indent = commit({ '.github/workflows/redline-review.yml': bumped.replace(`      - uses: ${DRIFT_REPORT_ACTION}@`, `        - uses: ${DRIFT_REPORT_ACTION}@`) }, 'redline-review: a pinned line moves');
+  const fifth = pickRun();
+  check('a commit that changes the indentation of a pinned line is a change',
+    fifth.r.status === 0 && fifth.out.includes(`sha=${indent}\n`), fifth.r.stdout + fifth.r.stderr + fifth.out);
   rmSync(d, { recursive: true, force: true });
 }
 

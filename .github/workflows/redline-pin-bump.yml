@@ -131,24 +131,41 @@ jobs:
           # under PIN_PATHS (the action pins in redline-review.yml, redline-fix-run.yml and this
           # workflow). Picking that merge would make every wave start the next one: the first
           # callers in CALLERS are bumped again each time and the ones after them are never
-          # reached. So a commit whose every changed line under PIN_PATHS is a pin to this
-          # repository (a uses: <this repo>/...@<sha> line or a redline-ref: <sha> line) is
-          # skipped, and the newest commit with any other change is the one to pin. A pin to
-          # another repository (actions/setup-node@<sha>) is a change: it alters what runs.
+          # reached. So a commit is skipped when every file it changes under PIN_PATHS reads the
+          # same before and after once only the revision of each pin to this repository is
+          # masked: the 40-hex commit after <this repo>/<path>@ on a uses: line or after
+          # redline-ref:, with the note the bump writes after it. Everything else on those lines
+          # (the action path, the indentation, the key) still has to match, so a commit that
+          # changes which action runs is a change. A pin to another repository
+          # (actions/setup-node@<sha>) is never masked: it alters what runs. A file added or
+          # removed is a change. The newest commit that is a change is the one to pin.
+          repo_re="${GITHUB_REPOSITORY//./\\.}"
+          mask() { sed -E "s#(${repo_re}/[^ @]+)@[0-9a-f]{40}( +\#.*)?\$#\1@PIN#; s#(redline-ref: )[0-9a-f]{40}( +\#.*)?\$#\1PIN#"; }
+          # Succeeds when commit $1 changes more than those revisions in a file under PIN_PATHS.
+          # It is called as an if condition, where set -e does not hold, so a file that cannot be
+          # read ends the step by hand instead of comparing as empty and passing for pin-only.
+          changes_more() {
+            local c="$1" f files before after
+            # The root commit has no parent to compare with, so it counts as a change.
+            git rev-parse -q --verify "${c}^" >/dev/null || return 0
+            # shellcheck disable=SC2086
+            files="$(git -c core.quotePath=false diff --name-only "${c}^" "$c" -- $PIN_PATHS)" \
+              || { echo "::error::could not list the files ${c:0:7} changes"; exit 1; }
+            while IFS= read -r f; do
+              [ -n "$f" ] || continue
+              { git cat-file -e "${c}^:${f}" && git cat-file -e "${c}:${f}"; } 2>/dev/null || return 0
+              before="$(git show "${c}^:${f}" | mask)" || { echo "::error::could not read ${f} at ${c:0:7}^"; exit 1; }
+              after="$(git show "${c}:${f}" | mask)" || { echo "::error::could not read ${f} at ${c:0:7}"; exit 1; }
+              [ "$before" = "$after" ] || return 0
+            done <<< "$files"
+            return 1
+          }
           sha="" at=""
           set -f
           # shellcheck disable=SC2086
           while read -r c t; do
-            # The root commit has no parent to compare with, so it counts as a change.
-            if ! git rev-parse -q --verify "${c}^" >/dev/null; then sha="$c"; at="$t"; break; fi
-            # Captured first and filtered with grep -v (which reads all of its input), so no
-            # early exit in the pipe can kill git diff and read as "only pins" under pipefail.
-            # shellcheck disable=SC2086
-            d="$(git diff -U0 "${c}^" "$c" -- $PIN_PATHS)"
-            other="$(printf '%s\n' "$d" | grep -E '^[-+]' | grep -vE '^(\+\+\+|---) (a/|b/|/dev/null)' \
-              | grep -vE "${GITHUB_REPOSITORY}/[^ ]+@[0-9a-f]{40}|redline-ref: [0-9a-f]{40}" || true)"
-            if [ -n "$other" ]; then sha="$c"; at="$t"; break; fi
-            echo "skipped ${c:0:7}: it changes only pins to ${GITHUB_REPOSITORY}"
+            if changes_more "$c"; then sha="$c"; at="$t"; break; fi
+            echo "skipped ${c:0:7}: it changes only the revisions of pins to ${GITHUB_REPOSITORY}"
           done < <(git log --first-parent --format='%H %ct' HEAD -- $PIN_PATHS)
           set +f
           if [ -z "$sha" ]; then echo "::error::no commit under PIN_PATHS changes more than pins"; exit 1; fi
