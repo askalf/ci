@@ -1,5 +1,5 @@
 // Tests for scripts/redline/public-text.mjs. Run: node scripts/redline/public-text.test.mjs
-import { addedLines, dashHits } from './public-text.mjs';
+import { addedByContent, addedLines, check as checkPr, dashHits, needsContent } from './public-text.mjs';
 
 let pass = 0;
 let fail = 0;
@@ -62,6 +62,49 @@ console.log('dashHits');
   check('PR text hits are not file hits', !hits.find((h) => h.where === 'PR title').file);
   check('a changed file with no patch is reported unread, an image with no change is not', JSON.stringify(unread) === '["big.json"]');
   check('a clean PR has no hits', dashHits({ title: 'fix: retry once', body: null, commits: [], files: [] }).hits.length === 0);
+}
+
+console.log('a text file with no patch');
+{
+  check('addedByContent: head lines the base does not hold, by head line number',
+    JSON.stringify(addedByContent('a\nb\nc', 'a\nnew\nb\nc\nb')) === JSON.stringify([{ line: 2, text: 'new' }, { line: 5, text: 'b' }]));
+  check('addedByContent: an added file is all added', addedByContent('', 'x\ny').length === 2 && addedByContent('', 'x\ny')[0].line === 1);
+  const big = { filename: 'data/big.md', status: 'modified', changes: 9000 };
+  check('needsContent: a changed text file with no patch, not a binary or a removed one',
+    JSON.stringify(needsContent([big, { filename: 'a.png', status: 'modified', changes: 0 }, { filename: 'gone.md', status: 'removed', changes: 4 }]).map((f) => f.filename)) === '["data/big.md"]');
+  const read = dashHits({ files: [big], contents: new Map([['data/big.md', { base: `old ${EM} kept\nx`, head: `old ${EM} kept\nx\nnew ${EM} line` }]]) });
+  check('its added lines are read from the base and head: the new dash counts, the kept one does not',
+    read.hits.length === 1 && read.hits[0].line === 3 && read.unread.length === 0);
+  check('a head with a NUL byte is binary and skipped', dashHits({ files: [big], contents: new Map([['data/big.md', { base: '', head: `\0${EM}` }]]) }).hits.length === 0);
+  check('no contents for it: unread', JSON.stringify(dashHits({ files: [big] }).unread) === '["data/big.md"]');
+}
+
+console.log('check, against a stubbed GitHub');
+{
+  const PR = { title: 'docs: grow the table', body: 'More rows.', base: { sha: 'b'.repeat(40) }, head: { sha: 'h'.repeat(40) } };
+  const big = { filename: 'docs/table.md', status: 'modified', changes: 9000 };
+  const world = (raw) => ({
+    repo: 'askalf/x', readToken: 't', sleep: async () => {}, now: () => 0,
+    fetch: async (url) => {
+      const u = new URL(url);
+      const json = (v) => ({ ok: true, status: 200, json: async () => v, text: async () => JSON.stringify(v) });
+      if (u.pathname === '/repos/askalf/x/pulls/5') return json(PR);
+      if (u.pathname === '/repos/askalf/x/pulls/5/files') return json(u.searchParams.get('page') === '1' ? [big] : []);
+      if (u.pathname === '/repos/askalf/x/pulls/5/commits') return json(u.searchParams.get('page') === '1' ? [{ sha: 'c'.repeat(40), commit: { message: 'docs: rows' } }] : []);
+      if (u.pathname === '/repos/askalf/x/contents/.gitattributes') return { ok: false, status: 404, json: async () => ({}), text: async () => 'Not Found' };
+      if (u.pathname === '/repos/askalf/x/contents/docs/table.md') return raw(u.searchParams.get('ref'));
+      return { ok: false, status: 418, json: async () => ({}), text: async () => `unexpected ${url}` };
+    },
+  });
+  const text = (s) => ({ ok: true, status: 200, text: async () => s });
+  const down = { ok: false, status: 500, text: async () => 'boom' };
+  const unreadable = await checkPr(world(() => down), 5);
+  check('a text file with no patch that cannot be read fails the check (2), never passes',
+    unreadable.code === 2 && /Not every added line could be read: docs\/table\.md/.test(unreadable.summary) && unreadable.annotations.some((a) => a.includes('file=docs/table.md')));
+  const dashed = await checkPr(world((ref) => text(ref === PR.base.sha ? 'row\n' : `row\nrow ${EM} two\n`)), 5);
+  check('read whole, its added dash fails the check (1) at its line', dashed.code === 1 && dashed.summary.includes('docs/table.md:2'));
+  const clean = await checkPr(world((ref) => text(ref === PR.base.sha ? `row ${EM} one\n` : `row ${EM} one\nrow two\n`)), 5);
+  check('read whole with only an old dash, it passes (0)', clean.code === 0 && /No added line/.test(clean.summary));
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);
