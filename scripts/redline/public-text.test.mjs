@@ -150,6 +150,11 @@ console.log('check, against a stubbed GitHub');
   const kept = await checkPr(world(diverged), 5);
   check('read whole against the merge base, not the moved base tip: a kept dashed line is not added (0)',
     kept.code === 0 && /No added line/.test(kept.summary));
+  // Both branches added the same dashed line after the PR branched: the base tip has it, the merge base does not.
+  const bothAdded = (ref) => text(ref === MB ? 'row\n' : `row\nrow ${EM} both\n`);
+  const twice = await checkPr(world(bothAdded), 5);
+  check('read whole against the merge base: a dashed line the base branch also added still counts for the PR (1)',
+    twice.code === 1 && twice.summary.includes('docs/table.md:2'));
   const noBase = await checkPr(world(diverged, PR, null), 5);
   check('no merge base to read from: the file is unread (2), never a pass',
     noBase.code === 2 && /Not every added line could be read: docs\/table\.md/.test(noBase.summary));
