@@ -40,7 +40,7 @@ jobs:
           fi
 
       - name: Fetch the check script from askalf/ci
-        uses: askalf/ci/actions/checkout-with-retry@aae8ab88a0fd614bc1a1c738cd12775cabc44904 # main 2026-10-22, askalf/ci#108
+        uses: askalf/ci/actions/checkout-with-retry@81b8fe6715a6608b6295d0722678038afc37a820 # main 2026-10-23, askalf/ci#116
         with:
           repository: askalf/ci
           ref: ${{ inputs.redline-ref }}
