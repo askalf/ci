@@ -259,6 +259,56 @@ esac
       && !out.includes('askalf/f: no .github/workflows/redline.yml') && !calls.includes('pr create --repo askalf/f') && !calls.includes('repos/askalf/f/git/refs'), out + calls);
 }
 
+console.log('\n  this repository as a caller: its public-text.yml is the called workflow');
+if (spawnSync('bash', ['-c', 'true']).status !== 0 || process.platform === 'win32') {
+  console.log('  skip the bump step run: no POSIX bash here');
+} else {
+  // askalf/ci is SOURCE and a caller too. Its redline.yml is a caller already at the commit; its
+  // public-text.yml is the reusable workflow: it calls nothing, but pins checkout-with-retry.
+  const d = mkdtempSync(join(tmpdir(), 'pin-bump-self-'));
+  const own = readFileSync(fileURLToPath(new URL('../../.github/workflows/public-text.yml', import.meta.url)), 'utf8');
+  const stale = own.replace(/(askalf\/ci\/actions\/[a-z-]+@)[0-9a-f]{40}/g, `$1${OLDSHA}`);
+  writeFileSync(join(d, 'gh'), `#!/usr/bin/env bash
+echo "$*" >> "${d}/calls"
+case "$*" in
+  *"commits/${NEWSHA}/pulls"*) ;;
+  "api repos/askalf/ci --jq .default_branch") echo main ;;
+  *"git/ref/heads/main --jq .object.sha") echo tip0000 ;;
+  *"contents/.github/workflows/redline.yml?ref=tip0000 --jq .content") echo "${b64(caller)}" ;;
+  *"contents/.github/workflows/public-text.yml?ref=tip0000 --jq .content") echo "${b64(stale)}" ;;
+  *"contents/.github/workflows/public-text.yml?ref=bot/redline-pin --jq .content") echo "${b64(stale)}" ;;
+  *"contents/.github/workflows/public-text.yml?ref=bot/redline-pin --jq .sha") echo blob1 ;;
+  *"contents/.github/workflows?ref=tip0000 --jq"*) printf '%s\\n' redline.yml public-text.yml ;;
+  "api -X POST repos/askalf/ci/git/refs"*) ;;
+  "api -X PUT repos/askalf/ci/contents/.github/workflows/public-text.yml "*) ;;
+  "pr list"*) ;;
+  "pr create"*) echo https://github.com/askalf/ci/pull/1 ;;
+  *) exit 1 ;;
+esac
+`);
+  chmodSync(join(d, 'gh'), 0o755);
+  mkdirSync(join(d, 'work', 'scripts', 'redline'), { recursive: true });
+  writeFileSync(join(d, 'work', 'scripts', 'redline', 'pin.mjs'), readFileSync(fileURLToPath(new URL('./pin.mjs', import.meta.url))));
+  calledWorkflows(join(d, 'work'));
+  const r = spawnSync('bash', ['-c', script.join('\n')], { encoding: 'utf8', cwd: join(d, 'work'),
+    env: { ...process.env, PATH: `${d}:${process.env.PATH}`, GH_TOKEN: 't', SHA: NEWSHA, SOURCE: 'askalf/ci', CALLERS: 'askalf/ci',
+      BRANCH: 'bot/redline-pin', CALLER_PATHS: '.github/workflows/redline.yml .github/workflows/public-text.yml' } });
+  const calls = existsSync(join(d, 'calls')) ? readFileSync(join(d, 'calls'), 'utf8') : '';
+  rmSync(d, { recursive: true, force: true });
+  const out = r.stdout + r.stderr;
+  const puts = calls.split('\n').filter((l) => l.startsWith('api -X PUT '));
+  const written = Buffer.from(/ content=(\S+)/.exec(puts[0] ?? '')?.[1] ?? '', 'base64').toString();
+  check('the fixture pins an action at the old commit', actionPins(stale).length > 0 && actionPins(stale).every((p) => p === OLDSHA), stale);
+  check('the run is green, opens a PR, and is not told the file has no pinned call',
+    r.status === 0 && !out.includes('::error::') && calls.includes('pr create --repo askalf/ci'), out + calls);
+  check('its public-text.yml is named as the called workflow, not checked as a caller',
+    out.includes('.github/workflows/public-text.yml is the called workflow here: only its action pins are bumped'), out);
+  check('only public-text.yml is written, and every action pin in it moves to the commit',
+    puts.length === 1 && puts[0].startsWith('api -X PUT repos/askalf/ci/contents/.github/workflows/public-text.yml ')
+      && actionPins(written).length === actionPins(stale).length && actionPins(written).every((p) => p === NEWSHA), puts.join('\n') + written);
+  check('the rest of the file is unchanged', written.replace(new RegExp(NEWSHA, 'g'), OLDSHA).replace(/ # [^\n]*/g, '') === stale.replace(/ # [^\n]*/g, ''), written);
+}
+
 console.log('\n  a capped run opens at most CAP bump PRs, in caller order');
 if (spawnSync('bash', ['-c', 'true']).status !== 0 || process.platform === 'win32') {
   console.log('  skip the bump step run: no POSIX bash here');
