@@ -66,8 +66,7 @@
 //     `not ok`, jest/vitest `FAIL`). The names are for reading only: the gate is the exit code.
 //   - The commit is authored and committed as askalf; its message is one sanitised subject line
 //     and no body, checked for trailers before the bundle is written. The review it answers is
-//     the run's `review` input and is in the PR thread; a body that only links it reads as
-//     review history, and Redline blocks that in the PR's own commits.
+//     the run's `review` input.
 //   - The model key is read from FIX_ENV_FILE and sent in a header; it is never printed and never
 //     in argv. With DARIO_SOCKET there is no key: dario's key socket is the credential, and the run
 //     account must not be able to connect to it. The only HTTP made is to api.github.com (reads)
