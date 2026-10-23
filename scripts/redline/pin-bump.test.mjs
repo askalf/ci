@@ -259,6 +259,43 @@ esac
       && !out.includes('askalf/f: no .github/workflows/redline.yml') && !calls.includes('pr create --repo askalf/f') && !calls.includes('repos/askalf/f/git/refs'), out + calls);
 }
 
+console.log('\n  this repository as a caller: its public-text.yml is the called workflow');
+if (spawnSync('bash', ['-c', 'true']).status !== 0 || process.platform === 'win32') {
+  console.log('  skip the bump step run: no POSIX bash here');
+} else {
+  // askalf/ci is SOURCE and a caller too. Its redline.yml is a caller already at the commit; its
+  // public-text.yml is the reusable workflow, which pins nothing and calls nothing.
+  const d = mkdtempSync(join(tmpdir(), 'pin-bump-self-'));
+  const own = readFileSync(fileURLToPath(new URL('../../.github/workflows/public-text.yml', import.meta.url)), 'utf8');
+  writeFileSync(join(d, 'gh'), `#!/usr/bin/env bash
+echo "$*" >> "${d}/calls"
+case "$*" in
+  *"commits/${NEWSHA}/pulls"*) ;;
+  "api repos/askalf/ci --jq .default_branch") echo main ;;
+  *"git/ref/heads/main --jq .object.sha") echo tip0000 ;;
+  *"contents/.github/workflows/redline.yml?ref=tip0000 --jq .content") echo "${b64(caller)}" ;;
+  *"contents/.github/workflows/public-text.yml?ref=tip0000 --jq .content") echo "${b64(own)}" ;;
+  *"contents/.github/workflows?ref=tip0000 --jq"*) printf '%s\\n' redline.yml public-text.yml ;;
+  "pr list"*) ;;
+  *) exit 1 ;;
+esac
+`);
+  chmodSync(join(d, 'gh'), 0o755);
+  mkdirSync(join(d, 'work', 'scripts', 'redline'), { recursive: true });
+  writeFileSync(join(d, 'work', 'scripts', 'redline', 'pin.mjs'), readFileSync(fileURLToPath(new URL('./pin.mjs', import.meta.url))));
+  calledWorkflows(join(d, 'work'));
+  const r = spawnSync('bash', ['-c', script.join('\n')], { encoding: 'utf8', cwd: join(d, 'work'),
+    env: { ...process.env, PATH: `${d}:${process.env.PATH}`, GH_TOKEN: 't', SHA: NEWSHA, SOURCE: 'askalf/ci', CALLERS: 'askalf/ci',
+      BRANCH: 'bot/redline-pin', CALLER_PATHS: '.github/workflows/redline.yml .github/workflows/public-text.yml' } });
+  const calls = existsSync(join(d, 'calls')) ? readFileSync(join(d, 'calls'), 'utf8') : '';
+  rmSync(d, { recursive: true, force: true });
+  const out = r.stdout + r.stderr;
+  check('the run is green and opens nothing: its own caller is already at the commit',
+    r.status === 0 && !out.includes('::error::') && !calls.includes('pr create'), out + calls);
+  check('its public-text.yml is named as the called workflow and never read as a caller',
+    out.includes('.github/workflows/public-text.yml is the called workflow here, not a caller') && !calls.includes('contents/.github/workflows/public-text.yml?ref='), out + calls);
+}
+
 console.log('\n  a capped run opens at most CAP bump PRs, in caller order');
 if (spawnSync('bash', ['-c', 'true']).status !== 0 || process.platform === 'win32') {
   console.log('  skip the bump step run: no POSIX bash here');

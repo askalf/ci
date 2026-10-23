@@ -234,6 +234,15 @@ jobs:
             # the directory listing below, so a caller that is there but could not be read stops this
             # repository's bump instead of passing as absent.
             for path in $CALLER_PATHS; do
+              case "$path" in
+                */redline-fix.yml) called=.github/workflows/redline-fix-run.yml ;;
+                */public-text.yml) called=.github/workflows/public-text.yml ;;
+                *) called=.github/workflows/redline-review.yml ;;
+              esac
+              # In this repository the called workflows sit beside its own callers, and public-text.yml
+              # is both a caller's name and the called workflow's: here it is the called one, which
+              # pins nothing, so it is not read as a caller.
+              if [ "$repo" = "$SOURCE" ] && [ "$path" = "$called" ]; then echo "${path} is the called workflow here, not a caller"; continue; fi
               at="$(uri "$path")"
               if ! current="$(gh api "repos/${repo}/contents/${at}?ref=${tip}" --jq .content 2>/dev/null | base64 -d)"; then
                 absent+=("$path")
@@ -246,11 +255,6 @@ jobs:
               # does not grant: every run ends in startup_failure and no job runs. So a caller that
               # lacks a grant the called workflow at this commit asks for is not bumped, and one
               # already pinned here is reported, until the grant lands in a PR of its own.
-              case "$path" in
-                */redline-fix.yml) called=.github/workflows/redline-fix-run.yml ;;
-                */public-text.yml) called=.github/workflows/public-text.yml ;;
-                *) called=.github/workflows/redline-review.yml ;;
-              esac
               if ! missing="$(printf '%s\n' "$current" | node scripts/redline/pin.mjs --grants "$called")"; then
                 echo "::error::${repo}: could not compare the permissions in ${path} with ${called}"; bad=1; continue
               fi
