@@ -16,7 +16,7 @@ import {
   runAccountUidProblem, TOOLS, FINISH_REQUIRED, askForFinish, checkFinish, runLoop, buildBrief, childEnv, onlyOrigins, runFix,
   LIMITS, OUTCOMES, AUTHOR, FIX_VERSION, DEFAULT_MODEL, SUBJECT_BANNED,
 } from './fix.mjs';
-import { bumpCaller, fixCallerYaml, REVIEW_WORKFLOW, FIX_WORKFLOW, CALLERS } from './pin.mjs';
+import { bumpCaller, fixCallerYaml, REVIEW_WORKFLOW, FIX_WORKFLOW, PUBLIC_TEXT_WORKFLOW, CALLERS } from './pin.mjs';
 
 let pass = 0;
 let fail = 0;
@@ -1486,7 +1486,7 @@ console.log('\n  pin bump, both callers');
   const OLD = '116935d3803fc5904d96efb56991b93539c1714c';
   const note = 'main 2026-09-27, askalf/ci#80';
   const refs = (y) => [...y.matchAll(/redline-ref: (\S+)/g)].map((m) => m[1]);
-  check('the two callers are known by workflow and path', CALLERS.map((c) => c.path).join() === '.github/workflows/redline.yml,.github/workflows/redline-fix.yml' && CALLERS[0].workflow === REVIEW_WORKFLOW && CALLERS[1].workflow === FIX_WORKFLOW);
+  check('the three callers are known by workflow and path', CALLERS.map((c) => c.path).join() === '.github/workflows/redline.yml,.github/workflows/redline-fix.yml,.github/workflows/public-text.yml' && CALLERS[0].workflow === REVIEW_WORKFLOW && CALLERS[1].workflow === FIX_WORKFLOW && CALLERS[2].workflow === PUBLIC_TEXT_WORKFLOW);
   const fixCaller = fixCallerYaml(OLD, 'dario-exec', 'old');
   const b = bumpCaller(fixCaller, NEW, note);
   check('the fix caller: the pin and redline-ref both move, once each', b.includes(`uses: ${FIX_WORKFLOW}@${NEW} # ${note}\n`) && refs(b).join() === NEW && !b.includes(OLD));
@@ -1496,9 +1496,9 @@ console.log('\n  pin bump, both callers');
   const reviewCaller = `name: Redline\n\non:\n  pull_request:\n\njobs:\n  review:\n    uses: ${REVIEW_WORKFLOW}@${OLD} # old\n    with:\n      redline-ref: ${OLD}\n      runner-label: redline\n`;
   const r = bumpCaller(reviewCaller, NEW, note);
   check('the review caller still bumps', r.includes(`uses: ${REVIEW_WORKFLOW}@${NEW} # ${note}\n`) && refs(r).join() === NEW);
-  check('a file that calls neither is refused', (await throws(() => bumpCaller('name: x\n', NEW)))?.message.includes('no askalf/ci/.github/workflows/redline-review.yml or askalf/ci/.github/workflows/redline-fix-run.yml call'));
+  check('a file that calls neither is refused', (await throws(() => bumpCaller('name: x\n', NEW)))?.message.includes('no askalf/ci/.github/workflows/redline-review.yml or askalf/ci/.github/workflows/redline-fix-run.yml or askalf/ci/.github/workflows/public-text.yml call'));
   const bump = readFileSync(fileURLToPath(new URL('../../.github/workflows/redline-pin-bump.yml', import.meta.url)), 'utf8');
-  check('the bump workflow rewrites both caller paths with pin.mjs', /CALLER_PATHS: .*redline\.yml .*redline-fix\.yml/.test(bump.replace(/\n\s+/g, ' ')) && bump.includes('node scripts/redline/pin.mjs "$@" "$SHA" "$note"') && /redline-\(review\|fix-run\)\.yml/.test(bump));
+  check('the bump workflow rewrites every caller path with pin.mjs', /CALLER_PATHS: .*redline\.yml .*redline-fix\.yml .*public-text\.yml/.test(bump.replace(/\n\s+/g, ' ')) && bump.includes('node scripts/redline/pin.mjs "$@" "$SHA" "$note"') && /\(redline-review\|redline-fix-run\|public-text\)\.yml/.test(bump));
   const pinPaths = (/\n      PIN_PATHS: >-\n((?: {8}\S.*\n)+)/.exec(bump)?.[1] ?? '').split(/\s+/).filter(Boolean);
   check('a change to the fix workflow moves the pin', pinPaths.includes('.github/workflows/redline-fix-run.yml'));
   check('the tests, their fixtures and the README move no pin',
@@ -1629,7 +1629,7 @@ esac
     const resetAt = bump.indexOf('-X PATCH "repos/${repo}/git/refs/heads/${BRANCH}"');
     check('an open bump PR that already carries the picked commit is left alone, before any reset',
       skipAt > 0 && resetAt > skipAt
-        && /grep -Eq "redline-\(review\|fix-run\)\.yml@\$\{SHA\}" \|\| ! printf '%s\\n' "\$current" \| grep -q "redline-ref: \$\{SHA\}"/.test(bump)
+        && /grep -Eq "\(redline-review\|redline-fix-run\|public-text\)\.yml@\$\{SHA\}" \|\| ! printf '%s\\n' "\$current" \| grep -q "redline-ref: \$\{SHA\}"/.test(bump)
         && bump.includes('contents/${at}?ref=${BRANCH}'));
   }
   const selfTest = readFileSync(fileURLToPath(new URL('../../.github/workflows/redline-self-test.yml', import.meta.url)), 'utf8');

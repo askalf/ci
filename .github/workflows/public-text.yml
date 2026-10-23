@@ -1,0 +1,59 @@
+# Public text: fails a pull request that adds an em or en dash to an added line, its title or
+# description, or a commit message (scripts/redline/public-text.mjs). The review leaves
+# punctuation to this check, so a dash is caught in seconds and every one shows in a single run.
+# It is its own workflow, apart from the review: the forge posts a Redline verdict only when the
+# review run's conclusion agrees with it, so a failing job inside that run would hold back an
+# approval.
+# It reads the pull request through the API and checks out none of its code, so a fork PR is
+# checked like any other, on a GitHub-hosted runner.
+name: Public text
+
+on:
+  workflow_call:
+    inputs:
+      redline-ref:
+        description: >-
+          The full commit sha of askalf/ci this workflow is called at, the same sha as the
+          caller's uses pin. The check script is fetched at it.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  dashes:
+    if: github.event.pull_request.number
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check the ref is a full commit sha
+        env:
+          REDLINE_REF: ${{ inputs.redline-ref }}
+        run: |
+          if ! [[ "$REDLINE_REF" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::redline-ref must be the full 40-character commit sha the caller pins; got '${REDLINE_REF}'"
+            exit 1
+          fi
+
+      - name: Fetch the check script from askalf/ci
+        uses: askalf/ci/actions/checkout-with-retry@aae8ab88a0fd614bc1a1c738cd12775cabc44904 # main 2026-10-22, askalf/ci#108
+        with:
+          repository: askalf/ci
+          ref: ${{ inputs.redline-ref }}
+          path: .redline
+          sparse-checkout: scripts/redline
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+
+      - name: Check the added text for dashes
+        env:
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          GH_READ_TOKEN: ${{ github.token }}
+        run: node .redline/scripts/redline/public-text.mjs

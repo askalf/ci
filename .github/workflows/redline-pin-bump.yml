@@ -63,12 +63,14 @@ jobs:
       # A bot-shaped branch opened by askalf: the fleet lanes treat it as a bot PR.
       BRANCH: bot/redline-pin
       # The review caller is in every repo but platform; the fix caller only where the fix lane is
-      # wired, so a missing one is skipped, not an error. A repository with neither is still a caller
+      # wired, and the public-text caller where the dash check is, so a missing one is skipped, not
+      # an error. A repository with neither is still a caller
       # when a workflow there pins one of this repository's actions, drift-report or
       # checkout-with-retry (platform, whose own CI gates it, not Redline): it is bumped for those
       # pins alone, and only a repository with no pin at all is wrong.
       CALLER_PATHS: >-
         .github/workflows/redline.yml .github/workflows/redline-fix.yml
+        .github/workflows/public-text.yml
       # What a caller runs: the scripts the reusable workflows fetch, and the workflows. The tests,
       # their fixtures and the README change nothing a caller runs, so they move no pin.
       PIN_PATHS: >-
@@ -83,6 +85,7 @@ jobs:
         actions/checkout-with-retry
         .github/workflows/redline-review.yml
         .github/workflows/redline-fix-run.yml
+        .github/workflows/public-text.yml
         .github/workflows/redline-pin-bump.yml
       QUIET_MINUTES: 60
       WAVE_SIZE: 3
@@ -111,6 +114,7 @@ jobs:
             scripts/redline/pin.mjs
             .github/workflows/redline-review.yml
             .github/workflows/redline-fix-run.yml
+            .github/workflows/public-text.yml
           sparse-checkout-cone-mode: false
           persist-credentials: false
 
@@ -206,7 +210,7 @@ jobs:
           pr="$(gh api "repos/${SOURCE}/commits/${SHA}/pulls" --jq '.[0].number // empty' || true)"
           note="main ${day}"
           if [ -n "$pr" ]; then note="${note}, ${SOURCE}#${pr}"; fi
-          pattern="uses: ${SOURCE}/.github/workflows/redline-(review|fix-run).yml@[0-9a-f]{40}"
+          pattern="uses: ${SOURCE}/.github/workflows/(redline-review|redline-fix-run|public-text).yml@[0-9a-f]{40}"
           title="ci: bump Redline to ${SOURCE}@${short}"
           body="Moves the pinned ${SOURCE} calls and their redline-ref inputs, and every ${SOURCE} action pin (drift-report, checkout-with-retry), to ${SOURCE}@${SHA}, the main commit that last changed the review, the fix or an action (${note}). The scripts are fetched at that same commit. The pins are the only change."
 
@@ -244,6 +248,7 @@ jobs:
               # already pinned here is reported, until the grant lands in a PR of its own.
               case "$path" in
                 */redline-fix.yml) called=.github/workflows/redline-fix-run.yml ;;
+                */public-text.yml) called=.github/workflows/public-text.yml ;;
                 *) called=.github/workflows/redline-review.yml ;;
               esac
               if ! missing="$(printf '%s\n' "$current" | node scripts/redline/pin.mjs --grants "$called")"; then
@@ -253,7 +258,7 @@ jobs:
                 echo "::error::${repo}: ${path} does not grant $(printf '%s' "$missing" | paste -sd, -), which $(basename "$called") at ${short} asks for, so every run there fails at startup; grant it in ${path} first"
                 bad=1; continue
               fi
-              if printf '%s\n' "$current" | grep -Eq "redline-(review|fix-run).yml@${SHA}" && printf '%s\n' "$current" | grep -q "redline-ref: ${SHA}"; then
+              if printf '%s\n' "$current" | grep -Eq "(redline-review|redline-fix-run|public-text).yml@${SHA}" && printf '%s\n' "$current" | grep -q "redline-ref: ${SHA}"; then
                 echo "${path} already at ${short}"; continue
               fi
               todo+=("$path")
@@ -304,7 +309,7 @@ jobs:
               for path in "${todo[@]}"; do
                 at="$(uri "$path")"
                 if ! current="$(gh api "repos/${repo}/contents/${at}?ref=${BRANCH}" --jq .content 2>/dev/null | base64 -d)"; then carried=0; break; fi
-                if ! printf '%s\n' "$current" | grep -Eq "redline-(review|fix-run).yml@${SHA}" || ! printf '%s\n' "$current" | grep -q "redline-ref: ${SHA}"; then carried=0; break; fi
+                if ! printf '%s\n' "$current" | grep -Eq "(redline-review|redline-fix-run|public-text).yml@${SHA}" || ! printf '%s\n' "$current" | grep -q "redline-ref: ${SHA}"; then carried=0; break; fi
               done
               for path in "${atodo[@]}"; do
                 at="$(uri "$path")"
