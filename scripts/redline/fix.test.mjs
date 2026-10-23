@@ -262,7 +262,7 @@ console.log('\n  the commit subject');
   check('trailing punctuation is dropped', commitSubject('reset the cursor.') === 'fix: reset the cursor');
   check('the banned list catches the shapes forge refuses', ['co-authored', 'signed-off', 'Claude', 'GPT', 'Copilot', 'LLM'].every((w) => SUBJECT_BANNED.test(w)));
   check('an attribution trailer in a message is found', hasAttributionTrailer('fix: x\n\nCo-Authored-By: A <a@b>') && hasAttributionTrailer('x\n\nGenerated with a tool') && hasAttributionTrailer('x\nSigned-off-by: a'));
-  check('a clean message has none', !hasAttributionTrailer('fix: reset the cursor\n\nAnswers the review at https://github.com/a/b/pull/1#pullrequestreview-2.'));
+  check('a clean message has none', !hasAttributionTrailer('fix: reset the cursor\n\nThe cursor restarts at zero when the page changes.'));
 }
 
 console.log('\n  notes for the PR comment');
@@ -504,7 +504,7 @@ if (!gitOk) {
     check('the bundle carries HEAD at the new commit, requiring the base', heads.includes(`${r.new_head} HEAD`) && spawnSync('git', ['bundle', 'verify', bundle], { cwd: repo.dir, encoding: 'utf8' }).stdout.includes(repo.head));
     const show = sh(repo.dir, ['log', '-1', '--format=%an%n%ae%n%cn%n%ce%n%B', r.new_head]).split('\n');
     check('authored and committed as askalf', show[0] === AUTHOR.name && show[1] === AUTHOR.email && show[2] === AUTHOR.name && show[3] === AUTHOR.email);
-    check('the message is the subject and the body naming the review, no trailer', show[4] === 'fix: read the token from the config' && show[5] === '' && show[6] === `Answers the review at ${REVIEW_URL}.` && !hasAttributionTrailer(show.slice(4).join('\n')));
+    check('the message is the subject alone, no body, no trailer', show[4] === 'fix: read the token from the config' && show.slice(5).every((l) => l === '') && !hasAttributionTrailer(show.slice(4).join('\n')));
     check('the commit is a fast-forward of the base', sh(repo.dir, ['merge-base', '--is-ancestor', repo.head, r.new_head]) === '');
     const clone = mkdtempSync(join(tmpdir(), 'redline-fix-clone-'));
     sh(clone, ['init', '-q']);
