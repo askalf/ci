@@ -1,7 +1,8 @@
 # Public text: fails a pull request that adds an em or en dash to an added line, its title or
 # description, or a commit message, or whose title, description or a commit message credits a
-# model or an AI tool (scripts/redline/public-text.mjs). The review leaves these to this check, so
-# each is caught in seconds and every one shows in a single run.
+# model or an AI tool (scripts/redline/public-text.mjs). The review leaves dashes to this check,
+# and a credit, which the review also blocks, is caught here in seconds, before a review round;
+# every one shows in a single run.
 # It is its own workflow, apart from the review: the forge posts a Redline verdict only when the
 # review run's conclusion agrees with it, so a failing job inside that run would hold back an
 # approval.
