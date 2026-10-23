@@ -223,7 +223,7 @@ jobs:
           # The files to rewrite are kept in arrays, so a path is never split on its spaces.
           bump() {
             local repo="$1" base tip path at current updated blob bad=0 unread=0 bumped=0 noreview=0 pinned=0 open name listing pins caller out called missing
-            local -a todo=() atodo=() names=() absent=()
+            local -a todo=() atodo=() names=() absent=() own=()
             # Callers are bumped side by side, so each keeps its own file for the rewritten workflow.
             out="$(mktemp)"
             base="$(gh api "repos/${repo}" --jq .default_branch)"
@@ -240,9 +240,12 @@ jobs:
                 *) called=.github/workflows/redline-review.yml ;;
               esac
               # In this repository the called workflows sit beside its own callers, and public-text.yml
-              # is both a caller's name and the called workflow's: here it is the called one, which
-              # pins nothing, so it is not read as a caller.
-              if [ "$repo" = "$SOURCE" ] && [ "$path" = "$called" ]; then echo "${path} is the called workflow here, not a caller"; continue; fi
+              # is both a caller's name and the called workflow's: here it is the called one. It calls
+              # nothing, so it is not read as a caller, but it pins an action like any other workflow,
+              # so the directory pass below reads it for those pins.
+              if [ "$repo" = "$SOURCE" ] && [ "$path" = "$called" ]; then
+                echo "${path} is the called workflow here: only its action pins are bumped"; own+=("$path"); continue
+              fi
               at="$(uri "$path")"
               if ! current="$(gh api "repos/${repo}/contents/${at}?ref=${tip}" --jq .content 2>/dev/null | base64 -d)"; then
                 absent+=("$path")
@@ -288,7 +291,7 @@ jobs:
             for name in "${names[@]}"; do
               path=".github/workflows/${name}"
               for caller in $CALLER_PATHS; do
-                if [ "$caller" = "$path" ]; then continue 2; fi
+                if [ "$caller" = "$path" ] && ! printf '%s\n' "${own[@]}" | grep -qx "$path"; then continue 2; fi
               done
               at="$(uri "$path")"
               if ! current="$(gh api "repos/${repo}/contents/${at}?ref=${tip}" --jq .content | base64 -d)"; then
