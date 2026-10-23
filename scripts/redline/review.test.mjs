@@ -218,6 +218,17 @@ console.log('\n  submission, verdict and body');
   const approveButBlocking = checkSubmission({ verdict: 'APPROVE', summary: 'Looks fine.', findings: [blocking], rule: 'secret-exposure' }).review;
   check('a blocking finding forces REQUEST_CHANGES', finalVerdict(approveButBlocking) === 'REQUEST_CHANGES');
   check('minor findings do not', finalVerdict(checkSubmission({ verdict: 'APPROVE', summary: 's', findings: [{ ...blocking, severity: 'minor' }] }).review) === 'APPROVE');
+  const wording = { ...blocking, rule: 'reads-as-generated', problem: 'The comment narrates the patch.' };
+  const onlyWording = checkSubmission({ verdict: 'REQUEST_CHANGES', summary: 's', findings: [wording], rule: 'reads-as-generated' }).review;
+  check('a wording finding marked blocking is reported as minor, and a review held only by it approves',
+    onlyWording.findings[0].severity === 'minor' && onlyWording.verdict === 'APPROVE' && onlyWording.rule === 'none' && finalVerdict(onlyWording) === 'APPROVE');
+  const withSecret = checkSubmission({ verdict: 'REQUEST_CHANGES', summary: 's', findings: [wording, { ...blocking, rule: 'secret-exposure' }], rule: 'secret-exposure' }).review;
+  check('beside another blocking finding the review still requests changes',
+    withSecret.findings[0].severity === 'minor' && withSecret.findings[1].severity === 'blocking' && finalVerdict(withSecret) === 'REQUEST_CHANGES' && withSecret.rule === 'secret-exposure');
+  check('a review that asks with no blocking finding at all still asks',
+    checkSubmission({ verdict: 'REQUEST_CHANGES', summary: 'Could not read src/a.js.', findings: [] }).review.verdict === 'REQUEST_CHANGES');
+  check('attribution still blocks',
+    finalVerdict(checkSubmission({ verdict: 'REQUEST_CHANGES', summary: 's', findings: [{ ...blocking, rule: 'ai-attribution' }] }).review) === 'REQUEST_CHANGES');
   const body = renderBody(approveButBlocking, 'REQUEST_CHANGES', HEAD, ['a note']);
   check('body opens with the verdict, no header', body.startsWith('**Verdict: request changes.**'));
   check('body never names the reviewer machinery', !/Automated review|gating lane|fleet code reviewer/i.test(body));
@@ -451,9 +462,10 @@ console.log('\n  captured data (redline-protected)');
 }
 {
   const ATTRS = 'src/b.js redline-protected\n';
-  const wording = { ...GOOD, rule: 'reads-as-generated' };
+  // ai-attribution: a wording rule that still blocks anywhere but captured data.
+  const wording = { ...GOOD, rule: 'ai-attribution' };
   const injection = { ...GOOD, problem: 'Interpolates the request path into a shell command; a path with a semicolon runs it.', rule: 'none' };
-  const prose = { verdict: 'REQUEST_CHANGES', summary: 'Punctuation in src/b.js.', findings: [wording], rule: 'reads-as-generated' };
+  const prose = { verdict: 'REQUEST_CHANGES', summary: 'A credit line in src/b.js.', findings: [wording], rule: 'ai-attribution' };
   {
     const { ctx, calls } = world({ attributes: ATTRS, turns: [submit(prose), submit(APPROVE)] });
     const r = await runReview(ctx);

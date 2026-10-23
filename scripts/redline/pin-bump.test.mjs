@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { actionPins, bumpActionPins, CHECKOUT_RETRY_ACTION, countActionPins, DRIFT_REPORT_ACTION, maskPins, missingGrants, permissionsOf, REVIEW_WORKFLOW } from './pin.mjs';
+import { actionPins, bumpActionPins, bumpCaller, CHECKOUT_RETRY_ACTION, countActionPins, DRIFT_REPORT_ACTION, maskPins, missingGrants, permissionsOf, REVIEW_WORKFLOW } from './pin.mjs';
 
 let pass = 0;
 let fail = 0;
@@ -32,7 +32,7 @@ const watcher = `jobs:\n  w:\n    steps:\n      - uses: ${DRIFT_REPORT_ACTION}@$
 // The bump step reads the called workflows from its checkout, as the sparse checkout leaves them.
 function calledWorkflows(work) {
   mkdirSync(join(work, '.github', 'workflows'), { recursive: true });
-  for (const f of ['redline-review.yml', 'redline-fix-run.yml']) {
+  for (const f of ['redline-review.yml', 'redline-fix-run.yml', 'public-text.yml']) {
     writeFileSync(join(work, '.github', 'workflows', f), readFileSync(fileURLToPath(new URL(`../../.github/workflows/${f}`, import.meta.url))));
   }
 }
@@ -143,6 +143,15 @@ console.log('\n  a caller must grant what the called workflow asks for');
   check('this repository\'s own callers grant what its called workflows ask for',
     missingGrants(real('redline.yml'), real('redline-review.yml')).length === 0
       && (!existsSync(fileURLToPath(new URL('../../.github/workflows/redline-fix.yml', import.meta.url))) || missingGrants(real('redline-fix.yml'), real('redline-fix-run.yml')).length === 0));
+}
+
+console.log('\n  a public-text caller moves like the other two');
+{
+  const textCaller = (sha) => `on:\n  pull_request:\npermissions:\n  contents: read\n  pull-requests: read\njobs:\n  dashes:\n    uses: askalf/ci/.github/workflows/public-text.yml@${sha} # main\n    with:\n      redline-ref: ${sha}\n`;
+  check('bumpCaller moves its pin and its redline-ref together',
+    bumpCaller(textCaller(OLDSHA), NEWSHA, 'main') === textCaller(NEWSHA));
+  const real = (f) => readFileSync(fileURLToPath(new URL(`../../.github/workflows/${f}`, import.meta.url)), 'utf8');
+  check('the caller shape grants what public-text.yml asks for', missingGrants(textCaller(NEWSHA), real('public-text.yml')).length === 0);
 }
 
 console.log('\n  a watcher whose file name has a space');

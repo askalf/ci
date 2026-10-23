@@ -291,7 +291,13 @@ export function protectedFromCheckAttr(raw) {
 }
 
 /** The rules whose findings are about wording. Captured data is exempt from these and nothing else. */
-export const PROSE_RULES = new Set(['reads-as-generated', 'ai-attribution']);
+export const PROSE_RULES = new Set(['reads-as-generated', 'ai-attribution', 'misleading-text']);
+/**
+ * The rules whose findings never block: how a sentence reads is a note for the author. Dashes are
+ * public-text.mjs's, a check of its own. Attribution, secrets and a claim the code does not back
+ * still block.
+ */
+export const ADVISORY_RULES = new Set(['reads-as-generated']);
 
 /**
  * The root .gitattributes of the pull request's base commit, '' when the base has none. The marks
@@ -362,8 +368,14 @@ export function checkSubmission(input) {
       return { error: `${where} says "${hit}". The review is public and describes only the change: quote the text or code, say what is wrong with it (the claim the code does not support, the filler sentence, the narrated history), and never mention attribution, generation, the reviewer, its rules or lanes. Rewrite and call redline_submit again.` };
     }
   }
-  const rule = typeof input.rule === 'string' && /^[a-z0-9-]{1,40}$/.test(input.rule) ? input.rule : 'none';
-  return { review: { verdict: input.verdict, summary: input.summary.trim(), findings, rule } };
+  // A wording finding is reported and never blocks, whatever severity the model gave it. A review
+  // that asked for changes only for wording approves; one that asked with no blocking finding at
+  // all (a change it could not read) still asks.
+  const blocked = findings.some((f) => f.severity === 'blocking');
+  const graded = findings.map((f) => (ADVISORY_RULES.has(f.rule) && f.severity === 'blocking' ? { ...f, severity: 'minor' } : f));
+  const eased = input.verdict === 'REQUEST_CHANGES' && blocked && !graded.some((f) => f.severity === 'blocking');
+  const rule = !eased && typeof input.rule === 'string' && /^[a-z0-9-]{1,40}$/.test(input.rule) ? input.rule : 'none';
+  return { review: { verdict: eased ? 'APPROVE' : input.verdict, summary: input.summary.trim(), findings: graded, rule } };
 }
 
 /** Findings the corpus does not back. */
@@ -999,7 +1011,7 @@ export async function runReview(ctx) {
         repairedCaptured = true;
         ctx.log?.(`  ${askAbout.length} finding(s) on captured data: one repair round offered`);
         results.push({ type: 'tool_result', tool_use_id: u.id, is_error: true, content:
-          `These findings are on captured data the repository marks ${PROTECTED_ATTR} (${[...new Set(askAbout.map((f) => f.file))].join(', ')}): its text is copied in and never written by hand, so its wording or punctuation is not a finding. Give each finding there its rule: drop one about wording (reads-as-generated, ai-attribution); keep a correctness or security defect or a secret, with the rule set to that. Then call redline_submit again.` });
+          `These findings are on captured data the repository marks ${PROTECTED_ATTR} (${[...new Set(askAbout.map((f) => f.file))].join(', ')}): its text is copied in and never written by hand, so its wording or punctuation is not a finding. Give each finding there its rule: drop one about wording (reads-as-generated, ai-attribution, misleading-text); keep a correctness or security defect or a secret, with the rule set to that. Then call redline_submit again.` });
         continue;
       }
       const captured = capturedFindings(checked.review, protectedSet);

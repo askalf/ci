@@ -19,12 +19,23 @@ stand-in in `test-fixtures/`. `tools.json` is `TOOLS` as a file, pinned in the r
 drift apart. A finding must quote the diff, the PR text or a commit message, or, for a changed file
 the diff could not show, that file in the checkout. A changed file the base commit's root
 `.gitattributes` marks `redline-protected` (captured payloads, vendored code) is named in the brief
-as captured data: a wording finding on it (its own rule `reads-as-generated` or `ai-attribution`;
-each finding carries a rule) is sent back once and then dropped, since nobody writes that text by
-hand. A correctness or security finding, or a secret, stands there as anywhere, a finding there
+as captured data: a wording finding on it (its own rule `reads-as-generated`, `ai-attribution` or
+`misleading-text`; each finding carries a rule) is sent back once and then dropped, since nobody
+writes that text by hand. A correctness or security finding, or a secret, stands there as anywhere, a finding there
 with no rule is asked about once and then stands, and a mark the pull request itself adds counts
-for nothing until it has merged. `redline_search` runs in a child process killed
+for nothing until it has merged. A `reads-as-generated` finding (how a sentence reads) is minor
+wherever it is, whatever severity the model gave it, and a review that asked for changes only for
+such findings approves. `redline_search` runs in a child process killed
 after 10 seconds, so a pattern that backtracks without end cannot stall the review.
+
+## Dashes: `public-text.yml` and `public-text.mjs`
+
+Each repository's `.github/workflows/public-text.yml` runs on `pull_request` and calls
+`public-text.yml` at a pinned commit, on a GitHub-hosted runner. `public-text.mjs` reads the PR
+through the API (no checkout) and fails when an added line, the title, the description or a commit
+message carries an em or en dash, naming every one. Context and removed lines are never read, and
+captured data is skipped. It is a workflow of its own because forge posts a review only when the
+review run's conclusion agrees with the verdict.
 
 ## The fix: `redline-fix-run.yml` and `fix.mjs`
 

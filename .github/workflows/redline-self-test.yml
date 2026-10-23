@@ -28,6 +28,7 @@ jobs:
         with:
           node-version: 22
       - run: node scripts/redline/review.test.mjs
+      - run: node scripts/redline/public-text.test.mjs
       # The drift-report action's script and the action pin, against a fake gh and git.
       - run: node scripts/drift-report/report.test.mjs
       # The pin bump workflow's bump step, run as the workflow runs it, against a fake gh.
