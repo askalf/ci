@@ -1,5 +1,5 @@
 // Tests for scripts/redline/public-text.mjs. Run: node scripts/redline/public-text.test.mjs
-import { addedByContent, addedLines, check as checkPr, dashHits, needsContent } from './public-text.mjs';
+import { addedByContent, addedLines, check as checkPr, creditHits, dashHits, needsContent } from './public-text.mjs';
 
 let pass = 0;
 let fail = 0;
@@ -62,6 +62,27 @@ console.log('dashHits');
   check('PR text hits are not file hits', !hits.find((h) => h.where === 'PR title').file);
   check('a changed file with no patch is reported unread, an image with no change is not', JSON.stringify(unread) === '["big.json"]');
   check('a clean PR has no hits', dashHits({ title: 'fix: retry once', body: null, commits: [], files: [] }).hits.length === 0);
+}
+
+console.log('creditHits');
+{
+  const robot = String.fromCodePoint(0x1f916);
+  const found = creditHits({
+    title: 'feat: retry once',
+    body: `Retries once.\n\n${robot} Generated with [Claude Code](https://claude.com/claude-code)\n\nhttps://claude.ai/code/session_01ABC`,
+    commits: [
+      { sha: 'abcdef1234567890', commit: { message: 'fix: x\n\nCo-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>' } },
+      { sha: '1234567aaaa', commit: { message: 'fix: y\n\nco-authored-by: GitHub Copilot <copilot@github.com>\nClaude-Session: https://example.test/s' } },
+      { sha: '7777777bbbb', commit: { message: 'fix: z\n\nCo-authored-by: Dana Reyes <dana@example.test>' } },
+    ],
+  });
+  const where = found.map((h) => `${h.where}:${h.line}`);
+  check('a generated-with footer and a session link in the description', where.includes('PR description:3') && where.includes('PR description:5'));
+  check('co-author trailers for a model or a tool, in any case', where.includes('commit abcdef1 message:3') && where.includes('commit 1234567 message:3'));
+  check('a session trailer', where.includes('commit 1234567 message:4'));
+  check('a person as co-author is not a credit', !where.some((w) => w.startsWith('commit 7777777')));
+  check('exactly those five', found.length === 5);
+  check('naming a tool is not crediting it', creditHits({ title: 'fix: the Claude Code adapter drops the Copilot header', body: 'Codex and Gemini requests keep their model name.', commits: [] }).length === 0);
 }
 
 console.log('a text file with no patch');
@@ -133,6 +154,12 @@ console.log('check, against a stubbed GitHub');
   const manyCommits = await checkPr(world(cleanRead, { ...PR, commits: 300 }), 5);
   check('more commits than the commits API lists: incomplete (2), never a pass',
     manyCommits.code === 2 && manyCommits.summary.includes('299 commit message(s) the commits API did not list') && manyCommits.annotations.some((a) => a.includes('listed 1, so 299 commit message(s) were not checked')));
+  const credited = await checkPr(world(cleanRead, { ...PR, changed_files: 1, commits: 1, body: 'More rows.\n\nCo-Authored-By: Claude <noreply@anthropic.com>' }), 5);
+  check('a credit in the description fails the check (1), named in the summary and an annotation',
+    credited.code === 1 && /1 line\(s\) credit a model or an AI tool/.test(credited.summary) && credited.summary.includes('PR description, line 3') && credited.annotations.some((a) => a.includes('PR description, line 3 credits')));
+  const both = await checkPr(world(() => down, { ...PR, title: 'docs: Generated with Claude Code' }), 5);
+  check('a credit with an unread file still fails as a finding (1), and the summary names both',
+    both.code === 1 && /credit a model/.test(both.summary) && /Not every added line could be read/.test(both.summary));
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

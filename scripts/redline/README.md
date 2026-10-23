@@ -28,13 +28,15 @@ wherever it is, whatever severity the model gave it, and a review that asked for
 such findings approves. `redline_search` runs in a child process killed
 after 10 seconds, so a pattern that backtracks without end cannot stall the review.
 
-## Dashes: `public-text.yml` and `public-text.mjs`
+## Dashes and credits: `public-text.yml` and `public-text.mjs`
 
 Each repository's `.github/workflows/public-text.yml` runs on `pull_request` and calls
 `public-text.yml` at a pinned commit, on a GitHub-hosted runner. `public-text.mjs` reads the PR
 through the API (no checkout) and fails when an added line, the title, the description or a commit
-message carries an em or en dash, naming every one. Context and removed lines are never read, and
-captured data is skipped. It is a workflow of its own because forge posts a review only when the
+message carries an em or en dash, or when the title, the description or a commit message credits a
+model or an AI tool (a co-author trailer, a "generated with" footer, a session link), naming every
+one. Credits are read in that text only, since code and docs may name these tools for other
+reasons. Context and removed lines are never read, and captured data is skipped. It is a workflow of its own because forge posts a review only when the
 review run's conclusion agrees with the verdict.
 
 ## The fix: `redline-fix-run.yml` and `fix.mjs`
