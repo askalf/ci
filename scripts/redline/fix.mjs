@@ -65,7 +65,9 @@
 //     fix.json (tests.failing) and the notes name the failed tests the output reports (TAP
 //     `not ok`, jest/vitest `FAIL`). The names are for reading only: the gate is the exit code.
 //   - The commit is authored and committed as askalf; its message is one sanitised subject line
-//     and a body naming the review, checked for trailers before the bundle is written.
+//     and no body, checked for trailers before the bundle is written. The review it answers is
+//     the run's `review` input and is in the PR thread; a body that only links it reads as
+//     review history, and Redline blocks that in the PR's own commits.
 //   - The model key is read from FIX_ENV_FILE and sent in a header; it is never printed and never
 //     in argv. With DARIO_SOCKET there is no key: dario's key socket is the credential, and the run
 //     account must not be able to connect to it. The only HTTP made is to api.github.com (reads)
@@ -1252,7 +1254,7 @@ async function answerReview(ctx) {
     const hooks = join(gitHome, 'no-hooks');
     mkdirSync(hooks, { recursive: true });
     git(root, genv, ['-c', `user.name=${AUTHOR.name}`, '-c', `user.email=${AUTHOR.email}`, '-c', `core.hooksPath=${hooks}`,
-      'commit', '--quiet', '--no-verify', '-m', sub.subject, '-m', `Answers the review at ${ctx.reviewUrl}.`]);
+      'commit', '--quiet', '--no-verify', '-m', sub.subject]);
     const message = git(root, genv, ['log', '-1', '--format=%B']) ?? '';
     if (hasAttributionTrailer(message)) throw new Error('the commit message carries an attribution trailer');
     const newHead = git(root, genv, ['rev-parse', 'HEAD']);
