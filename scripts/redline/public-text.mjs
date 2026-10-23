@@ -1,18 +1,21 @@
 #!/usr/bin/env node
 // Public text: fails a pull request that adds an em or en dash (U+2014, U+2013) to what people
-// read. The review leaves punctuation to this check, which reads every added line, so a dash costs
-// one quick failing check instead of a review round, and every dash shows in one run. Read: the
-// added lines of each changed file, the PR title and description, and the commit messages. Lines
-// the PR does not add are never read, so a file that already holds dashes can still be changed.
-// A file the base commit marks redline-protected (captured data, see review.mjs) is skipped.
+// read, or whose title, description or a commit message credits a model or an AI tool (a
+// co-author trailer, a "generated with" footer, a session link). The review leaves dashes to this
+// check and still blocks a credit itself; this check reads every line, so each costs one quick
+// failing check instead of a review round, and every one shows in one run. Dashes are read in the added lines of each changed file, the PR
+// title and description, and the commit messages; credits only in the PR text and the commit
+// messages, since code and docs may name these tools for other reasons. Lines the PR does not add
+// are never read, so a file that already holds dashes can still be changed. A file the base
+// commit marks redline-protected (captured data, see review.mjs) is skipped.
 //
 // CLI: REPO=owner/name PR=<number> GH_READ_TOKEN=<token> node scripts/redline/public-text.mjs
 // A text file too large for GitHub to send a patch is read whole at the merge base and the head
 // and diffed with git, the same two sides the PR's own diff compares. A PR with more changed files
 // than the files API lists (it stops at 3,000), or more commits than the commits API lists (it
 // stops at 250), is incomplete and fails.
-// Exit 0 when nothing adds a dash, 1 when something does, 2 when the PR or a changed file could
-// not be read: an unread file never passes.
+// Exit 0 when nothing adds a dash or a credit, 1 when something does, 2 when the PR or a changed
+// file could not be read: an unread file never passes.
 
 import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -23,6 +26,58 @@ import { gh, ghAll, baseAttributes, protectedIn, withRetry } from './review.mjs'
 
 // Built from char codes so the source carries no dash of its own.
 const DASH = new RegExp('[' + String.fromCharCode(0x2013, 0x2014) + ']');
+const TOOL = '(claude|anthropic|openai|chatgpt|gpt|copilot|codex|gemini)';
+const CREDIT = [
+  new RegExp(`\\bgenerated (with|by) \\[?${TOOL}\\b`, 'i'),
+  /\bclaude\.ai\/code\/session_/i,
+  /^\s*claude-session:/i,
+];
+// A co-author is a tool when the whole display name is one (a model vendor alone, or an optional
+// vendor, then a tool, then only model words and versions) or the address is one a tool commits as. A person who shares a tool's first
+// name, or works at its vendor, is not.
+const VENDOR = new Set(['anthropic', 'openai', 'github', 'google']);
+const TOOL_NAME = new Set(['claude', 'chatgpt', 'gpt', 'copilot', 'codex', 'gemini']);
+const MODEL_WORD = new Set(['opus', 'sonnet', 'haiku', 'code', 'pro', 'flash', 'ultra', 'nano', 'mini', 'turbo', 'swe', 'agent', 'cli', 'bot']);
+const TOOL_ADDRESS = [
+  /^no-?reply@(anthropic|openai)\.com$/,
+  /^copilot@github\.com$/,
+  /^(\d+\+)?copilot(-swe-agent)?(\[bot\])?@users\.noreply\.github\.com$/,
+];
+
+/** Whether a co-author display name is a tool's identity rather than a person's. Pure. */
+function toolName(name) {
+  const words = name.toLowerCase().replace(/\[bot\]$/, '').split(/[\s-]+/).filter(Boolean);
+  if (!words.length) return false;
+  if (words.length === 1 && /^(anthropic|openai)$/.test(words[0])) return true;
+  if (VENDOR.has(words[0])) words.shift();
+  if (!words.length) return false;
+  const [first, ...rest] = words;
+  const tool = TOOL_NAME.has(first) || /^gpt\d[\w.]*$/.test(first);
+  return tool && rest.every((w) => MODEL_WORD.has(w) || /^v?\d[\w.]*$/.test(w) || /^o\d+$/.test(w));
+}
+
+/** Whether a line is a co-author trailer naming a model or an AI tool. Pure. */
+function creditsCoAuthor(line) {
+  const m = /^\s*co-authored-by:\s*(.*?)\s*(?:<([^>]*)>)?\s*$/i.exec(line);
+  if (!m) return false;
+  return toolName(m[1]) || TOOL_ADDRESS.some((re) => re.test((m[2] ?? '').trim().toLowerCase()));
+}
+
+/** Pushes { where, line, text } onto `hits` for each line of `text` that `test` accepts. */
+function scanLines(hits, where, text, test) {
+  String(text ?? '').replace(/\r\n/g, '\n').split('\n')
+    .forEach((t, i) => { if (test(t)) hits.push({ where, line: i + 1, text: t }); });
+}
+
+/** Every line of the PR title, description or a commit message that credits a model or an AI tool. Pure. */
+export function creditHits({ title = '', body = '', commits = [] }) {
+  const hits = [];
+  const credits = (t) => creditsCoAuthor(t) || CREDIT.some((re) => re.test(t));
+  scanLines(hits, 'PR title', title, credits);
+  scanLines(hits, 'PR description', body, credits);
+  for (const c of commits) scanLines(hits, `commit ${String(c.sha).slice(0, 7)} message`, c.commit?.message, credits);
+  return hits;
+}
 
 /** The lines a unified-diff patch adds, as { line, text } with line numbers in the new file. Pure. */
 export function addedLines(patch) {
@@ -79,11 +134,10 @@ export function needsContent(files, protectedPaths = new Set()) {
  */
 export function dashHits({ title = '', body = '', commits = [], files = [], protectedPaths = new Set(), contents = new Map() }) {
   const hits = [];
-  const scan = (where, text) => String(text ?? '').replace(/\r\n/g, '\n').split('\n')
-    .forEach((t, i) => { if (DASH.test(t)) hits.push({ where, line: i + 1, text: t }); });
-  scan('PR title', title);
-  scan('PR description', body);
-  for (const c of commits) scan(`commit ${String(c.sha).slice(0, 7)} message`, c.commit?.message);
+  const dashed = (t) => DASH.test(t);
+  scanLines(hits, 'PR title', title, dashed);
+  scanLines(hits, 'PR description', body, dashed);
+  for (const c of commits) scanLines(hits, `commit ${String(c.sha).slice(0, 7)} message`, c.commit?.message, dashed);
   const unread = [];
   const wide = new Set(needsContent(files, protectedPaths).map((f) => f.filename));
   for (const f of files) {
@@ -161,17 +215,16 @@ export async function check(ctx, n) {
     annotations.push(`::error::This pull request has ${pr.commits} commits and the commits API listed ${commits.length}, so ${unlistedCommits} commit message(s) were not checked`);
     unread.push(`${unlistedCommits} commit message(s) the commits API did not list`);
   }
-  const lines = [];
-  for (const h of hits) {
-    const at = h.file ? `${h.where}:${h.line}` : `${h.where}, line ${h.line}`;
-    if (h.file) annotations.push(`::error file=${h.where},line=${h.line}::This line adds an em or en dash`);
-    lines.push(`- ${at}: \`${h.text.trim().slice(0, 200).replace(/`/g, "'")}\``);
-  }
-  const summary = hits.length
-    ? `${hits.length} added line(s) carry an em or en dash. Use a comma, colon, semicolon, parentheses or two sentences, and a hyphen for a range.\n\n${lines.join('\n')}\n`
-    : unread.length ? `Not every added line could be read: ${unread.join(', ')}. Re-run the check.\n`
-      : 'No added line carries an em or en dash.\n';
-  return { code: hits.length ? 1 : unread.length ? 2 : 0, summary, annotations };
+  const credits = creditHits({ title: pr.title, body: pr.body, commits });
+  const listOf = (found) => found.map((h) => `- ${h.file ? `${h.where}:${h.line}` : `${h.where}, line ${h.line}`}: \`${h.text.trim().slice(0, 200).replace(/`/g, "'")}\``).join('\n');
+  for (const h of hits) if (h.file) annotations.push(`::error file=${h.where},line=${h.line}::This line adds an em or en dash`);
+  for (const h of credits) annotations.push(`::error::${h.where}, line ${h.line} credits a model or an AI tool`);
+  const parts = [];
+  if (hits.length) parts.push(`${hits.length} added line(s) carry an em or en dash. Use a comma, colon, semicolon, parentheses or two sentences, and a hyphen for a range.\n\n${listOf(hits)}\n`);
+  if (credits.length) parts.push(`${credits.length} line(s) credit a model or an AI tool. Remove them: the account that commits is the author.\n\n${listOf(credits)}\n`);
+  if (unread.length) parts.push(`Not every added line could be read: ${unread.join(', ')}. Re-run the check.\n`);
+  if (!parts.length) parts.push('No added line carries an em or en dash, and nothing credits a model or an AI tool.\n');
+  return { code: hits.length || credits.length ? 1 : unread.length ? 2 : 0, summary: parts.join('\n'), annotations };
 }
 
 async function main() {

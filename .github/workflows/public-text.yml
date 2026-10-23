@@ -1,6 +1,8 @@
 # Public text: fails a pull request that adds an em or en dash to an added line, its title or
-# description, or a commit message (scripts/redline/public-text.mjs). The review leaves
-# punctuation to this check, so a dash is caught in seconds and every one shows in a single run.
+# description, or a commit message, or whose title, description or a commit message credits a
+# model or an AI tool (scripts/redline/public-text.mjs). The review leaves dashes to this check,
+# and a credit, which the review also blocks, is caught here in seconds, before a review round;
+# every one shows in a single run.
 # It is its own workflow, apart from the review: the forge posts a Redline verdict only when the
 # review run's conclusion agrees with it, so a failing job inside that run would hold back an
 # approval.
@@ -23,7 +25,7 @@ permissions:
   pull-requests: read
 
 jobs:
-  dashes:
+  check:
     if: github.event.pull_request.number
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -51,7 +53,7 @@ jobs:
         with:
           node-version: 22
 
-      - name: Check the added text for dashes
+      - name: Check the added text and the credits
         env:
           REPO: ${{ github.repository }}
           PR: ${{ github.event.pull_request.number }}
