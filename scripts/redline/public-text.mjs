@@ -26,13 +26,42 @@ import { gh, ghAll, baseAttributes, protectedIn, withRetry } from './review.mjs'
 
 // Built from char codes so the source carries no dash of its own.
 const DASH = new RegExp('[' + String.fromCharCode(0x2013, 0x2014) + ']');
-const TOOL = '(claude|anthropic|openai|chatgpt|copilot|codex|gemini)';
+const TOOL = '(claude|anthropic|openai|chatgpt|gpt|copilot|codex|gemini)';
 const CREDIT = [
-  new RegExp(`^\\s*co-authored-by:.*\\b${TOOL}\\b`, 'i'),
   new RegExp(`\\bgenerated (with|by) \\[?${TOOL}\\b`, 'i'),
   /\bclaude\.ai\/code\/session_/i,
   /^\s*claude-session:/i,
 ];
+// A co-author is a tool when the whole display name is one (a model vendor alone, or an optional
+// vendor, then a tool, then only model words and versions) or the address is one a tool commits as. A person who shares a tool's first
+// name, or works at its vendor, is not.
+const VENDOR = new Set(['anthropic', 'openai', 'github', 'google']);
+const TOOL_NAME = new Set(['claude', 'chatgpt', 'gpt', 'copilot', 'codex', 'gemini']);
+const MODEL_WORD = new Set(['opus', 'sonnet', 'haiku', 'code', 'pro', 'flash', 'ultra', 'nano', 'mini', 'turbo', 'swe', 'agent', 'cli', 'bot']);
+const TOOL_ADDRESS = [
+  /^no-?reply@(anthropic|openai)\.com$/,
+  /^copilot@github\.com$/,
+  /^(\d+\+)?copilot(-swe-agent)?(\[bot\])?@users\.noreply\.github\.com$/,
+];
+
+/** Whether a co-author display name is a tool's identity rather than a person's. Pure. */
+function toolName(name) {
+  const words = name.toLowerCase().replace(/\[bot\]$/, '').split(/[\s-]+/).filter(Boolean);
+  if (!words.length) return false;
+  if (words.length === 1 && /^(anthropic|openai)$/.test(words[0])) return true;
+  if (VENDOR.has(words[0])) words.shift();
+  if (!words.length) return false;
+  const [first, ...rest] = words;
+  const tool = TOOL_NAME.has(first) || /^gpt\d[\w.]*$/.test(first);
+  return tool && rest.every((w) => MODEL_WORD.has(w) || /^v?\d[\w.]*$/.test(w) || /^o\d+$/.test(w));
+}
+
+/** Whether a line is a co-author trailer naming a model or an AI tool. Pure. */
+function creditsCoAuthor(line) {
+  const m = /^\s*co-authored-by:\s*(.*?)\s*(?:<([^>]*)>)?\s*$/i.exec(line);
+  if (!m) return false;
+  return toolName(m[1]) || TOOL_ADDRESS.some((re) => re.test((m[2] ?? '').trim().toLowerCase()));
+}
 
 /** Pushes { where, line, text } onto `hits` for each line of `text` that `test` accepts. */
 function scanLines(hits, where, text, test) {
@@ -43,7 +72,7 @@ function scanLines(hits, where, text, test) {
 /** Every line of the PR title, description or a commit message that credits a model or an AI tool. Pure. */
 export function creditHits({ title = '', body = '', commits = [] }) {
   const hits = [];
-  const credits = (t) => CREDIT.some((re) => re.test(t));
+  const credits = (t) => creditsCoAuthor(t) || CREDIT.some((re) => re.test(t));
   scanLines(hits, 'PR title', title, credits);
   scanLines(hits, 'PR description', body, credits);
   for (const c of commits) scanLines(hits, `commit ${String(c.sha).slice(0, 7)} message`, c.commit?.message, credits);

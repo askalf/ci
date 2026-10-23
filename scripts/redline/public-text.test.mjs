@@ -83,6 +83,14 @@ console.log('creditHits');
   check('a person as co-author is not a credit', !where.some((w) => w.startsWith('commit 7777777')));
   check('exactly those five', found.length === 5);
   check('naming a tool is not crediting it', creditHits({ title: 'fix: the Claude Code adapter drops the Copilot header', body: 'Codex and Gemini requests keep their model name.', commits: [] }).length === 0);
+  const coAuthor = (trailer) => creditHits({ commits: [{ sha: 'abcdef1', commit: { message: `fix: x\n\n${trailer}` } }] }).length;
+  check('a person named Claude as co-author is not a credit', coAuthor('Co-Authored-By: Claude Martin <claude.martin@example.org>') === 0);
+  check('a person at a model vendor as co-author is not a credit',
+    coAuthor('Co-authored-by: Dana Reyes <dana@anthropic.com>') === 0 && coAuthor('Co-authored-by: Sam Lee <sam@openai.com>') === 0);
+  check('GPT and its versioned names as co-author are credits',
+    coAuthor('Co-Authored-By: GPT <noreply@example.org>') === 1 && coAuthor('Co-authored-by: GPT-4o <x@example.org>') === 1
+      && coAuthor('Co-authored-by: OpenAI GPT-5.5 <x@example.org>') === 1 && coAuthor('Co-authored-by: ChatGPT <x@example.org>') === 1);
+  check('a tool address under a person-like name is a credit', coAuthor('Co-authored-by: Helper <noreply@anthropic.com>') === 1);
 }
 
 console.log('a text file with no patch');
@@ -157,6 +165,10 @@ console.log('check, against a stubbed GitHub');
   const credited = await checkPr(world(cleanRead, { ...PR, changed_files: 1, commits: 1, body: 'More rows.\n\nCo-Authored-By: Claude <noreply@anthropic.com>' }), 5);
   check('a credit in the description fails the check (1), named in the summary and an annotation',
     credited.code === 1 && /1 line\(s\) credit a model or an AI tool/.test(credited.summary) && credited.summary.includes('PR description, line 3') && credited.annotations.some((a) => a.includes('PR description, line 3 credits')));
+  const gpt = await checkPr(world(cleanRead, { ...PR, changed_files: 1, commits: 1, body: 'More rows.\n\nCo-Authored-By: GPT <noreply@example.org>' }), 5);
+  check('a GPT co-author trailer fails the check (1)', gpt.code === 1 && gpt.summary.includes('PR description, line 3'));
+  const person = await checkPr(world(cleanRead, { ...PR, changed_files: 1, commits: 1, body: 'More rows.\n\nCo-Authored-By: Claude Martin <claude.martin@example.org>' }), 5);
+  check('a person named Claude as co-author passes the check (0)', person.code === 0);
   const both = await checkPr(world(() => down, { ...PR, title: 'docs: Generated with Claude Code' }), 5);
   check('a credit with an unread file still fails as a finding (1), and the summary names both',
     both.code === 1 && /credit a model/.test(both.summary) && /Not every added line could be read/.test(both.summary));
