@@ -88,8 +88,10 @@ console.log('a text file with no patch');
 console.log('check, against a stubbed GitHub');
 {
   const PR = { title: 'docs: grow the table', body: 'More rows.', base: { sha: 'b'.repeat(40) }, head: { sha: 'h'.repeat(40) } };
+  // The merge base of the PR's base and head: the base branch has moved on from it.
+  const MB = 'a'.repeat(40);
   const big = { filename: 'docs/table.md', status: 'modified', changes: 9000 };
-  const world = (raw, pr = PR) => ({
+  const world = (raw, pr = PR, mergeBase = MB) => ({
     repo: 'askalf/x', readToken: 't', sleep: async () => {}, now: () => 0,
     fetch: async (url) => {
       const u = new URL(url);
@@ -97,6 +99,9 @@ console.log('check, against a stubbed GitHub');
       if (u.pathname === '/repos/askalf/x/pulls/5') return json(pr);
       if (u.pathname === '/repos/askalf/x/pulls/5/files') return json(u.searchParams.get('page') === '1' ? [big] : []);
       if (u.pathname === '/repos/askalf/x/pulls/5/commits') return json(u.searchParams.get('page') === '1' ? [{ sha: 'c'.repeat(40), commit: { message: 'docs: rows' } }] : []);
+      if (u.pathname === `/repos/askalf/x/compare/${PR.base.sha}...${PR.head.sha}`) {
+        return mergeBase ? json({ merge_base_commit: { sha: mergeBase } }) : { ok: false, status: 404, json: async () => ({}), text: async () => 'Not Found' };
+      }
       if (u.pathname === '/repos/askalf/x/contents/.gitattributes') return { ok: false, status: 404, json: async () => ({}), text: async () => 'Not Found' };
       if (u.pathname === '/repos/askalf/x/contents/docs/table.md') return raw(u.searchParams.get('ref'));
       return { ok: false, status: 418, json: async () => ({}), text: async () => `unexpected ${url}` };
@@ -107,16 +112,27 @@ console.log('check, against a stubbed GitHub');
   const unreadable = await checkPr(world(() => down), 5);
   check('a text file with no patch that cannot be read fails the check (2), never passes',
     unreadable.code === 2 && /Not every added line could be read: docs\/table\.md/.test(unreadable.summary) && unreadable.annotations.some((a) => a.includes('file=docs/table.md')));
-  const dashed = await checkPr(world((ref) => text(ref === PR.base.sha ? 'row\n' : `row\nrow ${EM} two\n`)), 5);
+  const dashed = await checkPr(world((ref) => text(ref === MB ? 'row\n' : `row\nrow ${EM} two\n`)), 5);
   check('read whole, its added dash fails the check (1) at its line', dashed.code === 1 && dashed.summary.includes('docs/table.md:2'));
-  const clean = await checkPr(world((ref) => text(ref === PR.base.sha ? `row ${EM} one\n` : `row ${EM} one\nrow two\n`)), 5);
+  const clean = await checkPr(world((ref) => text(ref === MB ? `row ${EM} one\n` : `row ${EM} one\nrow two\n`)), 5);
   check('read whole with only an old dash, it passes (0)', clean.code === 0 && /No added line/.test(clean.summary));
-  const cleanRead = (ref) => text(ref === PR.base.sha ? 'row\n' : 'row\nrow two\n');
-  const listed = await checkPr(world(cleanRead, { ...PR, changed_files: 1 }), 5);
-  check('every changed file listed: it passes (0)', listed.code === 0);
+  // The merge base holds a dashed line the PR keeps; the base branch deleted it after the PR branched.
+  const diverged = (ref) => text(ref === MB ? `row ${EM} one\nrow\n` : ref === PR.base.sha ? 'row\n' : `row ${EM} one\nrow\nrow two\n`);
+  const kept = await checkPr(world(diverged), 5);
+  check('read whole against the merge base, not the moved base tip: a kept dashed line is not added (0)',
+    kept.code === 0 && /No added line/.test(kept.summary));
+  const noBase = await checkPr(world(diverged, PR, null), 5);
+  check('no merge base to read from: the file is unread (2), never a pass',
+    noBase.code === 2 && /Not every added line could be read: docs\/table\.md/.test(noBase.summary));
+  const cleanRead = (ref) => text(ref === MB ? 'row\n' : 'row\nrow two\n');
+  const listed = await checkPr(world(cleanRead, { ...PR, changed_files: 1, commits: 1 }), 5);
+  check('every changed file and commit listed: it passes (0)', listed.code === 0);
   const capped = await checkPr(world(cleanRead, { ...PR, changed_files: 3500 }), 5);
   check('more changed files than the files API lists: incomplete (2), never a pass',
     capped.code === 2 && capped.summary.includes('3499 changed file(s) the files API did not list') && capped.annotations.some((a) => a.includes('listed 1, so 3499 were not checked')));
+  const manyCommits = await checkPr(world(cleanRead, { ...PR, commits: 300 }), 5);
+  check('more commits than the commits API lists: incomplete (2), never a pass',
+    manyCommits.code === 2 && manyCommits.summary.includes('299 commit message(s) the commits API did not list') && manyCommits.annotations.some((a) => a.includes('listed 1, so 299 commit message(s) were not checked')));
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

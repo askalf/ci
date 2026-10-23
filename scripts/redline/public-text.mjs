@@ -7,9 +7,10 @@
 // A file the base commit marks redline-protected (captured data, see review.mjs) is skipped.
 //
 // CLI: REPO=owner/name PR=<number> GH_READ_TOKEN=<token> node scripts/redline/public-text.mjs
-// A text file too large for GitHub to send a patch is read whole at the base and the head and
-// diffed with git. A PR with more changed files than the files API lists (it stops at 3,000) is
-// incomplete and fails.
+// A text file too large for GitHub to send a patch is read whole at the merge base and the head
+// and diffed with git, the same two sides the PR's own diff compares. A PR with more changed files
+// than the files API lists (it stops at 3,000), or more commits than the commits API lists (it
+// stops at 250), is incomplete and fails.
 // Exit 0 when nothing adds a dash, 1 when something does, 2 when the PR or a changed file could
 // not be read: an unread file never passes.
 
@@ -116,8 +117,22 @@ async function readAt(ctx, path, ref) {
 }
 
 /**
+ * The commit the PR's diff is taken from: the merge base of its base and head, not the base
+ * branch tip, which may have moved on and dropped lines the PR keeps. null when it could not be read.
+ */
+async function mergeBase(ctx, pr) {
+  try {
+    const cmp = await gh(ctx, `/repos/${ctx.repo}/compare/${pr.base.sha}...${pr.head.sha}?per_page=1`);
+    const sha = cmp?.merge_base_commit?.sha;
+    return typeof sha === 'string' && /^[0-9a-f]{40}$/.test(sha) ? sha : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Checks PR `n` and returns { code, summary, annotations }: code 0 clean, 1 a dash, 2 a changed file
- * that could not be read or was not listed. ctx: { repo, readToken, fetch, sleep, now }.
+ * or a commit message that could not be read or was not listed. ctx: { repo, readToken, fetch, sleep, now }.
  */
 export async function check(ctx, n) {
   const pr = await gh(ctx, `/repos/${ctx.repo}/pulls/${n}`);
@@ -125,18 +140,26 @@ export async function check(ctx, n) {
   const commits = await ghAll(ctx, `/repos/${ctx.repo}/pulls/${n}/commits`, 3);
   const protectedPaths = protectedIn(await baseAttributes(ctx, pr), files.map((f) => f.filename));
   const contents = new Map();
-  for (const f of needsContent(files, protectedPaths)) {
-    const base = f.status === 'added' ? '' : await readAt(ctx, f.previous_filename ?? f.filename, pr.base.sha);
+  const wide = needsContent(files, protectedPaths);
+  const from = wide.some((f) => f.status !== 'added') ? await mergeBase(ctx, pr) : null;
+  for (const f of wide) {
+    const base = f.status === 'added' ? '' : from ? await readAt(ctx, f.previous_filename ?? f.filename, from) : null;
     const head = await readAt(ctx, f.filename, pr.head.sha);
     if (base !== null && head !== null) contents.set(f.filename, { base, head });
   }
   const { hits, unread } = dashHits({ title: pr.title, body: pr.body, commits, files, protectedPaths, contents });
   // The files API lists at most 3,000 files; the rest of a larger change was never read.
   const unlisted = Math.max(0, Number(pr.changed_files ?? 0) - files.length);
+  // The commits API lists at most 250 commits; the messages of the rest were never read.
+  const unlistedCommits = Math.max(0, Number(pr.commits ?? 0) - commits.length);
   const annotations = unread.map((u) => `::error file=${u}::GitHub sent no patch for ${u} and its text could not be read, so its added lines are unchecked`);
   if (unlisted) {
     annotations.push(`::error::This pull request changes ${pr.changed_files} files and the files API listed ${files.length}, so ${unlisted} were not checked`);
     unread.push(`${unlisted} changed file(s) the files API did not list`);
+  }
+  if (unlistedCommits) {
+    annotations.push(`::error::This pull request has ${pr.commits} commits and the commits API listed ${commits.length}, so ${unlistedCommits} commit message(s) were not checked`);
+    unread.push(`${unlistedCommits} commit message(s) the commits API did not list`);
   }
   const lines = [];
   for (const h of hits) {
