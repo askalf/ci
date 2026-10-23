@@ -66,9 +66,15 @@ console.log('dashHits');
 
 console.log('a text file with no patch');
 {
-  check('addedByContent: head lines the base does not hold, by head line number',
-    JSON.stringify(addedByContent('a\nb\nc', 'a\nnew\nb\nc\nb')) === JSON.stringify([{ line: 2, text: 'new' }, { line: 5, text: 'b' }]));
+  check('addedByContent: the lines a diff adds, by head line number',
+    JSON.stringify(addedByContent('a\nb\nc\n', 'a\nnew\nb\nc\nb\n')) === JSON.stringify([{ line: 2, text: 'new' }, { line: 5, text: 'b' }]));
   check('addedByContent: an added file is all added', addedByContent('', 'x\ny').length === 2 && addedByContent('', 'x\ny')[0].line === 1);
+  const moved = addedByContent(`## one\nkeep ${EM} me\nfiller\n## two\nmore\n`, `## one\nfiller\n## two\nkeep ${EM} me\nmore\n`);
+  check('addedByContent: a dash line moved to another section is added where it lands',
+    moved.some((a) => a.line === 4 && a.text === `keep ${EM} me`));
+  const dup = addedByContent(`a\nsame ${EM} line\nb\n`, `new\nsame ${EM} line\na\nsame ${EM} line\nb\n`);
+  check('addedByContent: a duplicate inserted before its original is added at its own line',
+    dup.some((a) => a.line === 2 && a.text === `same ${EM} line`) && !dup.some((a) => a.line === 4));
   const big = { filename: 'data/big.md', status: 'modified', changes: 9000 };
   check('needsContent: a changed text file with no patch, not a binary or a removed one',
     JSON.stringify(needsContent([big, { filename: 'a.png', status: 'modified', changes: 0 }, { filename: 'gone.md', status: 'removed', changes: 4 }]).map((f) => f.filename)) === '["data/big.md"]');
@@ -83,12 +89,12 @@ console.log('check, against a stubbed GitHub');
 {
   const PR = { title: 'docs: grow the table', body: 'More rows.', base: { sha: 'b'.repeat(40) }, head: { sha: 'h'.repeat(40) } };
   const big = { filename: 'docs/table.md', status: 'modified', changes: 9000 };
-  const world = (raw) => ({
+  const world = (raw, pr = PR) => ({
     repo: 'askalf/x', readToken: 't', sleep: async () => {}, now: () => 0,
     fetch: async (url) => {
       const u = new URL(url);
       const json = (v) => ({ ok: true, status: 200, json: async () => v, text: async () => JSON.stringify(v) });
-      if (u.pathname === '/repos/askalf/x/pulls/5') return json(PR);
+      if (u.pathname === '/repos/askalf/x/pulls/5') return json(pr);
       if (u.pathname === '/repos/askalf/x/pulls/5/files') return json(u.searchParams.get('page') === '1' ? [big] : []);
       if (u.pathname === '/repos/askalf/x/pulls/5/commits') return json(u.searchParams.get('page') === '1' ? [{ sha: 'c'.repeat(40), commit: { message: 'docs: rows' } }] : []);
       if (u.pathname === '/repos/askalf/x/contents/.gitattributes') return { ok: false, status: 404, json: async () => ({}), text: async () => 'Not Found' };
@@ -105,6 +111,12 @@ console.log('check, against a stubbed GitHub');
   check('read whole, its added dash fails the check (1) at its line', dashed.code === 1 && dashed.summary.includes('docs/table.md:2'));
   const clean = await checkPr(world((ref) => text(ref === PR.base.sha ? `row ${EM} one\n` : `row ${EM} one\nrow two\n`)), 5);
   check('read whole with only an old dash, it passes (0)', clean.code === 0 && /No added line/.test(clean.summary));
+  const cleanRead = (ref) => text(ref === PR.base.sha ? 'row\n' : 'row\nrow two\n');
+  const listed = await checkPr(world(cleanRead, { ...PR, changed_files: 1 }), 5);
+  check('every changed file listed: it passes (0)', listed.code === 0);
+  const capped = await checkPr(world(cleanRead, { ...PR, changed_files: 3500 }), 5);
+  check('more changed files than the files API lists: incomplete (2), never a pass',
+    capped.code === 2 && capped.summary.includes('3499 changed file(s) the files API did not list') && capped.annotations.some((a) => a.includes('listed 1, so 3499 were not checked')));
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

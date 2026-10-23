@@ -7,12 +7,16 @@
 // A file the base commit marks redline-protected (captured data, see review.mjs) is skipped.
 //
 // CLI: REPO=owner/name PR=<number> GH_READ_TOKEN=<token> node scripts/redline/public-text.mjs
-// A text file too large for GitHub to send a patch is read whole at the base and the head, and its
-// added lines are the head lines the base does not hold.
+// A text file too large for GitHub to send a patch is read whole at the base and the head and
+// diffed with git. A PR with more changed files than the files API lists (it stops at 3,000) is
+// incomplete and fails.
 // Exit 0 when nothing adds a dash, 1 when something does, 2 when the PR or a changed file could
 // not be read: an unread file never passes.
 
-import { appendFileSync } from 'node:fs';
+import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 import { gh, ghAll, baseAttributes, protectedIn, withRetry } from './review.mjs';
 
@@ -35,20 +39,26 @@ export function addedLines(patch) {
 }
 
 /**
- * The lines of `head` that `base` does not hold, as { line, text }: each base line matches one
- * equal head line, so a line repeated more often than before counts as added. For a file GitHub
- * sends no patch for (too large). Pure.
+ * The lines `head` adds to `base`, as { line, text }, by the same diff a patch shows: git diff
+ * --no-index in a scratch directory with no global or system config, so no diff driver or textconv
+ * from anywhere reaches the answer. A line moved to another place counts as added there. For a
+ * file GitHub sends no patch for (too large). Throws when git cannot say.
  */
 export function addedByContent(base, head) {
-  const left = new Map();
-  for (const l of String(base ?? '').replace(/\r\n/g, '\n').split('\n')) left.set(l, (left.get(l) ?? 0) + 1);
-  const out = [];
-  String(head ?? '').replace(/\r\n/g, '\n').split('\n').forEach((text, i) => {
-    const n = left.get(text) ?? 0;
-    if (n > 0) left.set(text, n - 1);
-    else out.push({ line: i + 1, text });
-  });
-  return out;
+  const dir = mkdtempSync(join(tmpdir(), 'public-text-'));
+  try {
+    const env = { ...process.env, HOME: dir, XDG_CONFIG_HOME: dir, GIT_CONFIG_NOSYSTEM: '1' };
+    const norm = (s) => String(s ?? '').replace(/\r\n/g, '\n');
+    writeFileSync(join(dir, 'base'), norm(base));
+    writeFileSync(join(dir, 'head'), norm(head));
+    const r = spawnSync('git', ['diff', '--no-index', '--no-ext-diff', '--no-textconv', '--no-color', '--text', '-U0', '--', 'base', 'head'],
+      { cwd: dir, env, encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 });
+    // git diff --no-index exits 1 when the files differ and 0 when they do not; anything else failed.
+    if (r.status !== 0 && r.status !== 1) throw new Error(`git diff failed: ${(r.stderr || r.error?.message || '').trim().slice(0, 200)}`);
+    return addedLines(r.stdout);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 }
 
 /**
@@ -63,7 +73,8 @@ export function needsContent(files, protectedPaths = new Set()) {
 /**
  * Every added dash as { where, line, text, file }, file set for a changed file's line, plus
  * `unread`: the files with no patch whose base and head `contents` (filename to { base, head },
- * from needsContent) could not be read. A head holding a NUL byte is binary and skipped. Pure.
+ * from needsContent) could not be read. A head holding a NUL byte is binary and skipped. Runs git
+ * for a file read whole (addedByContent); otherwise pure.
  */
 export function dashHits({ title = '', body = '', commits = [], files = [], protectedPaths = new Set(), contents = new Map() }) {
   const hits = [];
@@ -106,7 +117,7 @@ async function readAt(ctx, path, ref) {
 
 /**
  * Checks PR `n` and returns { code, summary, annotations }: code 0 clean, 1 a dash, 2 a changed file
- * that could not be read. ctx: { repo, readToken, fetch, sleep, now }.
+ * that could not be read or was not listed. ctx: { repo, readToken, fetch, sleep, now }.
  */
 export async function check(ctx, n) {
   const pr = await gh(ctx, `/repos/${ctx.repo}/pulls/${n}`);
@@ -120,7 +131,13 @@ export async function check(ctx, n) {
     if (base !== null && head !== null) contents.set(f.filename, { base, head });
   }
   const { hits, unread } = dashHits({ title: pr.title, body: pr.body, commits, files, protectedPaths, contents });
+  // The files API lists at most 3,000 files; the rest of a larger change was never read.
+  const unlisted = Math.max(0, Number(pr.changed_files ?? 0) - files.length);
   const annotations = unread.map((u) => `::error file=${u}::GitHub sent no patch for ${u} and its text could not be read, so its added lines are unchecked`);
+  if (unlisted) {
+    annotations.push(`::error::This pull request changes ${pr.changed_files} files and the files API listed ${files.length}, so ${unlisted} were not checked`);
+    unread.push(`${unlisted} changed file(s) the files API did not list`);
+  }
   const lines = [];
   for (const h of hits) {
     const at = h.file ? `${h.where}:${h.line}` : `${h.where}, line ${h.line}`;
