@@ -221,6 +221,10 @@ jobs:
           # One caller repository. Any command that fails ends this repository's bump (set -e
           # holds inside the subshell it runs in), never the loop: the next repository is still bumped.
           # The files to rewrite are kept in arrays, so a path is never split on its spaces.
+          # grep reads a here-string or a process substitution, never a pipe: under pipefail, grep -q
+          # exits on its first match, the writer then fails on the closed pipe, and the pipeline reports
+          # that failure, so a file with a stale pin read as already at the commit (askalf/dario,
+          # 2026-10-23: deployed-version-watch.yml was left out of the bump PR).
           bump() {
             local repo="$1" base tip path at current updated blob bad=0 unread=0 bumped=0 noreview=0 pinned=0 open name listing pins caller out called missing
             local -a todo=() atodo=() names=() absent=() own=()
@@ -251,7 +255,7 @@ jobs:
                 absent+=("$path")
                 continue
               fi
-              if ! printf '%s\n' "$current" | grep -Eq "$pattern"; then
+              if ! grep -Eq "$pattern" <<< "$current"; then
                 echo "::error::${repo}: ${path} has no pinned ${SOURCE} call"; bad=1; continue
               fi
               # GitHub refuses to start a called workflow that asks for a permission its caller
@@ -265,7 +269,7 @@ jobs:
                 echo "::error::${repo}: ${path} does not grant $(printf '%s' "$missing" | paste -sd, -), which $(basename "$called") at ${short} asks for, so every run there fails at startup; grant it in ${path} first"
                 bad=1; continue
               fi
-              if printf '%s\n' "$current" | grep -Eq "(redline-review|redline-fix-run|public-text).yml@${SHA}" && printf '%s\n' "$current" | grep -q "redline-ref: ${SHA}"; then
+              if grep -Eq "(redline-review|redline-fix-run|public-text).yml@${SHA}" <<< "$current" && grep -q "redline-ref: ${SHA}" <<< "$current"; then
                 echo "${path} already at ${short}"; continue
               fi
               todo+=("$path")
@@ -282,7 +286,7 @@ jobs:
             fi
             if [ -n "$listing" ]; then mapfile -t names <<< "$listing"; fi
             for path in "${absent[@]}"; do
-              if printf '%s\n' "${names[@]}" | grep -qx "$(basename "$path")"; then
+              if grep -qx "$(basename "$path")" < <(printf '%s\n' "${names[@]}"); then
                 echo "::error::${repo}: could not read ${path} at ${tip:0:7}"; unread=1; continue
               fi
               if [ "$path" = ".github/workflows/redline.yml" ]; then noreview=1; fi
@@ -291,7 +295,7 @@ jobs:
             for name in "${names[@]}"; do
               path=".github/workflows/${name}"
               for caller in $CALLER_PATHS; do
-                if [ "$caller" = "$path" ] && ! printf '%s\n' "${own[@]}" | grep -qx "$path"; then continue 2; fi
+                if [ "$caller" = "$path" ] && ! grep -qx "$path" < <(printf '%s\n' "${own[@]}"); then continue 2; fi
               done
               at="$(uri "$path")"
               if ! current="$(gh api "repos/${repo}/contents/${at}?ref=${tip}" --jq .content | base64 -d)"; then
@@ -302,7 +306,7 @@ jobs:
               fi
               [ -n "$pins" ] || continue
               pinned=$((pinned + 1))
-              if ! printf '%s\n' "$pins" | grep -vqx "$SHA"; then echo "${path} already at ${short}"; continue; fi
+              if ! grep -vqx "$SHA" <<< "$pins"; then echo "${path} already at ${short}"; continue; fi
               atodo+=("$path")
             done
             if [ "$unread" -ne 0 ]; then echo "::error::${repo}: not every workflow could be read; nothing is bumped here this run"; return 1; fi
@@ -316,13 +320,13 @@ jobs:
               for path in "${todo[@]}"; do
                 at="$(uri "$path")"
                 if ! current="$(gh api "repos/${repo}/contents/${at}?ref=${BRANCH}" --jq .content 2>/dev/null | base64 -d)"; then carried=0; break; fi
-                if ! printf '%s\n' "$current" | grep -Eq "(redline-review|redline-fix-run|public-text).yml@${SHA}" || ! printf '%s\n' "$current" | grep -q "redline-ref: ${SHA}"; then carried=0; break; fi
+                if ! grep -Eq "(redline-review|redline-fix-run|public-text).yml@${SHA}" <<< "$current" || ! grep -q "redline-ref: ${SHA}" <<< "$current"; then carried=0; break; fi
               done
               for path in "${atodo[@]}"; do
                 at="$(uri "$path")"
                 if ! current="$(gh api "repos/${repo}/contents/${at}?ref=${BRANCH}" --jq .content 2>/dev/null | base64 -d)"; then carried=0; break; fi
                 if ! pins="$(printf '%s\n' "$current" | node scripts/redline/pin.mjs --action-pins)" || [ -z "$pins" ]; then carried=0; break; fi
-                if printf '%s\n' "$pins" | grep -vqx "$SHA"; then carried=0; break; fi
+                if grep -vqx "$SHA" <<< "$pins"; then carried=0; break; fi
               done
               if [ "$carried" -eq 1 ]; then echo "#${open} already proposes ${short}"; return "$bad"; fi
             fi

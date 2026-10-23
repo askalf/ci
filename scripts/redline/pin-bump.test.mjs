@@ -259,6 +259,15 @@ esac
       && !out.includes('askalf/f: no .github/workflows/redline.yml') && !calls.includes('pr create --repo askalf/f') && !calls.includes('repos/askalf/f/git/refs'), out + calls);
 }
 
+console.log('\n  under pipefail, grep never reads a pipe');
+{
+  // grep -q exits on its first match; a writer still writing then fails on the closed pipe, and
+  // pipefail reports that failure, so a match reads as no match.
+  const piped = script.filter((l) => /\|\s*grep\b/.test(l) && !l.trim().startsWith('#'));
+  check('the bump step pipes nothing into grep', piped.length === 0, piped.join('\n'));
+  check('the bump step still runs under pipefail', script.some((l) => l.trim() === 'set -euo pipefail'));
+}
+
 console.log('\n  this repository as a caller: its public-text.yml is the called workflow');
 if (spawnSync('bash', ['-c', 'true']).status !== 0 || process.platform === 'win32') {
   console.log('  skip the bump step run: no POSIX bash here');

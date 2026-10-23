@@ -1629,7 +1629,7 @@ esac
     const resetAt = bump.indexOf('-X PATCH "repos/${repo}/git/refs/heads/${BRANCH}"');
     check('an open bump PR that already carries the picked commit is left alone, before any reset',
       skipAt > 0 && resetAt > skipAt
-        && /grep -Eq "\(redline-review\|redline-fix-run\|public-text\)\.yml@\$\{SHA\}" \|\| ! printf '%s\\n' "\$current" \| grep -q "redline-ref: \$\{SHA\}"/.test(bump)
+        && /grep -Eq "\(redline-review\|redline-fix-run\|public-text\)\.yml@\$\{SHA\}" <<< "\$current" \|\| ! grep -q "redline-ref: \$\{SHA\}" <<< "\$current"/.test(bump)
         && bump.includes('contents/${at}?ref=${BRANCH}'));
   }
   const selfTest = readFileSync(fileURLToPath(new URL('../../.github/workflows/redline-self-test.yml', import.meta.url)), 'utf8');
