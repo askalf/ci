@@ -185,6 +185,16 @@ async function mergeBase(ctx, pr) {
 }
 
 /**
+ * The PR description to check: none for a Dependabot PR, whose description quotes the upstream
+ * release notes and commit list, text the repo neither wrote nor can change. Its title, commit
+ * messages and added lines are still checked. Pure.
+ */
+export function ownDescription(pr) {
+  const bot = pr?.user?.type === 'Bot' && pr.user.login === 'dependabot[bot]';
+  return bot ? '' : pr?.body;
+}
+
+/**
  * Checks PR `n` and returns { code, summary, annotations }: code 0 clean, 1 a dash, 2 a changed file
  * or a commit message that could not be read or was not listed. ctx: { repo, readToken, fetch, sleep, now }.
  */
@@ -201,7 +211,8 @@ export async function check(ctx, n) {
     const head = await readAt(ctx, f.filename, pr.head.sha);
     if (base !== null && head !== null) contents.set(f.filename, { base, head });
   }
-  const { hits, unread } = dashHits({ title: pr.title, body: pr.body, commits, files, protectedPaths, contents });
+  const body = ownDescription(pr);
+  const { hits, unread } = dashHits({ title: pr.title, body, commits, files, protectedPaths, contents });
   // The files API lists at most 3,000 files; the rest of a larger change was never read.
   const unlisted = Math.max(0, Number(pr.changed_files ?? 0) - files.length);
   // The commits API lists at most 250 commits; the messages of the rest were never read.
@@ -215,7 +226,7 @@ export async function check(ctx, n) {
     annotations.push(`::error::This pull request has ${pr.commits} commits and the commits API listed ${commits.length}, so ${unlistedCommits} commit message(s) were not checked`);
     unread.push(`${unlistedCommits} commit message(s) the commits API did not list`);
   }
-  const credits = creditHits({ title: pr.title, body: pr.body, commits });
+  const credits = creditHits({ title: pr.title, body, commits });
   const listOf = (found) => found.map((h) => `- ${h.file ? `${h.where}:${h.line}` : `${h.where}, line ${h.line}`}: \`${h.text.trim().slice(0, 200).replace(/`/g, "'")}\``).join('\n');
   for (const h of hits) if (h.file) annotations.push(`::error file=${h.where},line=${h.line}::This line adds an em or en dash`);
   for (const h of credits) annotations.push(`::error::${h.where}, line ${h.line} credits a model or an AI tool`);
