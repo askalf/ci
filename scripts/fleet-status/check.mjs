@@ -251,9 +251,11 @@ export function jobsOf(y) {
     }
     // The matrix values a runs-on expression may read: each key's flow or block list under
     // strategy.matrix. A value that is itself an expression is not a value this check can use.
-    // include entries are expanded over a superset of what Actions makes of them: each one alone,
-    // and each one merged into every base combination in both orders. exclude only removes
-    // combinations, so it is ignored: checking more of them can only fail more.
+    // include entries are applied as Actions applies them, in order: each is added to every base
+    // combination whose original values it does not change, so compatible entries accumulate on one
+    // combination, and an entry that fits none is a combination of its own. exclude only removes
+    // base combinations, so it is ignored, and every entry is also checked alone, which covers one
+    // whose base combinations were all excluded: checking more combinations can only fail more.
     const matrix = {};
     const include = [];
     let readable = true;
@@ -262,26 +264,54 @@ export function jobsOf(y) {
     if (mx && (uncomment(mx.rest) !== '' || !mx.under.length)) readable = false;
     if (mx?.under.length) {
       const keyIndent = indentOf(mx.under[0]);
-      const scalar = (s) => { const x = strip(s); return /\$\{\{|^[[{*&!|>]/.test(x) ? UNREADABLE : x; };
+      // A value as YAML types it, since Actions compares and tests the typed value: quoted is a
+      // string; true, false, null and decimal numbers are what they say. Words and number forms
+      // that YAML versions read differently (yes, on, 0x1f, .inf), mappings, aliases, tags and
+      // escapes are not values this check can use.
+      const scalar = (s) => {
+        const x = uncomment(s).trim();
+        if (/\$\{\{|^[[{*&!|>%@`]/.test(x)) return UNREADABLE;
+        const q = /^'([^']*)'$|^"([^"\\]*)"$/.exec(x);
+        if (q) return q[1] ?? q[2];
+        if (/^['"]/.test(x) || /:(\s|$)/.test(x)) return UNREADABLE;
+        if (/^(true|True|TRUE)$/.test(x)) return true;
+        if (/^(false|False|FALSE)$/.test(x)) return false;
+        if (/^(null|Null|NULL|~|)$/.test(x)) return null;
+        if (/^[-+]?(\.\d+|\d+(\.\d*)?)([eE][-+]?\d+)?$/.test(x)) return Number(x);
+        if (/^(y|n|yes|no|on|off)$/i.test(x) || /^[-+]?(0[xob]|\.(inf|nan)$)/i.test(x) || /^\.(inf|nan)$/i.test(x)) return UNREADABLE;
+        return x;
+      };
+      const flow = (s) => {
+        const x = uncomment(s);
+        if (!/^\[.*\]$/.test(x)) return [UNREADABLE];
+        const items = x.slice(1, -1).split(',').map((i) => i.trim());
+        if (items.length && items[items.length - 1] === '') items.pop();
+        return items.length && !items.includes('') ? items.map(scalar) : [UNREADABLE];
+      };
+      const keysSeen = new Set();
       for (const l of mx.under.filter((x) => indentOf(x) === keyIndent)) {
         const m = /^\s*([\w-]+):\s*(.*)$/.exec(l);
-        if (!m) { readable = false; continue; }
+        if (!m || keysSeen.has(m[1])) { readable = false; continue; }
+        keysSeen.add(m[1]);
         const v = valueIn(mx.under, m[1], keyIndent);
         if (m[1] === 'exclude') continue;
         if (m[1] === 'include') {
           if (uncomment(v.rest) !== '' || !v.under.length) { readable = false; continue; }
           const itemIndent = indentOf(v.under[0]);
+          // An entry's keys sit two columns in, after "- "; anything deeper is a nested value.
           for (const x of v.under) {
-            const item = indentOf(x) === itemIndent ? /^\s*-\s+([\w-]+):\s*(.*)$/.exec(x) : null;
-            const more = indentOf(x) > itemIndent ? /^\s*([\w-]+):\s*(.*)$/.exec(x) : null;
-            if (item) include.push({ [item[1]]: scalar(item[2]) });
-            else if (more && include.length) include[include.length - 1][more[1]] = scalar(more[2]);
+            const item = indentOf(x) === itemIndent ? /^\s*-\s([\w-]+):(?:\s+(.*))?$/.exec(x) : null;
+            const more = indentOf(x) === itemIndent + 2 ? /^\s*([\w-]+):(?:\s+(.*))?$/.exec(x) : null;
+            const entry = include[include.length - 1];
+            if (item && /^\s*- [^\s]/.test(x)) include.push({ [item[1]]: scalar(item[2] ?? '') });
+            else if (more && entry && !(more[1] in entry)) entry[more[1]] = scalar(more[2] ?? '');
             else readable = false;
           }
           continue;
         }
-        const vals = v.rest ? (v.rest.startsWith('[') ? listItems(uncomment(v.rest)) : [scalar(v.rest)])
-          : v.under.map((x) => (/^\s*-\s+/.test(x) ? scalar(x.replace(/^\s*-\s+/, '')) : UNREADABLE));
+        const vals = v.rest ? (v.rest.startsWith('[') ? flow(v.rest) : [UNREADABLE])
+          : v.under.map((x) => (/^\s*-\s/.test(x) && indentOf(x) === indentOf(v.under[0]) ? scalar(x.replace(/^\s*-\s+/, '')) : UNREADABLE));
+        if (!vals.length) readable = false;
         matrix[m[1]] = vals;
       }
     }
@@ -293,11 +323,22 @@ export function jobsOf(y) {
     let combos = [{}];
     if (readable) {
       const keys = [...new Set([...Object.keys(matrix), ...include.flatMap(Object.keys)])];
-      const base = Object.entries(matrix).reduce((acc, [k, vs]) => acc.flatMap((c) => vs.map((v) => ({ ...c, [k]: v }))), [{}]);
-      const raw = [...base, ...include.flatMap((inc) => [inc, ...base.flatMap((c) => [{ ...c, ...inc }, { ...inc, ...c }])])];
+      const hasBase = Object.keys(matrix).length > 0;
+      const base = hasBase ? Object.entries(matrix).reduce((acc, [k, vs]) => acc.flatMap((c) => vs.map((v) => ({ ...c, [k]: v }))), [{}]) : include.length ? [] : [{}];
+      // Whether an entry keeps a combination's original values. Two values that only a loose
+      // comparison calls equal are a match this check cannot settle.
+      const fits = (orig, inc) => Object.entries(inc).every(([k, v]) => {
+        if (!(k in orig) || orig[k] === v) return true;
+        if (String(orig[k]).toLowerCase() === String(v).toLowerCase() || (orig[k] !== null && v !== null && orig[k] !== '' && v !== '' && Number(orig[k]) === Number(v))) readable = false;
+        return false;
+      });
+      const grown = base.map((orig) => ({ orig, cur: { ...orig } }));
+      for (const inc of include) for (const g of grown) if (fits(g.orig, inc)) Object.assign(g.cur, inc);
+      const raw = [...base, ...grown.map((g) => g.cur), ...include];
       const seen = new Set();
       combos = raw.map((c) => Object.fromEntries(keys.map((k) => [k, c[k] ?? null])))
         .filter((c) => { const s = JSON.stringify(c); return !seen.has(s) && seen.add(s); });
+      if (!readable) combos = [{}];
     }
     return { id, cond, expr, labels, combos, hasRunsOn: ro !== null };
   });
