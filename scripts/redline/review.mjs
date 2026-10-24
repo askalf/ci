@@ -131,8 +131,7 @@ export const SUBMIT_REQUIRED = 'The read budget is spent. Your next response mus
 export const LIMITS = {
   diffChars: 180_000, bodyChars: 8_000, commitChars: 600, commits: 100, contextChars: 60_000, earlierReviews: 3, earlierReviewChars: 6_000,
   // filesChars caps the changed files sent in full with the brief; readLines and readBytes cap one
-  // redline_read. Measured 2026-10-24: a review spent most of its turns reading changed files 400
-  // lines at a time, and each turn costs a model round trip.
+  // redline_read. Each read is a model round trip, so a larger range means fewer turns.
   filesChars: 120_000, readLines: 1_000, readBytes: 120_000, listEntries: 400,
   grepResults: 80, grepFiles: 5_000, grepFileBytes: 1_000_000, grepPattern: 200, searchMs: 10_000,
   corpusBytes: 8_000_000,
@@ -790,7 +789,12 @@ export function changedFilesSection(root, files, cap = LIMITS.filesChars) {
     let text;
     try {
       const file = safePath(root, f.filename);
-      if (!lstatSync(file).isFile() || isBinary(file)) continue;
+      const st = lstatSync(file);
+      if (!st.isFile()) continue;
+      // Numbering only lengthens a file, so one whose bytes alone pass what is left of the cap is
+      // named without being read: a huge changed file never reaches memory.
+      if (out.length + st.size > cap) { left.push(f.filename); continue; }
+      if (isBinary(file)) continue;
       text = readFileSync(file, 'utf8');
     } catch { continue; }
     const lines = text.split('\n');

@@ -349,6 +349,12 @@ console.log('\n  changed files sent with the brief');
     changedFilesSection(root, [{ filename: 'src/b.js', status: 'removed' }, { filename: 'src/nope.js', status: 'added' }]) === '');
   const capped = changedFilesSection(root, files, 5);
   check('a file past the cap is named for redline_read instead', !capped.includes('1\t') && capped.includes('read them with redline_read: src/b.js'));
+  const huge = mkdtempSync(join(tmpdir(), 'redline-huge-'));
+  writeFileSync(join(huge, 'big.txt'), 'x\n'.repeat(5_000_000));
+  const big = changedFilesSection(huge, [{ filename: 'big.txt', status: 'added' }]);
+  check('a file whose bytes pass the cap is named without being read or numbered',
+    big.includes('read them with redline_read: big.txt') && !big.includes('1\tx'));
+  rmSync(huge, { recursive: true, force: true });
   const { ctx, calls } = world({ turns: [submit(APPROVE)] });
   await runReview(ctx);
   const first = calls.model[0].messages[0].content;
