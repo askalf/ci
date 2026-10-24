@@ -6,6 +6,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import {
   git, repoFromUrl, changedFiles, fileRecords, gitQuoted, patchOf, branchCommits, baseRef, buildChange, packChange, tarOf, checkChange, reviewLocal, parseArgs,
 } from './local.mjs';
@@ -308,6 +309,18 @@ const unpacked = mkdtempSync(join(tmpdir(), 'redline-local-in-'));
   check('captured data is marked from the base\'s .gitattributes', /redline-protected[^\n]*vendor\.js/.test(first));
   writeFileSync(join(unpacked, 'change.json'), JSON.stringify({ repo: 'a/b' }));
   check('a broken change.json stops before any model call', /full head and base/.test((await throws(() => reviewLocal(ctx, unpacked)))?.message ?? '') && calls.model.length === 2);
+}
+
+console.log('\n  the pack command');
+{
+  // Run outside any repository, with stdout piped as to ssh: GIT_CEILING_DIRECTORIES keeps git from
+  // finding a repository that holds the temporary directory.
+  const outside = mkdtempSync(join(tmpdir(), 'redline-local-out-'));
+  const r = spawnSync(process.execPath, [fileURLToPath(new URL('./local.mjs', import.meta.url)), 'pack'],
+    { cwd: outside, encoding: 'utf8', env: { ...process.env, GIT_CEILING_DIRECTORIES: tmpdir() } });
+  check('pack outside a repository says where to run it, and writes nothing', r.status === 2 && r.stdout === ''
+    && /is not in a git repository; run pack inside the repository whose branch you want reviewed/.test(r.stderr));
+  rmSync(outside, { recursive: true, force: true });
 }
 
 rmSync(repo, { recursive: true, force: true });
