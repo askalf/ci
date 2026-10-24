@@ -69,6 +69,7 @@ import { join, resolve, relative, isAbsolute, sep, dirname } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { request as httpRequest } from 'node:http';
+import { ACTIONS, CALLERS } from './pin.mjs';
 
 export const REVIEWER_LOGIN = 'sprayberry-redline';
 
@@ -819,13 +820,17 @@ export function contextSection(text) {
     cut ? `${t.slice(0, LIMITS.contextChars)}\n[context cut at ${LIMITS.contextChars} characters]` : t].join('\n');
 }
 
-const PIN_CALLERS = new Set(['.github/workflows/redline.yml', '.github/workflows/redline-fix.yml']);
-// The lines pin.mjs writes: the pinned call, the redline-ref input naming the same commit, and comments.
-const PIN_LINE = /^\s*(?:uses: askalf\/ci\/\.github\/workflows\/redline-(?:review|fix-run)\.yml@[0-9a-f]{40}|redline-ref: ['"]?[0-9a-f]{40}['"]?)?\s*(?:#.*)?$/;
-// The line `pin.mjs --action` writes in a workflow: one of askalf/ci's actions (the drift-report
-// step of a watcher, the checkout-with-retry step of any job) pinned to a commit, or a comment. A
-// bump wave moves them together with the Redline pins.
-const ACTION_PIN_LINE = /^\s*(?:(?:- )?uses: askalf\/ci\/actions\/(?:drift-report|checkout-with-retry)@[0-9a-f]{40})?\s*(?:#.*)?$/;
+// The pins come from pin.mjs's own lists, so a caller or an action the bump wave learns to move is
+// a pin here too. A wave that moved a pin missing from a copied list read as a sensitive change
+// and went to the deep model, as the fleet-status actions and the public-text caller did.
+const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&');
+const PIN_CALLERS = new Set(CALLERS.map((c) => c.path));
+// The lines pin.mjs writes in a caller file: a pinned call of one of the reusable workflows, the
+// redline-ref input naming the same commit, and comments.
+const PIN_LINE = new RegExp(`^\\s*(?:uses: (?:${CALLERS.map((c) => escapeRe(c.workflow)).join('|')})@[0-9a-f]{40}|redline-ref: ['"]?[0-9a-f]{40}['"]?)?\\s*(?:#.*)?$`);
+// The line `pin.mjs --action` writes in a workflow: one of askalf/ci's step actions pinned to a
+// commit, or a comment. A bump wave moves them together with the Redline pins.
+const ACTION_PIN_LINE = new RegExp(`^\\s*(?:(?:- )?uses: (?:${ACTIONS.map(escapeRe).join('|')})@[0-9a-f]{40})?\\s*(?:#.*)?$`);
 const WORKFLOW_FILE = /^\.github\/workflows\/[^/]+\.ya?ml$/;
 
 /**
