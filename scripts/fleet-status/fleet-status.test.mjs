@@ -192,6 +192,12 @@ console.log('\n  required CI is the verification where the base branch requires 
     && requiredCiState(['test'], [ok('test')], [{ name: 'test', state: 'pending' }]) === 'pending'
     && requiredCiState(['test'], [ok('test')], [ok('test')]) === 'passed'
     && requiredCiState(['test'], [], [ok('test')]) === 'passed');
+  check('a required check that names its app counts only that app\'s check runs',
+    requiredCiState([{ name: 'test', app: 5 }], [{ ...ok('test'), app: 6 }]) === 'pending'
+    && requiredCiState([{ name: 'test', app: 5 }], [{ ...ok('test'), app: 5 }]) === 'passed'
+    && requiredCiState([{ name: 'test', app: 5 }], [{ name: 'test', state: 'failure', app: 5 }, { ...ok('test'), app: 6 }]) === 'failed'
+    && requiredCiState([{ name: 'test', app: 5 }], [], [ok('test')]) === 'pending'
+    && requiredCiState([{ name: 'test', app: null }], [{ ...ok('test'), app: 6 }]) === 'passed');
   check('skipped and neutral pass', requiredCiState(['a', 'b'], [{ name: 'a', state: 'skipped' }, { name: 'b', state: 'neutral' }]) === 'passed');
   check('checks nobody requires do not hold it', requiredCiState(['test'], [ok('test'), { name: 'fleet/verify', state: 'pending' }]) === 'passed');
 
@@ -342,6 +348,28 @@ console.log('\n  required CI is the verification where the base branch requires 
   const classicOff = run(fixture({ branch: classic('off'), checkRuns: [{ ...passingRun[0], conclusion: 'failure' }] }), '--dry-run');
   check('classic protection that enforces nothing requires nothing',
     classicOff.status === 0 && classicOff.lane(CONTEXTS.verify)[0] === 'success');
+  // A required check that names its app: only that app's check run counts.
+  const APP = 15368;
+  const byApp = (app, conclusion) => ({ id: app, name: 'test', status: 'completed', conclusion, app: { id: app } });
+  const rulesFrom = (app) => [{ type: 'required_status_checks', parameters: { required_status_checks: [{ context: 'test', integration_id: app }] } }];
+  const classicFrom = (app) => ({ protected: true, protection: { enabled: true, required_status_checks: { enforcement_level: 'everyone', contexts: ['test'], checks: [{ context: 'test', app_id: app }] } } });
+  const forkPr = pr({ head: { sha: HEAD, ref: 'feat/x', repo: { full_name: 'else/r' } } });
+  for (const [how, req] of [['a ruleset', { rules: rulesFrom(APP) }], ['classic protection', { branch: classicFrom(APP) }]]) {
+    const wrongApp = run(fixture({ ...req, pr: forkPr, checkRuns: [byApp(999, 'success')] }), '--dry-run');
+    check(`${how}: a passing check of the required name from another app, the required app absent, is pending`,
+      wrongApp.lane(CONTEXTS.verify).join(' ') === `pending Waiting on required CI at ${HEAD.slice(0, 7)}`);
+    const appFailing = run(fixture({ ...req, pr: forkPr, checkRuns: [byApp(APP, 'failure'), byApp(999, 'success')] }), '--dry-run');
+    check(`${how}: the required app failing fails verify, whatever another app reports`,
+      appFailing.lane(CONTEXTS.verify).join(' ') === `failure A required check failed at ${HEAD.slice(0, 7)}`);
+    const appPassing = run(fixture({ ...req, pr: forkPr, checkRuns: [byApp(APP, 'success')] }), '--dry-run');
+    check(`${how}: the required app passing verifies a fork PR`,
+      appPassing.lane(CONTEXTS.verify).join(' ') === `success Required CI passed at ${HEAD.slice(0, 7)}`);
+    const statusOnly = run(fixture({ ...req, pr: forkPr, statuses: [[{ context: 'test', state: 'success' }]] }), '--dry-run');
+    check(`${how}: a commit status cannot stand in for a check the required app must report`,
+      statusOnly.lane(CONTEXTS.verify).join(' ') === `pending Waiting on required CI at ${HEAD.slice(0, 7)}`);
+  }
+  const anyApp = run(fixture({ branch: classicFrom(-1), pr: forkPr, checkRuns: [byApp(999, 'success')] }), '--dry-run');
+  check('classic protection with app_id -1 takes any app', anyApp.lane(CONTEXTS.verify)[0] === 'success');
   const hidden = run(fixture({ branch: { protected: true } }), '--dry-run');
   check('a protected branch that shows no protection leaves verify pending',
     hidden.status === 0 && hidden.lane(CONTEXTS.verify).join(' ') === `pending Waiting on required CI at ${HEAD.slice(0, 7)}`);

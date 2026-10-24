@@ -84,24 +84,28 @@ const CHECK_PASSED = /^(SUCCESS|NEUTRAL|SKIPPED)$/;
  * or is still running), 'failed', or 'passed'. `checks` (check runs) and `statuses` (commit
  * statuses) are each in the order GitHub reported them, and the last result per name counts within
  * each. They are kept apart: when both report a required name, both must pass, so a passing check
- * run never hides a failing status of the same name, or the reverse. The lanes this script posts
- * (CONTEXTS) are never CI: once they are required checks themselves, counting them would leave
- * fleet/verify waiting on itself forever.
- * @param {string[]} required
- * @param {Array<{name:string, state:string}>} checks
+ * run never hides a failing status of the same name, or the reverse. A required check may name
+ * the app that must report it (`app`): then only that app's check runs count, and no commit
+ * status does, since the statuses API does not say which app posted one; until that app reports,
+ * the check is pending. The lanes this script posts (CONTEXTS) are never CI: once they are
+ * required checks themselves, counting them would leave fleet/verify waiting on itself forever.
+ * @param {Array<string|{name:string, app?:number|null}>} required
+ * @param {Array<{name:string, state:string, app?:number|null}>} checks
  * @param {Array<{name:string, state:string}>} [statuses]
  */
 export function requiredCiState(required, checks, statuses = []) {
-  required = required.filter((r) => !OWN_CONTEXTS.has(r));
+  required = required.map((r) => (typeof r === 'string' ? { name: r, app: null } : { name: r.name, app: r.app ?? null }))
+    .filter((r) => !OWN_CONTEXTS.has(r.name));
   if (!required.length) return 'none';
   const lastOf = (list) => {
     const last = new Map();
     for (const c of list) if (c.name) last.set(c.name, String(c.state ?? '').toUpperCase());
     return last;
   };
-  const sources = [lastOf(checks), lastOf(statuses)];
+  const anyApp = [lastOf(checks), lastOf(statuses)];
   let pending = false;
-  for (const r of required) {
+  for (const { name: r, app } of required) {
+    const sources = app === null ? anyApp : [lastOf(checks.filter((c) => (c.app ?? null) === app))];
     const states = sources.filter((m) => m.has(r)).map((m) => m.get(r));
     if (!states.length) { pending = true; continue; }
     if (states.some((s) => s !== '' && !CHECK_WAITING.test(s) && !CHECK_PASSED.test(s))) return 'failed';
@@ -247,20 +251,26 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     // Unreadable rules or checks count as pending, as the dispatcher waits on them; neither can
     // turn fleet/verify green. A branch requires checks two ways, and both count: rulesets, and
     // classic branch protection, whose enforced contexts the branch itself lists. A protected
-    // branch that shows no protection to read is unreadable.
+    // branch that shows no protection to read is unreadable. Each required check keeps the app
+    // that must report it (a ruleset's integration_id, classic protection's app_id; none, or -1,
+    // is any app). Classic protection's contexts list repeats its checks without the app, so it
+    // is read only when there are no checks.
     let required = null;
     try {
       const base = encodeURIComponent(p.base.ref);
       const rules = await (await gh(`/repos/${repo}/rules/branches/${base}?per_page=100`, token)).json();
       const branch = await (await gh(`/repos/${repo}/branches/${base}`, token)).json();
       if (!Array.isArray(rules) || typeof branch?.protected !== 'boolean' || (branch.protected && !branch.protection)) throw new Error('unreadable');
-      const classic = branch.protection?.enabled && branch.protection.required_status_checks
-        && branch.protection.required_status_checks.enforcement_level !== 'off'
-        ? [...(branch.protection.required_status_checks.contexts ?? []),
-          ...(branch.protection.required_status_checks.checks ?? []).map((c) => c.context)]
-        : [];
-      required = [...new Set([...rules.filter((r) => r.type === 'required_status_checks')
-        .flatMap((r) => (r.parameters?.required_status_checks ?? []).map((c) => c.context)), ...classic])];
+      const appOf = (id) => (typeof id === 'number' && id !== -1 ? id : null);
+      const rsc = branch.protection?.enabled && branch.protection.required_status_checks?.enforcement_level !== 'off'
+        ? branch.protection.required_status_checks : null;
+      const classic = !rsc ? []
+        : rsc.checks?.length ? rsc.checks.map((c) => ({ name: c.context, app: appOf(c.app_id) }))
+          : (rsc.contexts ?? []).map((name) => ({ name, app: null }));
+      const ruled = rules.filter((r) => r.type === 'required_status_checks')
+        .flatMap((r) => (r.parameters?.required_status_checks ?? []).map((c) => ({ name: c.context, app: appOf(c.integration_id) })));
+      const seen = new Set();
+      required = [...ruled, ...classic].filter((r) => { const k = `${r.name}\n${r.app}`; return !seen.has(k) && seen.add(k); });
     } catch { required = null; }
     let requiredCi = required === null ? 'pending' : 'none';
     if (required?.length) {
@@ -270,7 +280,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
         const runs = await collectPages(async (n) =>
           (await (await gh(`/repos/${repo}/commits/${p.head.sha}/check-runs?per_page=100&page=${n}`, token)).json()).check_runs ?? []);
         const checks = runs.sort((a, b) => a.id - b.id)
-          .map((c) => ({ name: c.name, state: c.status === 'completed' ? (c.conclusion ?? '') : c.status }));
+          .map((c) => ({ name: c.name, state: c.status === 'completed' ? (c.conclusion ?? '') : c.status, app: c.app?.id ?? null }));
         requiredCi = requiredCiState(required, checks, statuses);
       } catch { requiredCi = 'pending'; }
     }
