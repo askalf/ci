@@ -186,6 +186,12 @@ console.log('\n  required CI is the verification where the base branch requires 
     requiredCiState(REQ, [{ name: 'test', state: 'failure' }, ok('build (22)')]) === 'failed');
   check('the last result per check counts (a rerun that passed)',
     requiredCiState(['test'], [{ name: 'test', state: 'failure' }, ok('test')]) === 'passed');
+  check('a check run and a status of one name are both held to passing',
+    requiredCiState(['test'], [ok('test')], [{ name: 'test', state: 'failure' }]) === 'failed'
+    && requiredCiState(['test'], [{ name: 'test', state: 'failure' }], [ok('test')]) === 'failed'
+    && requiredCiState(['test'], [ok('test')], [{ name: 'test', state: 'pending' }]) === 'pending'
+    && requiredCiState(['test'], [ok('test')], [ok('test')]) === 'passed'
+    && requiredCiState(['test'], [], [ok('test')]) === 'passed');
   check('skipped and neutral pass', requiredCiState(['a', 'b'], [{ name: 'a', state: 'skipped' }, { name: 'b', state: 'neutral' }]) === 'passed');
   check('checks nobody requires do not hold it', requiredCiState(['test'], [ok('test'), { name: 'fleet/verify', state: 'pending' }]) === 'passed');
 
@@ -324,6 +330,13 @@ console.log('\n  required CI is the verification where the base branch requires 
   const running = run(fixture({ rules: requireTest, checkRuns: [{ id: 1, name: 'test', status: 'in_progress', conclusion: null }] }), '--dry-run');
   check('a required check still running is pending, not failed', running.lane(CONTEXTS.verify).join(' ') === `pending Waiting on required CI at ${HEAD.slice(0, 7)}`);
   check('a dry run posts nothing', unreadable.posted.length === 0 && paged.posted.length === 0);
+  const passingRun = [{ id: 1, name: 'test', status: 'completed', conclusion: 'success' }];
+  const failingStatus = run(fixture({ rules: requireTest, statuses: [[{ context: 'test', state: 'failure' }]], checkRuns: passingRun }), '--dry-run');
+  check('a failing status beside a passing check run of the same required name fails verify',
+    failingStatus.status === 0 && failingStatus.lane(CONTEXTS.verify).join(' ') === `failure A required check failed at ${HEAD.slice(0, 7)}`);
+  const failingRun = run(fixture({ rules: requireTest, statuses: [[{ context: 'test', state: 'success' }]], checkRuns: [{ ...passingRun[0], conclusion: 'failure' }] }), '--dry-run');
+  check('a failing check run beside a passing status of the same required name fails verify',
+    failingRun.status === 0 && failingRun.lane(CONTEXTS.verify).join(' ') === `failure A required check failed at ${HEAD.slice(0, 7)}`);
 
   const want = (context, state, description) => ({ context, state, description });
   const settled = [

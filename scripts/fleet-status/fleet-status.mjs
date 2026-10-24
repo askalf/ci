@@ -81,22 +81,31 @@ const CHECK_PASSED = /^(SUCCESS|NEUTRAL|SKIPPED)$/;
 
 /**
  * The head's required checks: 'none' (the branch requires none), 'pending' (one has not reported
- * or is still running), 'failed', or 'passed'. `checks` is in the order GitHub reported them; the
- * last result per name counts. The lanes this script posts (CONTEXTS) are never CI: once they are
- * required checks themselves, counting them would leave fleet/verify waiting on itself forever.
+ * or is still running), 'failed', or 'passed'. `checks` (check runs) and `statuses` (commit
+ * statuses) are each in the order GitHub reported them, and the last result per name counts within
+ * each. They are kept apart: when both report a required name, both must pass, so a passing check
+ * run never hides a failing status of the same name, or the reverse. The lanes this script posts
+ * (CONTEXTS) are never CI: once they are required checks themselves, counting them would leave
+ * fleet/verify waiting on itself forever.
  * @param {string[]} required
  * @param {Array<{name:string, state:string}>} checks
+ * @param {Array<{name:string, state:string}>} [statuses]
  */
-export function requiredCiState(required, checks) {
+export function requiredCiState(required, checks, statuses = []) {
   required = required.filter((r) => !OWN_CONTEXTS.has(r));
   if (!required.length) return 'none';
-  const last = new Map();
-  for (const c of checks) if (c.name) last.set(c.name, String(c.state ?? '').toUpperCase());
+  const lastOf = (list) => {
+    const last = new Map();
+    for (const c of list) if (c.name) last.set(c.name, String(c.state ?? '').toUpperCase());
+    return last;
+  };
+  const sources = [lastOf(checks), lastOf(statuses)];
   let pending = false;
   for (const r of required) {
-    const s = last.get(r) ?? '';
-    if (s === '' || CHECK_WAITING.test(s)) pending = true;
-    else if (!CHECK_PASSED.test(s)) return 'failed';
+    const states = sources.filter((m) => m.has(r)).map((m) => m.get(r));
+    if (!states.length) { pending = true; continue; }
+    if (states.some((s) => s !== '' && !CHECK_WAITING.test(s) && !CHECK_PASSED.test(s))) return 'failed';
+    if (states.some((s) => s === '' || CHECK_WAITING.test(s))) pending = true;
   }
   return pending ? 'pending' : 'passed';
 }
@@ -252,7 +261,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
           (await (await gh(`/repos/${repo}/commits/${p.head.sha}/check-runs?per_page=100&page=${n}`, token)).json()).check_runs ?? []);
         const checks = runs.sort((a, b) => a.id - b.id)
           .map((c) => ({ name: c.name, state: c.status === 'completed' ? (c.conclusion ?? '') : c.status }));
-        requiredCi = requiredCiState(required, [...statuses, ...checks]);
+        requiredCi = requiredCiState(required, checks, statuses);
       } catch { requiredCi = 'pending'; }
     }
     return {

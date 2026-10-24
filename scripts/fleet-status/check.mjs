@@ -449,6 +449,44 @@ export function runsOnKeys(y) {
   return y.split('\n').filter((l) => !/^\s*#/.test(l) && /(^|[\s{,-])["']?runs-on["']?\s*:/.test(uncomment(l))).length;
 }
 
+/**
+ * The triggers fleet-status.yml must have, exactly: each lane is computed on one of these events,
+ * and workflow_run must be on completed, since a required check has its result only when its run
+ * has finished. The workflows list is checked on its own.
+ */
+export const STATUS_TRIGGERS = [
+  'on:',
+  '  pull_request:',
+  '    types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]',
+  '  pull_request_review:',
+  '    types: [submitted, edited, dismissed]',
+  '  issue_comment:',
+  '    types: [created, edited, deleted]',
+  '  workflow_run:',
+  '    workflows: <list>',
+  '    types: [completed]',
+];
+
+/** A workflow's `on:` block as lines, comments and blank lines dropped and the workflows list elided. */
+export function triggerLines(y) {
+  const lines = y.split('\n');
+  const start = lines.findIndex((l) => /^on:/.test(l));
+  if (start < 0) return [];
+  const out = [];
+  for (let i = start; i < lines.length; i++) {
+    const l = lines[i];
+    if (i > start && /^\S/.test(l)) break;
+    if (/^\s*(#.*)?$/.test(l)) continue;
+    if (/^ {4}workflows:/.test(l)) {
+      out.push('    workflows: <list>');
+      while (i + 1 < lines.length && (/^ {5,}\S/.test(lines[i + 1]) || /^\s*(#.*)?$/.test(lines[i + 1]))) i++;
+      continue;
+    }
+    out.push(/^ */.exec(l)[0] + uncomment(l));
+  }
+  return out;
+}
+
 /** The names in a workflow's `workflow_run: workflows: [...]`, or null when it has none. */
 export function workflowRunList(y) {
   const m = /^  workflow_run:\s*\n\s+workflows:\s*\[([^\]]*)\]/m.exec(y);
@@ -523,6 +561,8 @@ export function checkCaller(dir, opts = {}) {
   // The refresh list and the triggers beside it.
   const list = workflowRunList(own);
   check('fleet-status.yml lists workflows to refresh on', (list ?? []).length > 0);
+  check('fleet-status.yml runs on exactly the events its lanes read, and on a listed run completing',
+    triggerLines(own).join('\n') === STATUS_TRIGGERS.join('\n'));
   const missing = misfits(list, beside.map((w) => [w.name, w.y]));
   check(`the workflows that run on pull requests are all listed${missing.length ? ` (missing: ${missing.join(', ')})` : ''}`, missing.length === 0);
   check('the status job accepts workflow_run events from pull_request and pull_request_target runs',
