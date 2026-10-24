@@ -23,6 +23,9 @@
 # was asked for.
 #
 # Not path-filtered: a check from a path-filtered workflow never reports on a PR outside its paths.
+# The `touched` job reads the PR's files instead, and the three jobs run only when the PR changes
+# the action or this workflow; otherwise they report as skipped. They are six jobs on the exec
+# tier, whose slots every repository shares.
 name: checkout-with-retry self-test
 
 on:
@@ -32,7 +35,46 @@ permissions:
   contents: read
 
 jobs:
+  touched:
+    name: does the PR change the action
+    runs-on: ${{ (github.repository != 'askalf/ci' || github.event.pull_request && (github.event.pull_request.head.repo.full_name != github.repository || github.event.pull_request.user.login == 'dependabot[bot]')) && 'ubuntu-latest' || fromJSON('["self-hosted","ci-exec"]') }}
+    timeout-minutes: 2
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      run: ${{ steps.files.outputs.run }}
+    steps:
+      - name: List the PR's files
+        id: files
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -uo pipefail
+          # One line per changed file: its path and, for a rename, the path it left, tab-separated,
+          # so a file moved out of the action counts. A list that cannot be read, or one at GitHub's
+          # 3000-file limit, runs the self-test.
+          if ! records="$(gh api --paginate "repos/${REPO}/pulls/${PR}/files?per_page=100" --jq '.[] | [.filename, (.previous_filename // empty)] | @tsv')"; then
+            echo "::warning::could not list the PR's files; the self-test runs"
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # grep reads to the end (no -q): under pipefail, a reader that stops at the first match
+          # would fail the writer with SIGPIPE and read as no match.
+          if [ "$(grep -c . <<< "$records")" -ge 3000 ] \
+            || tr '\t' '\n' <<< "$records" | grep -E '^(actions/checkout-with-retry/|\.github/workflows/checkout-with-retry-self-test\.yml$)' > /dev/null; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            echo "the PR changes the action or this workflow: the self-test runs"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "the PR changes neither the action nor this workflow: the self-test is skipped"
+          fi
+
   checkout:
+    needs: touched
+    if: needs.touched.outputs.run == 'true'
     # Our own code runs on ci-exec, our non-root one-job runners; a fork's PR and a Dependabot PR
     # run code nobody here wrote, and a fork has no ci-exec runners, so those stay on GitHub's.
     runs-on: ${{ (github.repository != 'askalf/ci' || github.event.pull_request && (github.event.pull_request.head.repo.full_name != github.repository || github.event.pull_request.user.login == 'dependabot[bot]')) && 'ubuntu-latest' || fromJSON('["self-hosted","ci-exec"]') }}
@@ -63,6 +105,8 @@ jobs:
           echo "whole and single-file checkouts through the action OK"
 
   retry:
+    needs: touched
+    if: needs.touched.outputs.run == 'true'
     name: retry path, ${{ matrix.failures }} failing attempt(s)
     runs-on: ${{ (github.repository != 'askalf/ci' || github.event.pull_request && (github.event.pull_request.head.repo.full_name != github.repository || github.event.pull_request.user.login == 'dependabot[bot]')) && 'ubuntu-latest' || fromJSON('["self-hosted","ci-exec"]') }}
     timeout-minutes: 5
@@ -137,6 +181,8 @@ jobs:
           test "$OUTCOME" = "$want_outcome"
 
   act:
+    needs: touched
+    if: needs.touched.outputs.run == 'true'
     name: under act, no attempt runs
     runs-on: ${{ (github.repository != 'askalf/ci' || github.event.pull_request && (github.event.pull_request.head.repo.full_name != github.repository || github.event.pull_request.user.login == 'dependabot[bot]')) && 'ubuntu-latest' || fromJSON('["self-hosted","ci-exec"]') }}
     timeout-minutes: 5
