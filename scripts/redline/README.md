@@ -35,12 +35,15 @@ after 10 seconds, so a pattern that backtracks without end cannot stall the revi
 The same review, of a local branch that has no PR head yet, so a round of findings costs a minute
 instead of a push, a CI run and a dispatch. `local.mjs pack` runs in the repository to review and
 writes a tar to stdout: the change as `review.mjs` reads a PR from GitHub (per-file patches, commits,
-the base commit's `.gitattributes`) and the head's tracked files. With `--pr <n>` it also reads that
-PR's title, description and Redline's earlier requests through `gh`; without it the title is the
-last commit's subject (`--title` and `--body-file` set them). `local.mjs review` runs on the
-runner host, where the env file and the prompt are, and calls the same `reviewChange()` with the
-same model routing and grounding. It posts nothing; it exits 0 on APPROVE, 1 on REQUEST_CHANGES and
-2 when no review finished.
+the base commit's `.gitattributes`) and the head's tracked files. Both are what GitHub and the CI
+checkout hold, whatever the local config says: each patch is its own diff record of the committed
+text in git's default form, from the repository root, and each file is its committed bytes (no
+export, eol or filter attribute applied; a symlink is a file holding its target). With `--pr <n>`
+it also reads that PR's title, description and Redline's earlier requests through `gh`; without
+it the title is the last commit's subject (`--title` and `--body-file` set them). `local.mjs
+review` runs on the runner host, where the env file and the prompt are, and calls the same
+`reviewChange()` with the same model routing and grounding. It posts nothing; it exits 0 on
+APPROVE, 1 on REQUEST_CHANGES and 2 when no review finished.
 
 ```sh
 node <ci checkout>/scripts/redline/local.mjs pack --pr 98 | ssh <runner host> /opt/askalf/redline-local.sh
