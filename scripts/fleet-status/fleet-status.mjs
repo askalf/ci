@@ -245,12 +245,22 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       ghAll(`/repos/${repo}/issues/${pr}/comments`, token),
     ]);
     // Unreadable rules or checks count as pending, as the dispatcher waits on them; neither can
-    // turn fleet/verify green.
+    // turn fleet/verify green. A branch requires checks two ways, and both count: rulesets, and
+    // classic branch protection, whose enforced contexts the branch itself lists. A protected
+    // branch that shows no protection to read is unreadable.
     let required = null;
     try {
-      const rules = await (await gh(`/repos/${repo}/rules/branches/${encodeURIComponent(p.base.ref)}?per_page=100`, token)).json();
-      required = rules.filter((r) => r.type === 'required_status_checks')
-        .flatMap((r) => (r.parameters?.required_status_checks ?? []).map((c) => c.context));
+      const base = encodeURIComponent(p.base.ref);
+      const rules = await (await gh(`/repos/${repo}/rules/branches/${base}?per_page=100`, token)).json();
+      const branch = await (await gh(`/repos/${repo}/branches/${base}`, token)).json();
+      if (!Array.isArray(rules) || typeof branch?.protected !== 'boolean' || (branch.protected && !branch.protection)) throw new Error('unreadable');
+      const classic = branch.protection?.enabled && branch.protection.required_status_checks
+        && branch.protection.required_status_checks.enforcement_level !== 'off'
+        ? [...(branch.protection.required_status_checks.contexts ?? []),
+          ...(branch.protection.required_status_checks.checks ?? []).map((c) => c.context)]
+        : [];
+      required = [...new Set([...rules.filter((r) => r.type === 'required_status_checks')
+        .flatMap((r) => (r.parameters?.required_status_checks ?? []).map((c) => c.context)), ...classic])];
     } catch { required = null; }
     let requiredCi = required === null ? 'pending' : 'none';
     if (required?.length) {

@@ -294,6 +294,7 @@ console.log('\n  required CI is the verification where the base branch requires 
       if (p.endsWith('/reviews')) return json(slice(fx.reviews, url));
       if (p.endsWith('/comments')) return json(slice(fx.comments, url));
       if (p.includes('/rules/branches/')) return fx.rules === null ? json({ message: 'no' }, 500) : json(fx.rules);
+      if (/[/]branches[/][^/]+$/.test(p)) return json(fx.branch ?? { protected: false });
       if (p.endsWith('/statuses')) return json(slice(fx.statuses.length > 1 ? fx.statuses.shift() : fx.statuses[0], url));
       if (p.endsWith('/check-runs')) return json({ check_runs: slice(fx.checkRuns, url) });
       if (/[/]pulls[/][0-9]+$/.test(p)) return json(fx.pr);
@@ -331,6 +332,19 @@ console.log('\n  required CI is the verification where the base branch requires 
   check('a required check still running is pending, not failed', running.lane(CONTEXTS.verify).join(' ') === `pending Waiting on required CI at ${HEAD.slice(0, 7)}`);
   check('a dry run posts nothing', unreadable.posted.length === 0 && paged.posted.length === 0);
   const passingRun = [{ id: 1, name: 'test', status: 'completed', conclusion: 'success' }];
+  const classic = (enforcement_level = 'non_admins') => ({ protected: true, protection: { enabled: true, required_status_checks: { enforcement_level, contexts: ['test'], checks: [{ context: 'test', app_id: null }] } } });
+  const classicFailing = run(fixture({ branch: classic(), checkRuns: [{ ...passingRun[0], conclusion: 'failure' }] }), '--dry-run');
+  check('a check classic branch protection requires, failing, fails verify though the label and comment are there',
+    classicFailing.status === 0 && classicFailing.lane(CONTEXTS.verify).join(' ') === `failure A required check failed at ${HEAD.slice(0, 7)}`);
+  const classicPassing = run(fixture({ branch: classic(), checkRuns: passingRun, pr: pr({ head: { sha: HEAD, ref: 'feat/x', repo: { full_name: 'else/r' } } }) }), '--dry-run');
+  check('a fork PR whose classic required check passed is verified',
+    classicPassing.status === 0 && classicPassing.lane(CONTEXTS.verify).join(' ') === `success Required CI passed at ${HEAD.slice(0, 7)}`);
+  const classicOff = run(fixture({ branch: classic('off'), checkRuns: [{ ...passingRun[0], conclusion: 'failure' }] }), '--dry-run');
+  check('classic protection that enforces nothing requires nothing',
+    classicOff.status === 0 && classicOff.lane(CONTEXTS.verify)[0] === 'success');
+  const hidden = run(fixture({ branch: { protected: true } }), '--dry-run');
+  check('a protected branch that shows no protection leaves verify pending',
+    hidden.status === 0 && hidden.lane(CONTEXTS.verify).join(' ') === `pending Waiting on required CI at ${HEAD.slice(0, 7)}`);
   const failingStatus = run(fixture({ rules: requireTest, statuses: [[{ context: 'test', state: 'failure' }]], checkRuns: passingRun }), '--dry-run');
   check('a failing status beside a passing check run of the same required name fails verify',
     failingStatus.status === 0 && failingStatus.lane(CONTEXTS.verify).join(' ') === `failure A required check failed at ${HEAD.slice(0, 7)}`);
@@ -423,6 +437,7 @@ console.log('\n  fork PRs through the CLI, against a stubbed GitHub');
       if (p.endsWith('/reviews')) return json(fx.reviews);
       if (p.endsWith('/comments')) return json([]);
       if (p.includes('/rules/branches/')) return json(fx.rules);
+      if (/[/]branches[/][^/]+$/.test(p)) return json(fx.branch ?? { protected: false });
       if (p.endsWith('/statuses')) return json([...posted].reverse());
       if (p.endsWith('/check-runs')) return json({ check_runs: fx.checkRuns });
       if (/[/]pulls[/]7$/.test(p)) return json(fx.pr);

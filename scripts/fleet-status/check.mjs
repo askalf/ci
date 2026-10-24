@@ -487,6 +487,20 @@ export function triggerLines(y) {
   return out;
 }
 
+/**
+ * Whether a workflow's last job ends in a `steps:` block that is exactly one `- uses:` of `action`
+ * at a full sha, whose only other key is `with:` holding exactly `inputs`, one line each.
+ */
+export function onlyStep(y, action, inputs) {
+  const at = y.lastIndexOf('\n    steps:\n');
+  if (at < 0) return false;
+  const m = new RegExp(`^ {6}- uses: ${action.replace(/[.]/g, '\\.')}@[0-9a-f]{40}(?: #[^\\n]*)?\\n {8}with:\\n((?: {10}[\\w-]+: [^\\n]*\\n)+)\\s*$`)
+    .exec(y.slice(at + '\n    steps:\n'.length));
+  if (!m) return false;
+  const keys = [...m[1].matchAll(/^ {10}([\w-]+):/gm)].map((k) => k[1]);
+  return keys.length === inputs.length && inputs.every((k) => keys.includes(k));
+}
+
 /** The names in a workflow's `workflow_run: workflows: [...]`, or null when it has none. */
 export function workflowRunList(y) {
   const m = /^  workflow_run:\s*\n\s+workflows:\s*\[([^\]]*)\]/m.exec(y);
@@ -619,6 +633,10 @@ export function checkCaller(dir, opts = {}) {
 
   // The invariant that lets a fork run here: the job runs the pinned action and nothing else.
   const step = stepWith(own, STATUS_ACTION) ?? '';
+  // The steps end the file and are exactly the one pinned step: a step-level if: could skip it,
+  // and any other input could change what it posts (all-open ignores the PR it was given).
+  check('the status job\'s one step is the pinned action with exactly pr, head-repo and head-branch, and no other key',
+    onlyStep(own, STATUS_ACTION, ['pr', 'head-repo', 'head-branch']));
   check(`the status job runs ${STATUS_ACTION} at a full commit sha, and no other action`,
     usesOf(own).length === 1 && new RegExp(`^${STATUS_ACTION}@[0-9a-f]{40}$`).test(usesOf(own)[0] ?? ''));
   check('the status job has no run step', !/^\s+(?:- )?run:/im.test(own));
@@ -657,6 +675,8 @@ export function checkCaller(dir, opts = {}) {
     check('the backfill runs on a dispatch alone', /^\s+workflow_dispatch:/m.test(onBlock(backfill.y)) && onBlock(backfill.y).replace(/\s+/g, ' ').trim() === 'workflow_dispatch:');
     check(`the backfill runs ${STATUS_ACTION} over every open PR, and nothing else`,
       usesOf(backfill.y).length === 1 && /all-open: ['"]?true['"]?/.test(bstep) && !/^\s+(?:- )?run:/im.test(backfill.y));
+    check('the backfill\'s one step is the pinned action with all-open alone, and no other key',
+      onlyStep(backfill.y, STATUS_ACTION, ['all-open']));
   }
 
   // runs-on: our own code on our runners, code nobody here wrote never, a fork repository never.
