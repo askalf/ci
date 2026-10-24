@@ -49,6 +49,8 @@ export const GROUP = "github.event_name == 'workflow_run' && format('fleet-statu
 
 /** A value this check cannot know: one a fork's author sets, or a context it does not supply. */
 export const UNKNOWN = Symbol('unknown');
+export const UNKNOWN_TRUTHY = Symbol('unknown, truthy');
+export const UNKNOWN_FALSY = Symbol('unknown, falsy');
 /**
  * A string this check knows only by what it is not: a fork PR's author is any login, and a fork's
  * repository is any repository but this one. It equals itself and is unequal to the strings it
@@ -95,9 +97,14 @@ export function evalExpr(src, ctx, { strict = false, trusted = null } = {}) {
   let p = 0;
   const peek = () => toks[p]?.t;
   const eat = (t) => { if (peek() !== t) throw new Error(`expected ${t} at token ${p}`); return toks[p++]; };
-  const U = (v) => v === UNKNOWN;
+  // UNKNOWN_TRUTHY and UNKNOWN_FALSY are values this check does not know but whose truthiness it
+  // does (`UNKNOWN || true` is truthy, but could be the unknown value); to anything that reads the
+  // value, a comparison, a function or a property, they are UNKNOWN.
+  const U = (v) => v === UNKNOWN || v === UNKNOWN_TRUTHY || v === UNKNOWN_FALSY;
   const S = (v) => v instanceof Other;
   const truthy = (v) => !(v === null || v === undefined || v === false || v === 0 || v === '');
+  const isTrue = (v) => v === UNKNOWN_TRUTHY || (!U(v) && truthy(v));
+  const isFalse = (v) => v === UNKNOWN_FALSY || (!U(v) && !truthy(v));
   // Actions' ==: two strings compare case-insensitively; two values of one other type compare as
   // that type (an object or array only to itself); values of different types are both coerced to
   // numbers (null and '' are 0, true is 1, a string that is not a number and any object are NaN),
@@ -133,7 +140,7 @@ export function evalExpr(src, ctx, { strict = false, trusted = null } = {}) {
     const k = toks[p++];
     if (k?.t === 'lit') return k.v;
     if (k?.t === '(') { const v = or(); eat(')'); return v; }
-    if (k?.t === '!') { const v = primary(); return U(v) ? UNKNOWN : !truthy(v); }
+    if (k?.t === '!') { const v = primary(); return isTrue(v) ? false : isFalse(v) ? true : UNKNOWN; }
     if (k?.t !== 'id') throw new Error(`unexpected token ${p - 1}`);
     if (k.v === 'null') return null;
     if (k.v === 'true' || k.v === 'false') return k.v === 'true';
@@ -152,8 +159,7 @@ export function evalExpr(src, ctx, { strict = false, trusted = null } = {}) {
     for (let depth = 0; ; depth++) {
       let key;
       if (peek() === '.') { p++; key = eat('id').v; } else if (peek() === '[') { p++; key = or(); eat(']'); } else return v;
-      if (U(v)) continue;
-      if (S(v)) { v = UNKNOWN; continue; }
+      if (U(v) || S(v)) { v = UNKNOWN; continue; }
       if (U(key)) { v = UNKNOWN; continue; }
       if (strict && k.v === 'matrix' && depth === 0 && !(key in (v ?? {}))) throw new Error(`unknown matrix.${key}`);
       path.push(String(key));
@@ -163,10 +169,11 @@ export function evalExpr(src, ctx, { strict = false, trusted = null } = {}) {
   };
   const cmp = () => { let v = primary(); while (peek() === '==' || peek() === '!=') { const op = toks[p++].t; const r = primary(); const e = eq(v, r); v = U(e) ? UNKNOWN : op === '==' ? e : !e; } return v; };
   // Actions' && gives its first falsy operand or its last; || its first truthy operand or its last.
-  // Beside an UNKNOWN, `UNKNOWN && false` is false and `UNKNOWN || true` is true as conditions;
-  // with any other operand the value could be the unknown one, so it stays UNKNOWN.
-  const and = () => { let v = cmp(); while (peek() === '&&') { p++; const r = cmp(); v = U(v) ? (r === false ? false : UNKNOWN) : truthy(v) ? r : v; } return v; };
-  const or = () => { let v = and(); while (peek() === '||') { p++; const r = and(); v = U(v) ? (r === true ? true : UNKNOWN) : truthy(v) ? v : r; } return v; };
+  // Beside an UNKNOWN, `UNKNOWN && <falsy>` is falsy and `UNKNOWN || <truthy>` truthy, but either
+  // could be the unknown value itself, so they are UNKNOWN_FALSY and UNKNOWN_TRUTHY, never a
+  // boolean a comparison could go on to read; with any other operand the result stays UNKNOWN.
+  const and = () => { let v = cmp(); while (peek() === '&&') { p++; const r = cmp(); v = isFalse(v) ? v : isTrue(v) ? r : isFalse(r) ? UNKNOWN_FALSY : UNKNOWN; } return v; };
+  const or = () => { let v = and(); while (peek() === '||') { p++; const r = and(); v = isTrue(v) ? v : isFalse(v) ? r : isTrue(r) ? UNKNOWN_TRUTHY : UNKNOWN; } return v; };
   const v = or();
   if (p !== toks.length) throw new Error(`trailing tokens from ${p}`);
   return v;
@@ -179,7 +186,7 @@ export const TRUSTED_PR_PATHS = ['pull_request.head.repo.full_name', 'pull_reque
 /** A condition as true, false or UNKNOWN, with every other event path the sender's to choose. */
 export const condOf = (src, ctx) => {
   const v = evalExpr(src, ctx, { trusted: TRUSTED_PR_PATHS });
-  return v === UNKNOWN ? UNKNOWN : truthy(v);
+  return v === UNKNOWN ? UNKNOWN : v === UNKNOWN_TRUTHY ? true : v === UNKNOWN_FALSY ? false : truthy(v);
 };
 
 

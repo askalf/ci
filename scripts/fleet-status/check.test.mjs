@@ -82,6 +82,12 @@ console.log('\n  fields a fork chooses are unknown');
   check('true || unknown is true', condOf("github.event.pull_request.user.login == 'x' || github.event.pull_request.title == 'y'", fork) === true);
   check('!unknown is unknown, and so is a function of it', condOf('!github.event.pull_request.draft', fork) === UNKNOWN && condOf("startsWith(github.event.pull_request.head.ref, 'a')", fork) === UNKNOWN);
   check('vars and inputs are unknown', condOf("vars.TRUSTED == 'yes'", fork) === UNKNOWN && condOf('inputs.go', fork) === UNKNOWN);
+  check('unknown || true is truthy but not the value true, and unknown && false falsy but not false',
+    condOf('github.event.pull_request.title || true', fork) === true && condOf('github.event.pull_request.title && false', fork) === false
+    && condOf('(github.event.pull_request.title || true) == false', fork) === UNKNOWN
+    && condOf('(github.event.pull_request.title && false) == 0', fork) === UNKNOWN
+    && condOf('!(github.event.pull_request.title || true)', fork) === false
+    && condOf("(github.event.pull_request.title || true) && github.repository == 'other/repo'", fork) === false);
   check('the head repository and the author are read', condOf("github.event.pull_request.head.repo.full_name == 'x/example' && github.event.pull_request.user.login == 'x'", fork) === true);
   check('the evaluator without trusted paths reads every value', evalExpr('github.event.pull_request.title', fork) === 'safe');
 }
@@ -196,6 +202,7 @@ const cases = [
   ['a quoted on: key hiding a PR trigger', { 'pr.yml': () => `name: pr\n'on':\n  pull_request:\njobs:\n${job('p', "    if: github.repository == 'askalf/example'\n    runs-on: [self-hosted, example-exec]\n")}` }, /pr\.yml: is in the YAML subset this check reads \(not line 2\)/],
   ['an if: whose next line continues it', { 'ci.yml': (y) => `${y}${job('pr', "    if: github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]' && github.repository == 'askalf/example'\n      || github.event_name == 'pull_request'\n    runs-on: [self-hosted, example-exec]\n")}` }, /ci\.yml: is in the YAML subset this check reads/],
   ['an if: in a quoted string over two lines', { 'ci.yml': (y) => `${y}${job('pr', "    if: \"github.repository == 'askalf/example'\n      || true\"\n    runs-on: [self-hosted, example-exec]\n")}` }, /ci\.yml: is in the YAML subset this check reads/],
+  ['a literal guard that compares an unknown-or-true value', { 'ci.yml': (y) => `${y}${job('pr', "    if: (github.event.pull_request.title || true) == false && github.repository == 'askalf/example'\n    runs-on: [self-hosted, example-exec]\n")}` }, /ci\.yml pr: a literal self-hosted job's if: keeps forks, fork PRs and Dependabot PRs off/],
   ['a literal guard that lets one outside author in', { 'ci.yml': (y) => `${y}${job('pr', "    if: github.repository == 'askalf/example' && github.event.pull_request.user.login == 'contributor'\n    runs-on: [self-hosted, example-exec]\n")}` }, /ci\.yml pr: a literal self-hosted job's if: keeps forks, fork PRs and Dependabot PRs off/],
   ['a literal guard that lets one fork repository in', { 'ci.yml': (y) => `${y}${job('pr', "    if: github.repository == 'askalf/example' && (github.event.pull_request.head.repo.full_name == github.repository || github.event.pull_request.head.repo.full_name == 'someone/example') && github.event.pull_request.user.login != 'dependabot[bot]'\n    runs-on: [self-hosted, example-exec]\n")}` }, /ci\.yml pr: a literal self-hosted job's if: keeps forks, fork PRs and Dependabot PRs off/],
   ['a runner expression that sends one outside author to our runners', { 'ci.yml': (y) => y.replace("    runs-on: ${{ (github.repository != 'askalf/example'", "    runs-on: ${{ github.event.pull_request.user.login == 'contributor' && fromJSON('[\"self-hosted\",\"example-exec\"]') || (github.repository != 'askalf/example'") }, /not: ci\.yml test: <unreadable>/],
