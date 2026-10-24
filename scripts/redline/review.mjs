@@ -69,6 +69,7 @@ import { join, resolve, relative, isAbsolute, sep, dirname } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { request as httpRequest } from 'node:http';
+import { randomUUID } from 'node:crypto';
 import { ACTIONS, CALLERS } from './pin.mjs';
 
 export const REVIEWER_LOGIN = 'sprayberry-redline';
@@ -721,14 +722,20 @@ export function darioAccess(secrets) {
 /**
  * One Messages call through dario. The key travels in a header, never in argv or a URL; over a
  * key socket there is no key to send.
+ *
+ * `conversation` must stay the same for every turn of one review and differ between reviews.
+ * dario derives the Codex prompt_cache_key from metadata.user_id; without it, every review with
+ * the same system prompt and tools shares one key, so concurrent reviews overflow the cache
+ * routing and each turn lands where the earlier turns are not cached.
  */
-export async function callModelWith(ctx, { system, messages, tools, toolChoice, maxTokens = LIMITS.maxTokens, timeoutMs = LIMITS.modelTimeoutMs, deadline = Infinity }) {
+export async function callModelWith(ctx, { system, messages, tools, toolChoice, maxTokens = LIMITS.maxTokens, timeoutMs = LIMITS.modelTimeoutMs, deadline = Infinity, conversation = '' }) {
   const res = await withRetry(ctx, 'model', (leftMs) => ctx.fetch(`${ctx.darioUrl.replace(/\/+$/, '')}/v1/messages`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', ...(ctx.darioKey ? { 'x-api-key': ctx.darioKey } : {}), 'anthropic-version': '2023-06-01' },
     body: JSON.stringify({
       model: ctx.model, max_tokens: maxTokens, system, messages, tools,
       ...(toolChoice ? { tool_choice: toolChoice } : {}),
+      ...(conversation ? { metadata: { user_id: conversation } } : {}),
     }),
     signal: AbortSignal.timeout(Math.max(1, Math.floor(Math.min(timeoutMs, leftMs)))),
   }), deadline);
@@ -947,6 +954,7 @@ export async function reviewChange(ctx, { pr, files, commits, reviews = [], prot
   // Earlier reviews reach the model but not the corpus: a line they quote may be gone from the head.
   const messages = [{ role: 'user', content: `${brief}${changedFilesSection(ctx.checkout, files)}${earlierReviewsSection(reviews, pr.head.sha)}\n\nReview this change and finish with redline_submit.` }];
   const started = ctx.now();
+  const conversation = `redline-${randomUUID()}`;
   let review = null;
   let repaired = false;
   let repairedCaptured = false;
@@ -967,7 +975,7 @@ export async function reviewChange(ctx, { pr, files, commits, reviews = [], prot
       res = await callModelWith(ctx, {
         system: ctx.system, messages, tools: TOOLS,
         toolChoice: !force ? null : canForce ? { type: 'tool', name: 'redline_submit' } : { type: 'auto' },
-        deadline,
+        deadline, conversation,
       });
     } catch (e) {
       if (!(e instanceof ModelParked || e instanceof ModelUnroutable) || !ctx.fallbackModel || ctx.fallbackModel === ctx.model) throw e;

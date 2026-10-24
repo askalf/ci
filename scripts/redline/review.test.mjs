@@ -323,6 +323,11 @@ console.log('\n  runReview');
     && calls.posted.length === 1 && calls.posted[0].commit_id === HEAD && calls.posted[0].event === 'APPROVE' && calls.posted[0].auth === 'Bearer review');
   check('the tool result went back to the model', JSON.stringify(calls.model[1].messages.at(-1)).includes('export const token'));
   check('the model got the diff and the tools, and no forced choice early', calls.model[0].messages[0].content.includes('+export const token') && calls.model[0].tools.length === 4 && !calls.model[0].tool_choice);
+  const ids = calls.model.map((b) => b.metadata?.user_id);
+  check('every turn of one review carries the same conversation id', ids.length === 2 && /^redline-[0-9a-f-]{36}$/.test(ids[0]) && ids[1] === ids[0]);
+  const { ctx: again, calls: againCalls } = world({ turns: [submit(APPROVE)] });
+  await runReview(again);
+  check('a second review gets a different conversation id', againCalls.model[0].metadata?.user_id && againCalls.model[0].metadata.user_id !== ids[0]);
 }
 {
   check('no context: no section', contextSection('') === '' && contextSection('  \n ') === '' && contextSection(undefined) === '');
