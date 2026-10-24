@@ -228,6 +228,8 @@ const cases = [
   ['a runs-on alias', { 'ci.yml': (y) => `${y}${job('extra', '    runs-on: *ours\n')}` }, /not: ci\.yml extra: <unreadable>/],
   ['the status action without the PR number', { [STATUS]: (y) => y.replace(/\n {10}pr: .*/, '') }, /gets the PR number/],
   ['the status action with the comment path dropped from the PR number', { [STATUS]: (y) => y.replace(' || github.event.issue.number', '') }, /gets the PR number/],
+  ['the status action with a constant PR number', { [STATUS]: (y) => y.replace(/(\n {10}pr: ).*/, '$1${{ 7 }}') }, /gets the PR number/],
+  ['the status action with a PR number that ignores the event', { [STATUS]: (y) => y.replace(/(\n {10}pr: ).*/, '$1${{ github.event.pull_request.number || 7 }}') }, /gets the PR number/],
   ['the status action as a dry run', { [STATUS]: (y) => y.replace('          head-branch:', "          dry-run: 'true'\n          head-branch:") }, /no dry-run/],
   ['CodeQL on our runners', { 'codeql.yml': (y) => y.replace('    runs-on: ubuntu-latest', "    runs-on: ${{ (github.repository != 'askalf/example' || github.event.pull_request && (github.event.pull_request.head.repo.full_name != github.repository || github.event.pull_request.user.login == 'dependabot[bot]')) && 'ubuntu-latest' || fromJSON('[\"self-hosted\",\"example-exec\"]') }}") }, /CodeQL runs on GitHub's runners/],
   ['a self-test with a push trigger', { 'fleet-status-self-test.yml': (y) => y.replace('on:\n', 'on:\n  push:\n') }, /self-test runs on pull_request, and a dispatch, alone/],
@@ -235,7 +237,10 @@ const cases = [
   ['a self-test without the check action', { 'fleet-status-self-test.yml': (y) => y.replace(/\n      - uses: askalf\/ci\/actions\/fleet-status-check@.*/, '') }, /self-test runs askalf\/ci\/actions\/fleet-status-check/],
   ['a backfill that runs on a schedule too', { 'fleet-status-backfill.yml': (y) => y.replace('  workflow_dispatch:\n', '  workflow_dispatch:\n  schedule:\n    - cron: \'0 * * * *\'\n') }, /backfill runs on a dispatch alone/],
   ['a backfill without all-open', { 'fleet-status-backfill.yml': (y) => y.replace("all-open: 'true'", "all-open: 'false'") }, /over every open PR/],
-  ['a relay with a token', { 'fleet-review-relay.yml': (y) => y.replace('permissions: {}', 'permissions:\n  contents: read') }, /relay has no token/],
+  ['a relay that misses submitted reviews', { 'fleet-review-relay.yml': (y) => y.replace('[submitted, edited, dismissed]', '[edited, dismissed]') }, /relay fires on every review submitted, edited or dismissed/],
+  ['a relay with a branch filter', { 'fleet-review-relay.yml': (y) => y.replace('    types: [submitted, edited, dismissed]\n', '    types: [submitted, edited, dismissed]\n    branches: [main]\n') }, /relay fires on every review submitted, edited or dismissed/],
+  ['a relay that also fires on pushes', { 'fleet-review-relay.yml': (y) => y.replace('    types: [submitted, edited, dismissed]\n', '    types: [submitted, edited, dismissed]\n  push:\n') }, /relay fires on every review submitted, edited or dismissed/],
+  ['a relay with a token',{ 'fleet-review-relay.yml': (y) => y.replace('permissions: {}', 'permissions:\n  contents: read') }, /relay has no token/],
   ['no relay', { 'fleet-review-relay.yml': null }, /relay is listed/],
 ];
 for (const [name, edits, expect] of cases) {

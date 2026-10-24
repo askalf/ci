@@ -682,14 +682,10 @@ export function checkCaller(dir, opts = {}) {
     /^ {10}head-repo: \$\{\{ github\.event\.workflow_run\.head_repository\.full_name \}\}$/m.test(step)
     && /^ {10}head-branch: \$\{\{ github\.event\.workflow_run\.head_branch \}\}$/m.test(step));
   // Every other path needs the PR number: without it (and without a fork head) the script stops
-  // with a usage error and posts nothing.
-  const prExpr = /^\s+pr: \$\{\{ (.+) \}\}\s*$/m.exec(step)?.[1] ?? '';
-  const prOf = (event_name, event) => { try { return evalExpr(prExpr, { github: { repository: HOME, event_name, event } }); } catch { return null; } };
-  const PR7 = { number: 7, head: { repo: { full_name: HOME } } };
-  check('the action gets the PR number on a pull_request, review, comment and same-repo workflow_run',
-    prExpr !== '' && prOf('pull_request', { pull_request: PR7 }) === 7 && prOf('pull_request_review', { pull_request: PR7 }) === 7
-    && prOf('issue_comment', { issue: { number: 7, pull_request: { url: 'x' } } }) === 7
-    && prOf('workflow_run', { workflow_run: { pull_requests: [{ number: 7 }] } }) === 7);
+  // with a usage error and posts nothing. The input is pinned to the one expression that reads it
+  // from each event, since a constant or a lookalike would post one PR's lanes on another.
+  check('the action gets the PR number from the pull_request, the comment\'s issue or the workflow_run',
+    /^ {10}pr: \$\{\{ github\.event\.pull_request\.number \|\| github\.event\.issue\.number \|\| github\.event\.workflow_run\.pull_requests\[0\]\.number \}\}$/m.test(step));
   check('the status job posts: no dry-run', !/^\s+dry-run:/m.test(step));
   check('no step reads the PR head ref or sha', !/(pull_request\.head\.(ref|sha)|workflow_run\.head_sha)/.test(own));
 
@@ -852,7 +848,10 @@ export function checkCaller(dir, opts = {}) {
   // The review relay.
   const relay = beside.find((w) => w.f === 'fleet-review-relay.yml')?.y ?? '';
   check('the review relay is listed in workflow_run', /^name: Fleet review relay$/m.test(relay) && (list ?? []).includes(RELAY_NAME));
-  check('the review relay fires on pull_request_review alone', /^on:\n {2}pull_request_review:\n {4}types: \[[^\]]+\]\n\n/m.test(relay));
+  // A relay that misses submitted, edited or dismissed leaves the review lane stale on that event.
+  check('the review relay fires on every review submitted, edited or dismissed, and on nothing else',
+    /^on:\n {2}pull_request_review:\n {4}types: \[submitted, edited, dismissed\]\n\npermissions: \{\}$/m.test(relay)
+    && (relay.match(/^on:/gm) ?? []).length === 1);
   check('the review relay has no token and runs no action or checkout', /^permissions: \{\}$/m.test(relay) && !/\buses:/.test(relay));
   return out;
 }
