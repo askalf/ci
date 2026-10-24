@@ -1501,8 +1501,8 @@ console.log('\n  pin bump, both callers');
   check('the bump workflow rewrites every caller path with pin.mjs', /CALLER_PATHS: .*redline\.yml .*redline-fix\.yml .*public-text\.yml/.test(bump.replace(/\n\s+/g, ' ')) && bump.includes('node scripts/redline/pin.mjs "$@" "$SHA" "$note"') && /\(redline-review\|redline-fix-run\|public-text\)\.yml/.test(bump));
   const pinPaths = (/\n      PIN_PATHS: >-\n((?: {8}\S.*\n)+)/.exec(bump)?.[1] ?? '').split(/\s+/).filter(Boolean);
   check('a change to the fix workflow moves the pin', pinPaths.includes('.github/workflows/redline-fix-run.yml'));
-  check('the tests, their fixtures and the README move no pin',
-    ['scripts/redline/*.test.mjs', 'scripts/redline/test-fixtures', 'scripts/redline/README.md'].every((x) => pinPaths.includes(`:(exclude)${x}`))
+  check('the tests, their fixtures, the README and the local pre-push review move no pin',
+    ['scripts/redline/*.test.mjs', 'scripts/redline/test-fixtures', 'scripts/redline/README.md', 'scripts/redline/local.mjs'].every((x) => pinPaths.includes(`:(exclude)${x}`))
       && pinPaths.indexOf(':(exclude)scripts/redline/*.test.mjs') > pinPaths.indexOf('scripts/redline'));
   // Batched: a burst of merges here is one bump wave, and an open bump PR is not reset for no change.
   const on = /\non:\n((?: {2}.*\n)+)/.exec(bump)?.[1] ?? '';

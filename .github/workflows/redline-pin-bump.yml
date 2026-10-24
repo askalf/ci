@@ -74,10 +74,13 @@ jobs:
         .github/workflows/redline.yml .github/workflows/redline-fix.yml
         .github/workflows/public-text.yml
       # What a caller runs: the scripts the reusable workflows fetch, and the workflows. The tests,
-      # their fixtures and the README change nothing a caller runs, so they move no pin.
+      # their fixtures and the README change nothing a caller runs, so they move no pin; nor does
+      # local.mjs, the pre-push review, which runs on a laptop and the runner host and in no
+      # caller's workflow.
       PIN_PATHS: >-
         scripts/redline
         :(exclude)scripts/redline/*.test.mjs
+        :(exclude)scripts/redline/local.mjs
         :(exclude)scripts/redline/test-fixtures
         :(exclude)scripts/redline/README.md
         scripts/drift-report
