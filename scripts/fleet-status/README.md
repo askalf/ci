@@ -50,5 +50,7 @@ jobs:
 The `workflow_run` list names every workflow that runs on `pull_request` or
 `pull_request_target`, so a required check finishing refreshes the lanes; the checker fails a list
 that misses one. The home repository and runner label are read from the status job's `runs-on`, so
-the same check passes in a fork repository. Both actions are pinned by full sha and moved by the
-pin bump, like the Redline workflows.
+the same check passes in a fork repository. The checker reads workflows line by line, so it also
+fails any line outside the plain YAML it reads (a quoted key, a value continued on the next line, an
+anchor or alias). Both actions are pinned by full sha and moved by the pin bump, like the Redline
+workflows.

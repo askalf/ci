@@ -194,6 +194,76 @@ export function uncomment(s) {
   return s.trim();
 }
 
+/**
+ * The lines of a workflow outside the YAML subset this check reads, 1-based. Its readers go line
+ * by line, so a workflow they could misread fails instead of passing on a partial reading. Every
+ * line is blank, a comment, inside a block scalar, `- ` items, or an unquoted `key:`; a value is
+ * empty, a block scalar indicator, one complete quoted string, one complete flow collection, or a
+ * plain scalar, all on one line. A scalar that continues on a further-indented line, a quoted or
+ * complex key, a tab in the indentation, an anchor, alias or tag, and a document marker are outside it.
+ */
+export function yamlGaps(y) {
+  const gaps = [];
+  const lines = y.split('\n');
+  let block = null; // a block scalar's content is indented past this
+  let scalarAt = null; // after a value on its line, a line indented past this would continue it
+  const balanced = (s) => {
+    let q = '';
+    const stack = [];
+    for (let i = 0; i < s.length; i++) {
+      const c = s[i];
+      if (q === '"' && c === '\\') { i++; continue; }
+      if (q) { if (c === q) q = ''; continue; }
+      if (c === "'" || c === '"') q = c;
+      else if (c === '[' || c === '{') stack.push(c === '[' ? ']' : '}');
+      else if (c === ']' || c === '}') { if (stack.pop() !== c) return false; if (!stack.length && i !== s.length - 1) return false; }
+    }
+    return !q && !stack.length;
+  };
+  for (let i = 0; i < lines.length; i++) {
+    const l = lines[i];
+    if (/^\s*$/.test(l)) continue;
+    const ind = /^ */.exec(l)[0].length;
+    if (block !== null) { if (ind > block) continue; block = null; }
+    if (/^ *\t/.test(l)) { gaps.push(i + 1); continue; }
+    if (/^\s*#/.test(l)) continue;
+    if (scalarAt !== null && ind > scalarAt) { gaps.push(i + 1); continue; }
+    scalarAt = null;
+    let rest = l.slice(ind);
+    let col = ind;
+    let dashAt = null;
+    for (let d; (d = /^-( +|$)/.exec(rest));) { dashAt = col; col += d[0].length; rest = rest.slice(d[0].length); }
+    if (rest === '' || /^#/.test(rest)) continue;
+    const key = /^([A-Za-z0-9_][\w.-]*):(?:\s+(.*))?$/.exec(rest);
+    if (!key && dashAt === null) { gaps.push(i + 1); continue; }
+    const at = key ? col : dashAt;
+    const x = uncomment(key ? key[2] ?? '' : rest);
+    if (x === '') continue;
+    if (/^[|>][-+1-9]*$/.test(x)) { block = at; continue; }
+    // A flow sequence of scalars may run over further-indented lines; nothing nests in it.
+    if (x.startsWith('[') && !balanced(x)) {
+      let flow = x;
+      let j = i + 1;
+      for (; j < lines.length && !balanced(flow); j++) {
+        if (/^\s*(#.*)?$/.test(lines[j])) continue;
+        if (/^ *\t/.test(lines[j]) || /^ */.exec(lines[j])[0].length <= at) break;
+        flow += ` ${uncomment(lines[j])}`;
+      }
+      if (!balanced(flow) || /[[{]/.test(flow.slice(1)) || /:(\s|$)/.test(flow.replace(/'(?:[^']|'')*'|"(?:[^"\\]|\\.)*"/g, ''))) { gaps.push(i + 1); continue; }
+      i = j - 1;
+      scalarAt = at;
+      continue;
+    }
+    const ok = x.startsWith("'") ? /^'(?:[^']|'')*'$/.test(x)
+      : x.startsWith('"') ? /^"(?:[^"\\]|\\.)*"$/.test(x)
+        : /^[[{]/.test(x) ? balanced(x)
+          : !/^[&*!%@`|>?,\]}#]/.test(x) && !/^-(\s|$)/.test(x) && !/:(\s|$)/.test(x);
+    if (!ok) { gaps.push(i + 1); continue; }
+    scalarAt = at;
+  }
+  return gaps;
+}
+
 /** The expression inside `${{ ... }}`, or the text as it is (a job if: may leave the braces off). */
 const unwrap = (s) => (/^\$\{\{\s*([\s\S]*?)\s*\}\}$/.exec(s.trim())?.[1] ?? s.trim());
 
@@ -434,6 +504,11 @@ export function checkCaller(dir, opts = {}) {
   if (!files.includes('fleet-status.yml')) {
     check('fleet-status.yml is here', false);
     return out;
+  }
+  // A workflow outside the YAML subset could be read here differently from how Actions reads it.
+  for (const f of files) {
+    const gaps = yamlGaps(readLf(dir, f));
+    check(`${f}: is in the YAML subset this check reads${gaps.length ? ` (not line ${gaps.slice(0, 5).join(', ')})` : ''}`, gaps.length === 0);
   }
   const own = readLf(dir, 'fleet-status.yml');
   const beside = files.filter((f) => f !== 'fleet-status.yml').map((f) => { const y = readLf(dir, f); return { f, name: workflowName(f, y), y }; });
