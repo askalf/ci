@@ -1164,6 +1164,16 @@ console.log('\n  pin bump');
   check('a file outside .github/workflows is not', !pinOnly([watcher('actions/drift-report/action.yml')]));
   check('a file with no patch (too large to show) is not', !pinOnly([{ filename: '.github/workflows/redline.yml', status: 'modified' }]));
   check('no files is not', !pinOnly([]));
+  // Every pin the bump wave moves (pin.mjs's ACTIONS and CALLERS) is a pin here, the fleet-status
+  // actions and the public-text caller included: one missing went to the deep model.
+  const { ACTIONS, CALLERS } = await import('./pin.mjs');
+  const step = (action, path = '.github/workflows/fleet-status.yml') => ({ filename: path, status: 'modified',
+    patch: `@@ -20,2 +20,2 @@\n     steps:\n-      - uses: ${action}@${A} # main 2026-10-24, askalf/ci#121\n+      - uses: ${action}@${B} # main 2026-10-24, askalf/ci#123` });
+  check('every action pin.mjs moves is a pin', ACTIONS.length >= 4 && ACTIONS.every((a) => pinOnly([step(a)])));
+  check('every caller pin.mjs moves is a pin in its file', CALLERS.length >= 3 && CALLERS.every((c) => pinOnly([{ filename: c.path, status: 'modified',
+    patch: `@@ -9,4 +9,4 @@\n-    uses: ${c.workflow}@${A} # main 2026-10-24, askalf/ci#120\n+    uses: ${c.workflow}@${B} # main 2026-10-24, askalf/ci#123\n     with:\n-      redline-ref: ${A}\n+      redline-ref: ${B}` }])));
+  check('the public-text pin outside its caller file is not', !pinOnly([step('askalf/ci/.github/workflows/public-text.yml', '.github/workflows/ci.yml')]));
+  check('a lookalike action path is not', !pinOnly([step('askalf/ci/actions/fleet-status-evil')]) && !pinOnly([step('askalf/ci/actionsXfleet-status')]));
 
   {
     const { ctx, calls } = world({ files: [bump()], turns: [submit({ ...APPROVE, summary: 'Moves the pin; read .github/workflows/redline.yml.' })] });
