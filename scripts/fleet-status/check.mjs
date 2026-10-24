@@ -20,6 +20,11 @@
 //     self-hosted runs-on needs that job's own if: to keep out a fork's PR and a Dependabot PR
 //     (where the workflow runs on pull requests) and a fork repository's pushes and schedules;
 //     CodeQL stays on GitHub's runners.
+//   - It fails closed. Jobs are read at whatever indentation the file uses, and a runs-on outside
+//     a job it read fails. A runner expression is evaluated under every event and every matrix
+//     value the job defines; one that reads anything else, or gives anything but labels, fails.
+//     A PR field a fork's author chooses (title, branch, labels, draft) and the vars, inputs and
+//     needs contexts are UNKNOWN: a guard keeps a fork out only if it is false whatever they hold.
 //   - The status action gets the PR number on every event that has one, and never runs dry.
 //   - The review relay is listed, fires on pull_request_review alone, and has no token or action.
 //
@@ -42,13 +47,26 @@ export const RELAY_NAME = 'Fleet review relay';
 export const DEFAULT_REPO_ONLY = ['fleet-status.yml', 'fleet-status-backfill.yml'];
 export const GROUP = "github.event_name == 'workflow_run' && format('fleet-status-{0}-{1}-{2}', github.event.workflow_run.event, github.event.workflow_run.head_repository.full_name, github.event.workflow_run.head_branch) || format('fleet-status-run-{0}', github.run_id)";
 
+/** A value this check cannot know: one a fork's author sets, or a context it does not supply. */
+export const UNKNOWN = Symbol('unknown');
+const UNKNOWN_CONTEXTS = new Set(['vars', 'inputs', 'needs', 'env', 'steps', 'secrets', 'job', 'runner']);
+
 /**
  * A small evaluator for the Actions expression subset the workflows use: string and number
- * literals, null, true, false, property paths, !, ==, !=, &&, ||, contains(), fromJSON() and
- * startsWith(). Strings compare case-insensitively, as Actions does. Returns the value, as
- * Actions does (&& and || return an operand); evalIf reads it as a condition.
+ * literals, null, true, false, property paths, !, ==, !=, &&, ||, contains(), fromJSON(),
+ * startsWith(), endsWith() and the status functions. Strings compare case-insensitively, as
+ * Actions does. Returns the value, as Actions does (&& and || return an operand).
+ *
+ * strict: a context the caller did not supply, or a matrix key the job does not define, throws
+ * instead of reading as null.
+ * trusted: the github.event paths whose values the event's sender cannot choose (a fork can set
+ * its PR's title, body, branch, labels and draft state, but not its head repository or its
+ * author's login). Any other github.event path, and the contexts in UNKNOWN_CONTEXTS, read as
+ * UNKNOWN, which spreads three-valued: `false && UNKNOWN` is false, `true || UNKNOWN` is true, and
+ * anything else UNKNOWN touches is UNKNOWN. A condition is only false when it is false whatever
+ * those values are.
  */
-export function evalExpr(src, ctx) {
+export function evalExpr(src, ctx, { strict = false, trusted = null } = {}) {
   const toks = [];
   const re = /\s*(?:('(?:[^']|'')*')|(\d+)|(==|!=|&&|\|\||[!(),[\].])|([A-Za-z_][\w-]*))/y;
   for (let i = 0; !/^\s*$/.test(src.slice(i));) {
@@ -63,10 +81,12 @@ export function evalExpr(src, ctx) {
   let p = 0;
   const peek = () => toks[p]?.t;
   const eat = (t) => { if (peek() !== t) throw new Error(`expected ${t} at token ${p}`); return toks[p++]; };
+  const U = (v) => v === UNKNOWN;
   const truthy = (v) => !(v === null || v === undefined || v === false || v === 0 || v === '');
-  const eq = (a, b) => (typeof a === 'string' && typeof b === 'string' ? a.toLowerCase() === b.toLowerCase() : (a ?? null) === (b ?? null));
+  const eq = (a, b) => (U(a) || U(b) ? UNKNOWN
+    : typeof a === 'string' && typeof b === 'string' ? a.toLowerCase() === b.toLowerCase() : (a ?? null) === (b ?? null));
   const fns = {
-    contains: (h, n) => (Array.isArray(h) ? h.some((x) => eq(x, n)) : String(h ?? '').toLowerCase().includes(String(n ?? '').toLowerCase())),
+    contains: (h, n) => (Array.isArray(h) ? h.some((x) => eq(x, n) === true) : String(h ?? '').toLowerCase().includes(String(n ?? '').toLowerCase())),
     fromJSON: (x) => JSON.parse(x),
     startsWith: (h, n) => String(h ?? '').toLowerCase().startsWith(String(n ?? '').toLowerCase()),
     endsWith: (h, n) => String(h ?? '').toLowerCase().endsWith(String(n ?? '').toLowerCase()),
@@ -76,11 +96,13 @@ export function evalExpr(src, ctx) {
     failure: () => false,
     cancelled: () => false,
   };
+  // Whether a github.event path is one the sender cannot choose: a trusted path, or on the way to one.
+  const known = (path) => trusted.some((t) => t === path || t.startsWith(`${path}.`) || path.startsWith(`${t}.`));
   const primary = () => {
     const k = toks[p++];
     if (k?.t === 'lit') return k.v;
     if (k?.t === '(') { const v = or(); eat(')'); return v; }
-    if (k?.t === '!') return !truthy(primary());
+    if (k?.t === '!') { const v = primary(); return U(v) ? UNKNOWN : !truthy(v); }
     if (k?.t !== 'id') throw new Error(`unexpected token ${p - 1}`);
     if (k.v === 'null') return null;
     if (k.v === 'true' || k.v === 'false') return k.v === 'true';
@@ -90,16 +112,27 @@ export function evalExpr(src, ctx) {
       if (peek() !== ')') for (args.push(or()); peek() === ','; p++, args.push(or()));
       eat(')');
       if (!fns[k.v]) throw new Error(`unknown function ${k.v}`);
-      return fns[k.v](...args);
+      return args.some(U) ? UNKNOWN : fns[k.v](...args);
     }
-    let v = ctx[k.v] ?? null;
-    for (;;) {
-      if (peek() === '.') { p++; const key = eat('id').v; v = v?.[key] ?? null; } else if (peek() === '[') { p++; const at = or(); eat(']'); v = v?.[at] ?? null; } else return v;
+    if (strict && !(k.v in ctx) && !(trusted && UNKNOWN_CONTEXTS.has(k.v))) throw new Error(`unknown context ${k.v}`);
+    let v = trusted && UNKNOWN_CONTEXTS.has(k.v) ? UNKNOWN : ctx[k.v] ?? null;
+    const path = [k.v];
+    for (let depth = 0; ; depth++) {
+      let key;
+      if (peek() === '.') { p++; key = eat('id').v; } else if (peek() === '[') { p++; key = or(); eat(']'); } else return v;
+      if (U(v)) continue;
+      if (U(key)) { v = UNKNOWN; continue; }
+      if (strict && k.v === 'matrix' && depth === 0 && !(key in (v ?? {}))) throw new Error(`unknown matrix.${key}`);
+      path.push(String(key));
+      v = trusted && path[0] === 'github' && path[1] === 'event' && path.length > 2 && !known(path.slice(2).join('.')) ? UNKNOWN : v?.[key] ?? null;
     }
   };
-  const cmp = () => { let v = primary(); while (peek() === '==' || peek() === '!=') { const op = toks[p++].t; const r = primary(); v = op === '==' ? eq(v, r) : !eq(v, r); } return v; };
-  const and = () => { let v = cmp(); while (peek() === '&&') { p++; const r = cmp(); v = truthy(v) ? r : v; } return v; };
-  const or = () => { let v = and(); while (peek() === '||') { p++; const r = and(); v = truthy(v) ? v : r; } return v; };
+  const cmp = () => { let v = primary(); while (peek() === '==' || peek() === '!=') { const op = toks[p++].t; const r = primary(); const e = eq(v, r); v = U(e) ? UNKNOWN : op === '==' ? e : !e; } return v; };
+  // Actions' && gives its first falsy operand or its last; || its first truthy operand or its last.
+  // Beside an UNKNOWN, `UNKNOWN && false` is false and `UNKNOWN || true` is true as conditions;
+  // with any other operand the value could be the unknown one, so it stays UNKNOWN.
+  const and = () => { let v = cmp(); while (peek() === '&&') { p++; const r = cmp(); v = U(v) ? (r === false ? false : UNKNOWN) : truthy(v) ? r : v; } return v; };
+  const or = () => { let v = and(); while (peek() === '||') { p++; const r = and(); v = U(v) ? (r === true ? true : UNKNOWN) : truthy(v) ? v : r; } return v; };
   const v = or();
   if (p !== toks.length) throw new Error(`trailing tokens from ${p}`);
   return v;
@@ -107,6 +140,14 @@ export function evalExpr(src, ctx) {
 
 const truthy = (v) => !(v === null || v === undefined || v === false || v === 0 || v === '');
 export const evalIf = (src, ctx) => truthy(evalExpr(src, ctx));
+/** The github.event paths a fork's PR cannot choose. */
+export const TRUSTED_PR_PATHS = ['pull_request.head.repo.full_name', 'pull_request.user.login'];
+/** A condition as true, false or UNKNOWN, with every other event path the sender's to choose. */
+export const condOf = (src, ctx) => {
+  const v = evalExpr(src, ctx, { trusted: TRUSTED_PR_PATHS });
+  return v === UNKNOWN ? UNKNOWN : truthy(v);
+};
+
 
 /** A plain YAML value without its trailing comment: a # after a space, outside quotes. */
 export function uncomment(s) {
@@ -122,39 +163,57 @@ export function uncomment(s) {
 /** The expression inside `${{ ... }}`, or the text as it is (a job if: may leave the braces off). */
 const unwrap = (s) => (/^\$\{\{\s*([\s\S]*?)\s*\}\}$/.exec(s.trim())?.[1] ?? s.trim());
 
+/** Marks a runs-on this check cannot read; it is never hosted and never ours, so it fails. */
+export const UNREADABLE = '<unreadable>';
+const indentOf = (l) => /^ */.exec(l)[0].length;
+const content = (l) => l.trim() !== '' && !/^\s*#/.test(l);
+
 /**
- * The jobs of a workflow, each with its own runs-on and if:. runs-on is read in each form a job
- * writes it: an expression, a flow list (quoted items or not), a block list, a bare label, or a
- * mapping with `labels:`. `labels` is every runner label it names, quotes dropped; `expr` is the
- * expression when it is one. A job that calls a reusable workflow has no runs-on.
- * @returns {Array<{id:string, cond:string, expr:string|null, labels:string[], hasRunsOn:boolean}>}
+ * The jobs of a workflow, each with its own runs-on and if:, at whatever indentation the file uses.
+ * runs-on is read in each form a job writes it: an expression, a flow list (quoted items or not), a
+ * block list, a bare label, or a mapping with `labels:`; any other form (an alias, a block scalar,
+ * a group with no labels) is UNREADABLE. `labels` is every label it names, quotes dropped; `expr`
+ * is the expression when it is one; `matrix` is each matrix key's values, read from the job's
+ * strategy. A job that calls a reusable workflow has no runs-on.
+ * @returns {Array<{id:string, cond:string, expr:string|null, labels:string[], matrix:Record<string,string[]>, hasRunsOn:boolean}>}
  */
 export function jobsOf(y) {
-  const at = /^jobs:[ \t]*$/m.exec(y);
+  const at = /^jobs:[ \t]*(#.*)?$/m.exec(y);
   if (!at) return [];
-  const blocks = [];
+  const body = [];
   for (const l of y.slice(at.index + at[0].length).split('\n').slice(1)) {
     if (/^[^\s#]/.test(l)) break;
-    const m = /^  ([\w-]+):\s*(#.*)?$/.exec(l);
+    body.push(l);
+  }
+  const first = body.find(content);
+  if (!first) return [];
+  const jobIndent = indentOf(first);
+  const blocks = [];
+  for (const l of body) {
+    const m = content(l) && indentOf(l) === jobIndent ? /^\s*([\w-]+):\s*(#.*)?$/.exec(l) : null;
     if (m) blocks.push({ id: m[1], lines: [] });
+    else if (content(l) && indentOf(l) <= jobIndent) blocks.push({ id: UNREADABLE, lines: [] });
     else if (blocks.length) blocks[blocks.length - 1].lines.push(l);
   }
   const strip = (s) => uncomment(s).replace(/^['"]|['"]$/g, '');
-  const listItems = (s) => s.replace(/^\[|\]$/g, '').split(',').map(strip).filter(Boolean);
+  const listItems = (s) => (/^\[.*\]$/.test(s) ? s.slice(1, -1).split(',').map(strip).filter(Boolean) : [UNREADABLE]);
   return blocks.map(({ id, lines }) => {
-    // The value of a job key: the rest of its line, or the more-indented lines under it.
-    const value = (key) => {
-      const i = lines.findIndex((l) => new RegExp(`^    ${key}:`).test(l));
+    const firstProp = lines.find(content);
+    const propIndent = firstProp ? indentOf(firstProp) : jobIndent + 2;
+    // The value of a key at `indent` within `ls`: the rest of its line, and the content lines under it.
+    const valueIn = (ls, key, indent) => {
+      const i = ls.findIndex((l) => indentOf(l) === indent && new RegExp(`^\\s*${key}:(\\s|$)`).test(l));
       if (i < 0) return null;
-      const rest = lines[i].slice(lines[i].indexOf(':') + 1).trim();
+      const rest = ls[i].slice(ls[i].indexOf(':') + 1).trim();
       const under = [];
-      for (const l of lines.slice(i + 1)) {
-        if (l.trim() === '' || /^\s*#/.test(l)) continue;
-        if (!/^ {5,}/.test(l)) break;
+      for (const l of ls.slice(i + 1)) {
+        if (!content(l)) continue;
+        if (indentOf(l) <= indent) break;
         under.push(l);
       }
       return { rest, under };
     };
+    const value = (key) => valueIn(lines, key, propIndent);
     // A block scalar (>- or |) keeps every character, # included; a plain line loses its comment.
     const ifv = value('if');
     const cond = !ifv ? '' : unwrap(/^[>|][-+]?$/.test(ifv.rest) ? ifv.under.map((l) => l.trim()).join(' ') : uncomment(ifv.rest));
@@ -163,22 +222,46 @@ export function jobsOf(y) {
     let labels = [];
     if (ro) {
       const rest = uncomment(ro.rest);
-      if (rest.startsWith('${{')) {
-        expr = unwrap(rest);
-        labels = [...expr.matchAll(/["']([\w.-]+)["']/g)].map((m) => m[1]);
-      } else if (rest.startsWith('[')) labels = listItems(rest);
+      if (rest.startsWith('${{')) expr = /\}\}$/.test(rest) ? unwrap(rest) : UNREADABLE;
+      else if (rest.startsWith('[')) labels = listItems(rest);
+      else if (/^[>|*&!{]/.test(rest)) labels = [UNREADABLE];
       else if (rest) labels = [strip(rest)];
       else {
-        for (const l of ro.under) {
-          const item = /^\s+-\s+(.+)$/.exec(l);
-          const key = /^\s+labels:\s*(.*)$/.exec(l);
-          if (item) labels.push(strip(item[1]));
-          else if (key?.[1]) labels.push(...(key[1].startsWith('[') ? listItems(key[1]) : [strip(key[1])]));
+        const subIndent = ro.under.length ? indentOf(ro.under[0]) : 0;
+        const list = ro.under.filter((l) => indentOf(l) === subIndent);
+        if (list.length && list.every((l) => /^\s*-\s+/.test(l))) labels = list.map((l) => strip(l.replace(/^\s*-\s+/, '')));
+        else {
+          const lab = valueIn(ro.under, 'labels', subIndent);
+          if (!lab) labels = [UNREADABLE];
+          else if (lab.rest) labels = lab.rest.startsWith('[') ? listItems(lab.rest) : [strip(lab.rest)];
+          else labels = lab.under.map((l) => (/^\s*-\s+/.test(l) ? strip(l.replace(/^\s*-\s+/, '')) : UNREADABLE));
         }
+        if (!labels.length) labels = [UNREADABLE];
       }
     }
-    return { id, cond, expr, labels, hasRunsOn: ro !== null };
+    // The matrix values a runs-on expression may read: each key's flow or block list under
+    // strategy.matrix. A value that is itself an expression is not a value this check can use.
+    const matrix = {};
+    const strategy = value('strategy');
+    const mx = strategy?.under.length ? valueIn(strategy.under, 'matrix', indentOf(strategy.under[0])) : null;
+    if (mx?.under.length) {
+      const keyIndent = indentOf(mx.under[0]);
+      for (const l of mx.under.filter((x) => indentOf(x) === keyIndent)) {
+        const m = /^\s*([\w-]+):\s*(.*)$/.exec(l);
+        if (!m || m[1] === 'include' || m[1] === 'exclude') continue;
+        const v = valueIn(mx.under, m[1], keyIndent);
+        const vals = v.rest ? (v.rest.startsWith('[') ? listItems(uncomment(v.rest)) : [strip(v.rest)])
+          : v.under.map((x) => (/^\s*-\s+/.test(x) ? strip(x.replace(/^\s*-\s+/, '')) : UNREADABLE));
+        matrix[m[1]] = vals.some((x) => x.includes('${{')) ? [UNREADABLE] : vals;
+      }
+    }
+    return { id, cond, expr, labels, matrix, hasRunsOn: ro !== null };
   });
+}
+
+/** How many runs-on keys a workflow has, anywhere: each must belong to a job jobsOf read. */
+export function runsOnKeys(y) {
+  return y.split('\n').filter((l) => !/^\s*#/.test(l) && /(^|[\s{,-])["']?runs-on["']?\s*:/.test(uncomment(l))).length;
 }
 
 /** The names in a workflow's `workflow_run: workflows: [...]`, or null when it has none. */
@@ -356,59 +439,81 @@ export function checkCaller(dir, opts = {}) {
   const literal = [];
   const foreign = [];
   const FORK_REPO = `someone/${NAME}`;
-  const runner = (e, github, repository = HOME, matrix = { os: 'ubuntu-latest' }) => {
-    for (const r of ['ubuntu-latest', 'windows-latest', 'macos-latest']) {
-      try { if (evalIf(`(${e}) == '${r}'`, { github: { repository, ...github }, matrix })) return r; } catch { return 'unreadable'; }
-    }
-    return 'ours';
+  // What a runs-on expression gives, as labels: a string is one, an array of strings is each;
+  // anything else, or an expression that reads a context or matrix key this check does not
+  // supply, is UNREADABLE.
+  const labelsOf = (e, github, repository, matrix) => {
+    let v;
+    try { v = evalExpr(e, { github: { repository, ...github }, matrix }, { strict: true, trusted: TRUSTED_PR_PATHS }); } catch { return [UNREADABLE]; }
+    if (typeof v === 'string' && v !== '') return [v];
+    if (Array.isArray(v) && v.length && v.every((x) => typeof x === 'string')) return v;
+    return [UNREADABLE];
+  };
+  // One hosted label is GitHub's runner by that name; anything else is ours (or unreadable).
+  const runner = (e, github, repository = HOME, matrix = {}) => {
+    const ls = labelsOf(e, github, repository, matrix);
+    if (ls.includes(UNREADABLE)) return 'unreadable';
+    return ls.length === 1 && hostedLabel(ls[0]) ? ls[0] : 'ours';
   };
   const prFrom = (event_name, headRepo, login = 'askalf') =>
     ({ event_name, event: { pull_request: { head: { repo: { full_name: headRepo } }, user: { login } } } });
   const EVENTS = ['push', 'schedule', 'workflow_dispatch'].map((event_name) => ({ event_name, event: {} }));
+  // Every event an expression is read under, here and in a fork repository.
+  const SCENARIOS = [
+    ...EVENTS.map((g) => [g, HOME]), ...EVENTS.map((g) => [g, FORK_REPO]),
+    ...['pull_request', 'pull_request_review', 'pull_request_target'].flatMap((ev) => [[prFrom(ev, HOME), HOME], [prFrom(ev, FORKED), HOME]]),
+    [prFrom('pull_request', HOME, 'dependabot[bot]'), HOME], [prFrom('pull_request', FORK_REPO), FORK_REPO],
+  ];
+  // Every combination of a job's matrix values ([{}] for no matrix).
+  const combos = (matrix) => Object.entries(matrix).reduce((acc, [k, vs]) => acc.flatMap((c) => vs.map((v) => ({ ...c, [k]: v }))), [{}]);
   for (const f of files) {
     const y = readLf(dir, f);
     const onPrs = /\bpull_request(_target|_review)?\b/.test(onBlock(y));
-    for (const job of jobsOf(y)) {
+    const js = jobsOf(y);
+    // A runs-on this check did not read is a runner it cannot vouch for.
+    check(`${f}: every runs-on is in a job this check reads`,
+      !js.some((j) => j.id === UNREADABLE) && runsOnKeys(y) === js.filter((j) => j.hasRunsOn).length);
+    for (const job of js) {
       if (!job.hasRunsOn) continue;
-      // An expression names its runners in fromJSON arrays and in quoted runner-shaped literals.
-      const labels = job.expr === null ? job.labels
-        : [...new Set([...[...job.expr.matchAll(/fromJSON\('(\[[^']*\])'\)/g)].flatMap((m) => { try { return JSON.parse(m[1]); } catch { return ['unreadable']; } }),
-          ...job.labels.filter((l) => /-(exec|build)$/.test(l) || hostedLabel(l))])];
-      for (const l of labels) if (!hostedLabel(l) && l !== 'self-hosted' && !ourLabel(l)) foreign.push(`${f} ${job.id}: ${l}`);
-      const selfHosted = labels.some((l) => l === 'self-hosted' || ourLabel(l));
-      if (!selfHosted) continue;
       const at = `${f} ${job.id}`;
+      const cs = combos(job.matrix);
+      const base = cs.find((c) => c.os === 'ubuntu-latest') ?? cs[0];
+      const labels = job.expr === null ? job.labels
+        : job.expr === UNREADABLE ? [UNREADABLE]
+          : [...new Set(SCENARIOS.flatMap(([g, repo]) => cs.flatMap((c) => labelsOf(job.expr, g, repo, c))))];
+      for (const l of labels) if (!hostedLabel(l) && l !== 'self-hosted' && !ourLabel(l)) foreign.push(`${at}: ${l}`);
+      if (labels.every(hostedLabel) || labels.includes(UNREADABLE)) continue;
       if (job.expr === null) literal.push({ at, job, onPrs });
-      else if (runner(job.expr, prFrom('pull_request', FORKED)) === 'ubuntu-latest') ownExprs.push({ f, at, e: job.expr });
-      else repoOnly.push({ f, at, e: job.expr });
+      else if (runner(job.expr, prFrom('pull_request', FORKED), HOME, base) === 'ubuntu-latest') ownExprs.push({ f, at, e: job.expr, base });
+      else repoOnly.push({ f, at, e: job.expr, base });
     }
   }
-  check(`every self-hosted label named is this repository's own${foreign.length ? ` (not: ${foreign.join('; ')})` : ''}`, foreign.length === 0);
+  check(`every runs-on names only GitHub's runners, self-hosted, or this repository's own${foreign.length ? ` (not: ${foreign.join('; ')})` : ''}`, foreign.length === 0);
   check(`the own-code runs-on expression is in use (at least ${minOwn})`, ownExprs.length >= minOwn);
   if (files.includes('codeql.yml')) {
     // CodeQL sizes itself to the machine, and every repository's exec runners share one host.
     const codeql = jobsOf(readLf(dir, 'codeql.yml')).filter((j) => j.hasRunsOn);
     check('CodeQL runs on GitHub\'s runners', codeql.length > 0 && codeql.every((j) => j.expr === null && j.labels.length > 0 && j.labels.every(hostedLabel)));
   }
-  for (const { at: f, e } of ownExprs) {
-    check(`${f}: a fork's pull_request runs on GitHub's runners`, runner(e, prFrom('pull_request', FORKED)) === 'ubuntu-latest');
-    check(`${f}: a fork's pull_request_review runs on GitHub's runners`, runner(e, prFrom('pull_request_review', FORKED)) === 'ubuntu-latest');
-    check(`${f}: a Dependabot PR runs on GitHub's runners`, runner(e, prFrom('pull_request', HOME, 'dependabot[bot]')) === 'ubuntu-latest');
-    check(`${f}: a same-repo PR runs on ours`, runner(e, prFrom('pull_request', HOME)) === 'ours');
-    check(`${f}: a push, schedule or dispatch runs on ours`, EVENTS.every((ev) => runner(e, ev) === 'ours'));
+  for (const { at: f, e, base } of ownExprs) {
+    check(`${f}: a fork's pull_request runs on GitHub's runners`, runner(e, prFrom('pull_request', FORKED), HOME, base) === 'ubuntu-latest');
+    check(`${f}: a fork's pull_request_review runs on GitHub's runners`, runner(e, prFrom('pull_request_review', FORKED), HOME, base) === 'ubuntu-latest');
+    check(`${f}: a Dependabot PR runs on GitHub's runners`, runner(e, prFrom('pull_request', HOME, 'dependabot[bot]'), HOME, base) === 'ubuntu-latest');
+    check(`${f}: a same-repo PR runs on ours`, runner(e, prFrom('pull_request', HOME), HOME, base) === 'ours');
+    check(`${f}: a push, schedule or dispatch runs on ours`, EVENTS.every((ev) => runner(e, ev, HOME, base) === 'ours'));
     check(`${f}: in a fork repository every event runs on GitHub's runners`,
-      [...EVENTS, prFrom('pull_request', FORK_REPO)].every((ev) => runner(e, ev, FORK_REPO) === 'ubuntu-latest'));
+      [...EVENTS, prFrom('pull_request', FORK_REPO)].every((ev) => runner(e, ev, FORK_REPO, base) === 'ubuntu-latest'));
     check(`${f}: the expression names exactly our label`, e.includes(`fromJSON('["self-hosted","${LABEL}"]')`));
     if (e.includes('matrix.os')) {
       check(`${f}: Windows and macOS entries keep their own runners, here and in a fork repository`,
-        runner(e, prFrom('pull_request', HOME), HOME, { os: 'windows-latest' }) === 'windows-latest'
-        && runner(e, EVENTS[0], HOME, { os: 'macos-latest' }) === 'macos-latest'
-        && runner(e, EVENTS[0], FORK_REPO, { os: 'windows-latest' }) === 'windows-latest');
+        runner(e, prFrom('pull_request', HOME), HOME, { ...base, os: 'windows-latest' }) === 'windows-latest'
+        && runner(e, EVENTS[0], HOME, { ...base, os: 'macos-latest' }) === 'macos-latest'
+        && runner(e, EVENTS[0], FORK_REPO, { ...base, os: 'windows-latest' }) === 'windows-latest');
     }
   }
-  for (const { f, at, e } of repoOnly) {
-    check(`${at}: every event here runs on ours`, [...EVENTS, prFrom('pull_request', FORKED)].every((ev) => runner(e, ev) === 'ours'));
-    check(`${at}: in a fork repository it runs on GitHub's runners`, EVENTS.every((ev) => runner(e, ev, FORK_REPO) === 'ubuntu-latest'));
+  for (const { f, at, e, base } of repoOnly) {
+    check(`${at}: every event here runs on ours`, [...EVENTS, prFrom('pull_request', FORKED)].every((ev) => runner(e, ev, HOME, base) === 'ours'));
+    check(`${at}: in a fork repository it runs on GitHub's runners`, EVENTS.every((ev) => runner(e, ev, FORK_REPO, base) === 'ubuntu-latest'));
     check(`${at}: only a job that never runs PR code uses it`, repoOnlyAllowed.includes(f));
   }
   // A literal self-hosted runs-on has no fallback, so the job's own if: is what keeps code nobody
@@ -417,7 +522,8 @@ export function checkCaller(dir, opts = {}) {
   for (const { at, job, onPrs } of literal) {
     let readable = true;
     const runsFor = (github, repository = HOME) => {
-      try { return evalIf(job.cond, { github: { repository, ...github }, vars: {}, inputs: {} }); } catch { readable = false; return true; }
+      // Runs unless its if: is false whatever the sender chose: UNKNOWN runs.
+      try { return condOf(job.cond, { github: { repository, ...github } }) !== false; } catch { readable = false; return true; }
     };
     const kept = job.cond !== ''
       && (!onPrs || (!runsFor(prFrom('pull_request', FORKED)) && !runsFor(prFrom('pull_request_review', FORKED))

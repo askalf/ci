@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { checkCaller, evalExpr, evalIf, homeOf, jobsOf, misfits, uncomment, workflowRunList } from './check.mjs';
+import { checkCaller, condOf, evalExpr, evalIf, homeOf, jobsOf, misfits, uncomment, UNKNOWN, workflowRunList } from './check.mjs';
 
 let pass = 0;
 let fail = 0;
@@ -47,6 +47,18 @@ let threw = false;
 try { evalIf("unknownFn(x)", {}); } catch { threw = true; }
 check('an unknown function throws instead of reading as false', threw);
 
+console.log('\n  fields a fork chooses are unknown');
+{
+  const fork = { github: { repository: 'askalf/example', event_name: 'pull_request', event: { pull_request: { title: 'safe', draft: false, head: { repo: { full_name: 'x/example' } }, user: { login: 'x' } } } } };
+  check('a fork\'s title is unknown, not its value', condOf("contains(github.event.pull_request.title, 'safe')", fork) === UNKNOWN);
+  check('false && unknown is false', condOf("github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.draft == false", fork) === false);
+  check('true || unknown is true', condOf("github.event.pull_request.user.login == 'x' || github.event.pull_request.title == 'y'", fork) === true);
+  check('!unknown is unknown, and so is a function of it', condOf('!github.event.pull_request.draft', fork) === UNKNOWN && condOf("startsWith(github.event.pull_request.head.ref, 'a')", fork) === UNKNOWN);
+  check('vars and inputs are unknown', condOf("vars.TRUSTED == 'yes'", fork) === UNKNOWN && condOf('inputs.go', fork) === UNKNOWN);
+  check('the head repository and the author are read', condOf("github.event.pull_request.head.repo.full_name == 'x/example' && github.event.pull_request.user.login == 'x'", fork) === true);
+  check('the evaluator without trusted paths reads every value', evalExpr('github.event.pull_request.title', fork) === 'safe');
+}
+
 console.log('\n  the refresh list');
 const onPr = (name) => `name: ${name}\non:\n  pull_request:\n    types: [opened]\njobs: {}\n`;
 const onTarget = (name) => `name: ${name}\non:\n  pull_request_target:\njobs: {}\n`;
@@ -84,6 +96,10 @@ const job = (id, head) => `\n  ${id}:\n${head}    steps:\n      - run: echo ${id
   const ok = (head) => failing(checkCaller(variant({ 'ci.yml': (y) => `${y}${job('extra', head)}` })));
   check('a literal job on pull requests that keeps fork PRs and Dependabot out passes',
     ok("    if: github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]' && github.repository == 'askalf/example'\n    runs-on: [self-hosted, example-exec]\n").length === 0);
+  check('a literal job on pull requests that reads the draft flag beside the head repository passes',
+    ok("    if: >-\n      github.event_name == 'workflow_dispatch' ||\n      (github.event.pull_request.draft == false &&\n       github.event.pull_request.head.repo.full_name == github.repository &&\n       github.event.pull_request.user.login != 'dependabot[bot]')\n    runs-on: [self-hosted, example-exec]\n").length === 0);
+  check('a workflow at four-space indentation, guarded, passes', failing(checkCaller(variant({ 'wide.yml': () => "name: wide\non:\n  schedule:\n    - cron: '0 3 * * *'\njobs: # nightly\n    w:\n        if: github.repository == 'askalf/example'\n        runs-on: [self-hosted, example-exec]\n        steps:\n            - run: echo\n" }))).length === 0);
+  check('a matrix of GitHub\'s runners read through an expression passes', failing(checkCaller(variant({ 'ci.yml': (y) => `${y}\n  extra:\n    strategy:\n      matrix:\n        runner:\n          - ubuntu-latest\n          - windows-latest\n    runs-on: \${{ matrix.runner }}\n    steps:\n      - run: echo\n` }))).length === 0);
   check('this repository\'s other label (example-build) is its own', failing(checkCaller(variant({ 'nightly.yml': () => `name: nightly\non:\n  schedule:\n    - cron: '0 3 * * *'\njobs:\n${job('n', "    if: github.repository == 'askalf/example'\n    runs-on: [self-hosted, example-build]\n")}` }))).length === 0);
 }
 
@@ -112,6 +128,20 @@ const cases = [
   ['a literal job on pull requests guarded by the repository alone', { 'ci.yml': (y) => `${y}${job('pr', "    if: github.repository == 'askalf/example'\n    runs-on: [self-hosted, example-exec]\n")}` }, /ci\.yml pr: a literal self-hosted job's if: keeps forks, fork PRs and Dependabot PRs off/],
   ['a literal job that keeps fork PRs out but lets Dependabot in', { 'ci.yml': (y) => `${y}${job('pr', '    if: github.event.pull_request.head.repo.full_name == github.repository\n    runs-on: [self-hosted, example-exec]\n')}` }, /ci\.yml pr: a literal self-hosted job's if:/],
   ['a bare self-hosted label with no if:', { 'deploy.yml': () => `name: deploy\non:\n  schedule:\n    - cron: '0 * * * *'\njobs:\n${job('d', '    runs-on: self-hosted\n')}` }, /deploy\.yml d: a literal self-hosted job's if:/],
+  ['a comment on jobs: hiding an unguarded foreign runner', { 'ci.yml': (y) => `${y.replace(/^jobs:$/m, 'jobs: # build jobs')}${job('extra', '    runs-on: [self-hosted, other-exec]\n')}` }, /not: ci\.yml extra: other-exec/],
+  ['four-space jobs hiding an unguarded foreign runner', { 'wide.yml': () => 'name: wide\non:\n  pull_request:\njobs:\n    w:\n        runs-on: [self-hosted, other-exec]\n        steps:\n            - run: echo\n' }, /not: wide\.yml w: other-exec/],
+  ['four-space jobs hiding an unguarded literal of ours', { 'wide.yml': () => 'name: wide\non:\n  pull_request:\njobs:\n    w:\n        runs-on: [self-hosted, example-exec]\n        steps:\n            - run: echo\n' }, /wide\.yml w: a literal self-hosted job's if:/],
+  ['a job written as a flow mapping', { 'ci.yml': (y) => `${y}\n  odd: { runs-on: [self-hosted, example-exec], steps: [{ run: echo }] }\n` }, /ci\.yml: every runs-on is in a job this check reads/],
+  ['an expression giving the bare self-hosted label', { 'ci.yml': (y) => `${y}${job('extra', "    runs-on: ${{ 'self-hosted' }}\n")}` }, /ci\.yml extra: only a job that never runs PR code uses it/],
+  ['an expression reading a context this check cannot see', { 'ci.yml': (y) => `${y}${job('extra', '    runs-on: ${{ vars.RUNNER }}\n')}` }, /not: ci\.yml extra: <unreadable>/],
+  ['an expression reading a matrix key the job does not define', { 'ci.yml': (y) => `${y}${job('extra', '    runs-on: ${{ matrix.runner }}\n')}` }, /not: ci\.yml extra: <unreadable>/],
+  ['a matrix value that is itself an expression', { 'ci.yml': (y) => `${y}\n  extra:\n    strategy:\n      matrix:\n        runner: \${{ fromJSON(vars.RUNNERS) }}\n    runs-on: \${{ matrix.runner }}\n    steps:\n      - run: echo\n` }, /not: ci\.yml extra: <unreadable>/],
+  ['a matrix that lists a self-hosted runner', { 'ci.yml': (y) => `${y}\n  extra:\n    strategy:\n      matrix:\n        runner: [ubuntu-latest, other-exec]\n    runs-on: \${{ matrix.runner }}\n    steps:\n      - run: echo\n` }, /not: ci\.yml extra: other-exec/],
+  ['a runner group with no labels', { 'ci.yml': (y) => `${y}${job('extra', '    runs-on:\n      group: big\n')}` }, /not: ci\.yml extra: <unreadable>/],
+  ['a literal job guarded by a field the fork chooses', { 'ci.yml': (y) => `${y}${job('pr', "    if: github.event.pull_request.head.repo.full_name == github.repository || contains(github.event.pull_request.title, '[safe]')\n    runs-on: [self-hosted, example-exec]\n")}` }, /ci\.yml pr: a literal self-hosted job's if:/],
+  ['a literal job guarded by a variable', { 'ci.yml': (y) => `${y}${job('pr', "    if: vars.SELF_HOSTED == 'on'\n    runs-on: [self-hosted, example-exec]\n")}` }, /ci\.yml pr: a literal self-hosted job's if:/],
+  ['a runner expression that a fork\'s title steers', { 'ci.yml': (y) => `${y}${job('extra', "    runs-on: \${{ contains(github.event.pull_request.title, '[hosted]') && 'ubuntu-latest' || fromJSON('[\"self-hosted\",\"example-exec\"]') }}\n")}` }, /not: ci\.yml extra: <unreadable>/],
+  ['a runs-on alias', { 'ci.yml': (y) => `${y}${job('extra', '    runs-on: *ours\n')}` }, /not: ci\.yml extra: <unreadable>/],
   ['the status action without the PR number', { [STATUS]: (y) => y.replace(/\n {10}pr: .*/, '') }, /gets the PR number/],
   ['the status action with the comment path dropped from the PR number', { [STATUS]: (y) => y.replace(' || github.event.issue.number', '') }, /gets the PR number/],
   ['the status action as a dry run', { [STATUS]: (y) => y.replace('          head-branch:', "          dry-run: 'true'\n          head-branch:") }, /no dry-run/],
