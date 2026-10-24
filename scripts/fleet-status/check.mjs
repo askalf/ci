@@ -12,11 +12,15 @@
 //     no checkout, no run step. That is what lets a fork's events run it with a write token.
 //   - The self-test runs on pull_request (and a dispatch) alone, and runs fleet-status-check.
 //   - The backfill, where there is one, is a dispatch that runs actions/fleet-status over every open PR.
-//   - Every runs-on that names a self-hosted label names this repository's own one. The own-code
-//     expression sends a fork's PR, a Dependabot PR and every run in a fork repository to GitHub's
-//     runners; the repository-only expression, for jobs that never run PR code, is kept to the
-//     workflows listed in FS_REPO_ONLY; a literal self-hosted label needs a job if: that keeps it
-//     to this repository's own code; CodeQL stays on GitHub's runners.
+//   - Every runs-on, read per job in each form YAML allows (expression, flow list, block list,
+//     bare label, labels: mapping), names only GitHub's labels, self-hosted, or this repository's
+//     own (<repo>-exec, <repo>-build). The own-code expression sends a fork's PR, a Dependabot PR
+//     and every run in a fork repository to GitHub's runners; the repository-only expression, for
+//     jobs that never run PR code, is kept to the workflows listed in FS_REPO_ONLY; a literal
+//     self-hosted runs-on needs that job's own if: to keep out a fork's PR and a Dependabot PR
+//     (where the workflow runs on pull requests) and a fork repository's pushes and schedules;
+//     CodeQL stays on GitHub's runners.
+//   - The status action gets the PR number on every event that has one, and never runs dry.
 //   - The review relay is listed, fires on pull_request_review alone, and has no token or action.
 //
 // The home repository and the runner label are read from the status job's runs-on, so the same
@@ -41,9 +45,10 @@ export const GROUP = "github.event_name == 'workflow_run' && format('fleet-statu
 /**
  * A small evaluator for the Actions expression subset the workflows use: string and number
  * literals, null, true, false, property paths, !, ==, !=, &&, ||, contains(), fromJSON() and
- * startsWith(). Strings compare case-insensitively, as Actions does.
+ * startsWith(). Strings compare case-insensitively, as Actions does. Returns the value, as
+ * Actions does (&& and || return an operand); evalIf reads it as a condition.
  */
-export function evalIf(src, ctx) {
+export function evalExpr(src, ctx) {
   const toks = [];
   const re = /\s*(?:('(?:[^']|'')*')|(\d+)|(==|!=|&&|\|\||[!(),[\].])|([A-Za-z_][\w-]*))/y;
   for (let i = 0; !/^\s*$/.test(src.slice(i));) {
@@ -64,6 +69,12 @@ export function evalIf(src, ctx) {
     contains: (h, n) => (Array.isArray(h) ? h.some((x) => eq(x, n)) : String(h ?? '').toLowerCase().includes(String(n ?? '').toLowerCase())),
     fromJSON: (x) => JSON.parse(x),
     startsWith: (h, n) => String(h ?? '').toLowerCase().startsWith(String(n ?? '').toLowerCase()),
+    endsWith: (h, n) => String(h ?? '').toLowerCase().endsWith(String(n ?? '').toLowerCase()),
+    // A job's status functions, as they read before any step has run.
+    always: () => true,
+    success: () => true,
+    failure: () => false,
+    cancelled: () => false,
   };
   const primary = () => {
     const k = toks[p++];
@@ -91,7 +102,83 @@ export function evalIf(src, ctx) {
   const or = () => { let v = and(); while (peek() === '||') { p++; const r = and(); v = truthy(v) ? v : r; } return v; };
   const v = or();
   if (p !== toks.length) throw new Error(`trailing tokens from ${p}`);
-  return truthy(v);
+  return v;
+}
+
+const truthy = (v) => !(v === null || v === undefined || v === false || v === 0 || v === '');
+export const evalIf = (src, ctx) => truthy(evalExpr(src, ctx));
+
+/** A plain YAML value without its trailing comment: a # after a space, outside quotes. */
+export function uncomment(s) {
+  let q = '';
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (q) { if (c === q) q = ''; } else if (c === "'" || c === '"') q = c;
+    else if (c === '#' && (i === 0 || /\s/.test(s[i - 1]))) return s.slice(0, i).trim();
+  }
+  return s.trim();
+}
+
+/** The expression inside `${{ ... }}`, or the text as it is (a job if: may leave the braces off). */
+const unwrap = (s) => (/^\$\{\{\s*([\s\S]*?)\s*\}\}$/.exec(s.trim())?.[1] ?? s.trim());
+
+/**
+ * The jobs of a workflow, each with its own runs-on and if:. runs-on is read in each form a job
+ * writes it: an expression, a flow list (quoted items or not), a block list, a bare label, or a
+ * mapping with `labels:`. `labels` is every runner label it names, quotes dropped; `expr` is the
+ * expression when it is one. A job that calls a reusable workflow has no runs-on.
+ * @returns {Array<{id:string, cond:string, expr:string|null, labels:string[], hasRunsOn:boolean}>}
+ */
+export function jobsOf(y) {
+  const at = /^jobs:[ \t]*$/m.exec(y);
+  if (!at) return [];
+  const blocks = [];
+  for (const l of y.slice(at.index + at[0].length).split('\n').slice(1)) {
+    if (/^[^\s#]/.test(l)) break;
+    const m = /^  ([\w-]+):\s*(#.*)?$/.exec(l);
+    if (m) blocks.push({ id: m[1], lines: [] });
+    else if (blocks.length) blocks[blocks.length - 1].lines.push(l);
+  }
+  const strip = (s) => uncomment(s).replace(/^['"]|['"]$/g, '');
+  const listItems = (s) => s.replace(/^\[|\]$/g, '').split(',').map(strip).filter(Boolean);
+  return blocks.map(({ id, lines }) => {
+    // The value of a job key: the rest of its line, or the more-indented lines under it.
+    const value = (key) => {
+      const i = lines.findIndex((l) => new RegExp(`^    ${key}:`).test(l));
+      if (i < 0) return null;
+      const rest = lines[i].slice(lines[i].indexOf(':') + 1).trim();
+      const under = [];
+      for (const l of lines.slice(i + 1)) {
+        if (l.trim() === '' || /^\s*#/.test(l)) continue;
+        if (!/^ {5,}/.test(l)) break;
+        under.push(l);
+      }
+      return { rest, under };
+    };
+    // A block scalar (>- or |) keeps every character, # included; a plain line loses its comment.
+    const ifv = value('if');
+    const cond = !ifv ? '' : unwrap(/^[>|][-+]?$/.test(ifv.rest) ? ifv.under.map((l) => l.trim()).join(' ') : uncomment(ifv.rest));
+    const ro = value('runs-on');
+    let expr = null;
+    let labels = [];
+    if (ro) {
+      const rest = uncomment(ro.rest);
+      if (rest.startsWith('${{')) {
+        expr = unwrap(rest);
+        labels = [...expr.matchAll(/["']([\w.-]+)["']/g)].map((m) => m[1]);
+      } else if (rest.startsWith('[')) labels = listItems(rest);
+      else if (rest) labels = [strip(rest)];
+      else {
+        for (const l of ro.under) {
+          const item = /^\s+-\s+(.+)$/.exec(l);
+          const key = /^\s+labels:\s*(.*)$/.exec(l);
+          if (item) labels.push(strip(item[1]));
+          else if (key?.[1]) labels.push(...(key[1].startsWith('[') ? listItems(key[1]) : [strip(key[1])]));
+        }
+      }
+    }
+    return { id, cond, expr, labels, hasRunsOn: ro !== null };
+  });
 }
 
 /** The names in a workflow's `workflow_run: workflows: [...]`, or null when it has none. */
@@ -225,6 +312,16 @@ export function checkCaller(dir, opts = {}) {
   check('the fork path hands the action the head repo and branch',
     /head-repo: \$\{\{ github\.event\.workflow_run\.head_repository\.full_name \}\}/.test(step)
     && /head-branch: \$\{\{ github\.event\.workflow_run\.head_branch \}\}/.test(step));
+  // Every other path needs the PR number: without it (and without a fork head) the script stops
+  // with a usage error and posts nothing.
+  const prExpr = /^\s+pr: \$\{\{ (.+) \}\}\s*$/m.exec(step)?.[1] ?? '';
+  const prOf = (event_name, event) => { try { return evalExpr(prExpr, { github: { repository: HOME, event_name, event } }); } catch { return null; } };
+  const PR7 = { number: 7, head: { repo: { full_name: HOME } } };
+  check('the action gets the PR number on a pull_request, review, comment and same-repo workflow_run',
+    prExpr !== '' && prOf('pull_request', { pull_request: PR7 }) === 7 && prOf('pull_request_review', { pull_request: PR7 }) === 7
+    && prOf('issue_comment', { issue: { number: 7, pull_request: { url: 'x' } } }) === 7
+    && prOf('workflow_run', { workflow_run: { pull_requests: [{ number: 7 }] } }) === 7);
+  check('the status job posts: no dry-run', !/^\s+dry-run:/m.test(step));
   check('no step reads the PR head ref or sha', !/(pull_request\.head\.(ref|sha)|workflow_run\.head_sha)/.test(own));
 
   // The self-test.
@@ -250,29 +347,15 @@ export function checkCaller(dir, opts = {}) {
   }
 
   // runs-on: our own code on our runners, code nobody here wrote never, a fork repository never.
-  const RUNS_ON = /^\s+runs-on: \$\{\{ (.+) \}\}$/;
+  // Each job's runs-on is read with that job's own if:, in every form a job can write it.
+  const NAME = HOME.split('/')[1];
+  const hostedLabel = (l) => /^(ubuntu|windows|macos)-[\w.-]+$/.test(l);
+  const ourLabel = (l) => l.startsWith(`${NAME}-`);
   const ownExprs = [];
   const repoOnly = [];
   const literal = [];
   const foreign = [];
-  for (const f of files) {
-    const y = readLf(dir, f);
-    for (const line of y.split('\n')) {
-      const m = RUNS_ON.exec(line);
-      const labels = [...line.matchAll(/"([\w.-]+-exec)"|\b([\w.-]+-exec)\]/g)].map((x) => x[1] ?? x[2]);
-      if (labels.some((l) => l !== LABEL)) foreign.push(f);
-      if (m && m[1].includes(LABEL)) (m[1].includes('github.event.pull_request') ? ownExprs : repoOnly).push({ f, e: m[1] });
-      else if (new RegExp(`^\\s+runs-on: \\[self-hosted, ${LABEL.replace(/[.]/g, '\\.')}\\]`).test(line)) literal.push({ f, y });
-    }
-  }
-  check(`every self-hosted label named is ${LABEL}${foreign.length ? ` (not in: ${[...new Set(foreign)].join(', ')})` : ''}`, foreign.length === 0);
-  check(`the own-code runs-on expression is in use (at least ${minOwn})`, ownExprs.length >= minOwn);
-  if (files.includes('codeql.yml')) {
-    // CodeQL sizes itself to the machine, and every repository's exec runners share one host.
-    const codeql = readLf(dir, 'codeql.yml');
-    check('CodeQL runs on GitHub\'s runners', /^\s+runs-on: ubuntu-latest$/m.test(codeql) && !codeql.includes(LABEL));
-  }
-  const FORK_REPO = `someone/${HOME.split('/')[1]}`;
+  const FORK_REPO = `someone/${NAME}`;
   const runner = (e, github, repository = HOME, matrix = { os: 'ubuntu-latest' }) => {
     for (const r of ['ubuntu-latest', 'windows-latest', 'macos-latest']) {
       try { if (evalIf(`(${e}) == '${r}'`, { github: { repository, ...github }, matrix })) return r; } catch { return 'unreadable'; }
@@ -282,7 +365,32 @@ export function checkCaller(dir, opts = {}) {
   const prFrom = (event_name, headRepo, login = 'askalf') =>
     ({ event_name, event: { pull_request: { head: { repo: { full_name: headRepo } }, user: { login } } } });
   const EVENTS = ['push', 'schedule', 'workflow_dispatch'].map((event_name) => ({ event_name, event: {} }));
-  for (const { f, e } of ownExprs) {
+  for (const f of files) {
+    const y = readLf(dir, f);
+    const onPrs = /\bpull_request(_target|_review)?\b/.test(onBlock(y));
+    for (const job of jobsOf(y)) {
+      if (!job.hasRunsOn) continue;
+      // An expression names its runners in fromJSON arrays and in quoted runner-shaped literals.
+      const labels = job.expr === null ? job.labels
+        : [...new Set([...[...job.expr.matchAll(/fromJSON\('(\[[^']*\])'\)/g)].flatMap((m) => { try { return JSON.parse(m[1]); } catch { return ['unreadable']; } }),
+          ...job.labels.filter((l) => /-(exec|build)$/.test(l) || hostedLabel(l))])];
+      for (const l of labels) if (!hostedLabel(l) && l !== 'self-hosted' && !ourLabel(l)) foreign.push(`${f} ${job.id}: ${l}`);
+      const selfHosted = labels.some((l) => l === 'self-hosted' || ourLabel(l));
+      if (!selfHosted) continue;
+      const at = `${f} ${job.id}`;
+      if (job.expr === null) literal.push({ at, job, onPrs });
+      else if (runner(job.expr, prFrom('pull_request', FORKED)) === 'ubuntu-latest') ownExprs.push({ f, at, e: job.expr });
+      else repoOnly.push({ f, at, e: job.expr });
+    }
+  }
+  check(`every self-hosted label named is this repository's own${foreign.length ? ` (not: ${foreign.join('; ')})` : ''}`, foreign.length === 0);
+  check(`the own-code runs-on expression is in use (at least ${minOwn})`, ownExprs.length >= minOwn);
+  if (files.includes('codeql.yml')) {
+    // CodeQL sizes itself to the machine, and every repository's exec runners share one host.
+    const codeql = jobsOf(readLf(dir, 'codeql.yml')).filter((j) => j.hasRunsOn);
+    check('CodeQL runs on GitHub\'s runners', codeql.length > 0 && codeql.every((j) => j.expr === null && j.labels.length > 0 && j.labels.every(hostedLabel)));
+  }
+  for (const { at: f, e } of ownExprs) {
     check(`${f}: a fork's pull_request runs on GitHub's runners`, runner(e, prFrom('pull_request', FORKED)) === 'ubuntu-latest');
     check(`${f}: a fork's pull_request_review runs on GitHub's runners`, runner(e, prFrom('pull_request_review', FORKED)) === 'ubuntu-latest');
     check(`${f}: a Dependabot PR runs on GitHub's runners`, runner(e, prFrom('pull_request', HOME, 'dependabot[bot]')) === 'ubuntu-latest');
@@ -298,14 +406,24 @@ export function checkCaller(dir, opts = {}) {
         && runner(e, EVENTS[0], FORK_REPO, { os: 'windows-latest' }) === 'windows-latest');
     }
   }
-  for (const { f, e } of repoOnly) {
-    check(`${f}: every event here runs on ours`, [...EVENTS, prFrom('pull_request', FORKED)].every((ev) => runner(e, ev) === 'ours'));
-    check(`${f}: in a fork repository it runs on GitHub's runners`, EVENTS.every((ev) => runner(e, ev, FORK_REPO) === 'ubuntu-latest'));
-    check(`${f}: only a job that never runs PR code uses it`, repoOnlyAllowed.includes(f));
+  for (const { f, at, e } of repoOnly) {
+    check(`${at}: every event here runs on ours`, [...EVENTS, prFrom('pull_request', FORKED)].every((ev) => runner(e, ev) === 'ours'));
+    check(`${at}: in a fork repository it runs on GitHub's runners`, EVENTS.every((ev) => runner(e, ev, FORK_REPO) === 'ubuntu-latest'));
+    check(`${at}: only a job that never runs PR code uses it`, repoOnlyAllowed.includes(f));
   }
-  for (const { f, y } of literal) {
-    check(`${f}: a literal ${LABEL} job runs only in this repository, or only on its own PRs`,
-      y.includes(`github.repository == '${HOME}'`) || /head\.repo\.full_name == github\.repository/.test(y));
+  // A literal self-hosted runs-on has no fallback, so the job's own if: is what keeps code nobody
+  // here wrote off our runners: on a workflow that runs on pull requests, a fork's PR and a
+  // Dependabot PR must not run it; anywhere, a fork repository's pushes and schedules must not.
+  for (const { at, job, onPrs } of literal) {
+    let readable = true;
+    const runsFor = (github, repository = HOME) => {
+      try { return evalIf(job.cond, { github: { repository, ...github }, vars: {}, inputs: {} }); } catch { readable = false; return true; }
+    };
+    const kept = job.cond !== ''
+      && (!onPrs || (!runsFor(prFrom('pull_request', FORKED)) && !runsFor(prFrom('pull_request_review', FORKED))
+        && !runsFor(prFrom('pull_request_target', FORKED)) && !runsFor(prFrom('pull_request', HOME, 'dependabot[bot]'))))
+      && ['push', 'schedule'].every((event_name) => !runsFor({ event_name, event: {} }, FORK_REPO));
+    check(`${at}: a literal self-hosted job's if: keeps forks${onPrs ? ', fork PRs and Dependabot PRs' : ''} off our runners`, kept && readable);
   }
 
   // The review relay.

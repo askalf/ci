@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { checkCaller, evalIf, homeOf, misfits, workflowRunList } from './check.mjs';
+import { checkCaller, evalExpr, evalIf, homeOf, jobsOf, misfits, uncomment, workflowRunList } from './check.mjs';
 
 let pass = 0;
 let fail = 0;
@@ -67,6 +67,26 @@ console.log('\n  the fixture passes');
   check('a CRLF checkout passes the same', failing(checkCaller(crlf)).length === 0, failing(checkCaller(crlf)).join('\n'));
 }
 
+console.log('\n  jobs are read one at a time');
+/** One job, appended under a workflow's jobs:. `head` is its if: and runs-on lines. */
+const job = (id, head) => `\n  ${id}:\n${head}    steps:\n      - run: echo ${id}\n`;
+{
+  const y = `name: x\non:\n  pull_request:\njobs:\n  a:\n    if: >-\n      startsWith(github.event.comment.body, '## Verification at') &&\n      github.repository == 'askalf/example'\n    runs-on: [self-hosted, 'example-exec'] # ours\n    steps:\n      - run: echo\n  b:\n    if: github.event_name == 'push' # a comment\n    runs-on:\n      - self-hosted\n      - "example-build"\n  c:\n    uses: ./.github/workflows/called.yml\n  d:\n    runs-on: \${{ matrix.os }}\n`;
+  const [a, b, c, d] = jobsOf(y);
+  check('a folded if: keeps its # and joins its lines', a.cond === "startsWith(github.event.comment.body, '## Verification at') && github.repository == 'askalf/example'");
+  check('a flow list drops quotes and the comment', a.labels.join() === 'self-hosted,example-exec' && a.expr === null);
+  check('a plain if: drops its comment; a block list is read', b.cond === "github.event_name == 'push'" && b.labels.join() === 'self-hosted,example-build');
+  check('a reusable-workflow job has no runs-on', !c.hasRunsOn);
+  check('an expression is kept as one', d.expr === 'matrix.os' && d.labels.length === 0);
+  check('a # inside quotes is not a comment', uncomment("x == '## a' # b") === "x == '## a'");
+}
+{
+  const ok = (head) => failing(checkCaller(variant({ 'ci.yml': (y) => `${y}${job('extra', head)}` })));
+  check('a literal job on pull requests that keeps fork PRs and Dependabot out passes',
+    ok("    if: github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]' && github.repository == 'askalf/example'\n    runs-on: [self-hosted, example-exec]\n").length === 0);
+  check('this repository\'s other label (example-build) is its own', failing(checkCaller(variant({ 'nightly.yml': () => `name: nightly\non:\n  schedule:\n    - cron: '0 3 * * *'\njobs:\n${job('n', "    if: github.repository == 'askalf/example'\n    runs-on: [self-hosted, example-build]\n")}` }))).length === 0);
+}
+
 console.log('\n  each break is caught');
 const STATUS = 'fleet-status.yml';
 const cases = [
@@ -80,11 +100,21 @@ const cases = [
   ['a step reading the PR head sha', { [STATUS]: (y) => y.replace('          head-branch:', '          sha: ${{ github.event.pull_request.head.sha }}\n          head-branch:') }, /PR head ref or sha/],
   ['cancel-in-progress on every run', { [STATUS]: (y) => y.replace("cancel-in-progress: ${{ github.event_name == 'workflow_run' }}", 'cancel-in-progress: ${{ true }}') }, /only a workflow_run run is cancelled/],
   ['a second job in fleet-status.yml', { [STATUS]: (y) => `${y}  extra:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo\n` }, /runs only the status job/],
-  ['another repository\'s runner label', { 'ci.yml': (y) => y.replace('fromJSON(\'["self-hosted","example-exec"]\') }}\n    steps:\n      - run: echo test', 'fromJSON(\'["self-hosted","other-exec"]\') }}\n    steps:\n      - run: echo test') }, /every self-hosted label named is example-exec \(not in: ci\.yml\)/],
-  ['a fork repository sent to our runners', { 'ci.yml': (y) => y.replace("(github.repository != 'askalf/example' || github.event.pull_request", '(github.event.pull_request') }, /ci\.yml: in a fork repository every event runs on GitHub's/],
-  ['Dependabot sent to our runners', { 'ci.yml': (y) => y.replace(" || github.event.pull_request.user.login == 'dependabot[bot]')) && 'ubuntu-latest' || fromJSON('[\"self-hosted\",\"example-exec\"]') }}\n    steps:\n      - run: echo test", ")) && 'ubuntu-latest' || fromJSON('[\"self-hosted\",\"example-exec\"]') }}\n    steps:\n      - run: echo test") }, /ci\.yml: a Dependabot PR runs on GitHub's/],
-  ['the repository-only expression on a PR job', { 'ci.yml': (y) => y.replace(/runs-on: \$\{\{ \(github\.repository != 'askalf\/example' .*\n    steps:\n      - run: echo test/, "runs-on: ${{ github.repository == 'askalf/example' && fromJSON('[\"self-hosted\",\"example-exec\"]') || 'ubuntu-latest' }}\n    steps:\n      - run: echo test") }, /ci\.yml: only a job that never runs PR code uses it/],
-  ['a literal label with no if:', { 'deploy.yml': () => 'name: deploy\non:\n  push:\njobs:\n  d:\n    runs-on: [self-hosted, example-exec]\n    steps:\n      - run: echo\n' }, /deploy\.yml: a literal example-exec job/],
+  ['another repository\'s runner label', { 'ci.yml': (y) => y.replace('fromJSON(\'["self-hosted","example-exec"]\') }}\n    steps:\n      - run: echo test', 'fromJSON(\'["self-hosted","other-exec"]\') }}\n    steps:\n      - run: echo test') }, /this repository's own \(not: ci\.yml test: other-exec\)/],
+  ['another repository\'s label in a quoted flow list', { 'ci.yml': (y) => `${y}${job('extra', "    runs-on: ['self-hosted', 'other-exec']\n")}` }, /this repository's own \(not: ci\.yml extra: other-exec\)/],
+  ['another repository\'s label in a block list', { 'ci.yml': (y) => `${y}${job('extra', '    runs-on:\n      - self-hosted\n      - other-exec\n')}` }, /this repository's own \(not: ci\.yml extra: other-exec\)/],
+  ['another repository\'s label under labels:', { 'ci.yml': (y) => `${y}${job('extra', '    runs-on:\n      group: ours\n      labels: [self-hosted, other-exec]\n')}` }, /this repository's own \(not: ci\.yml extra: other-exec\)/],
+  ['a fork repository sent to our runners', { 'ci.yml': (y) => y.replace("(github.repository != 'askalf/example' || github.event.pull_request", '(github.event.pull_request') }, /ci\.yml test: in a fork repository every event runs on GitHub's/],
+  ['Dependabot sent to our runners', { 'ci.yml': (y) => y.replace(" || github.event.pull_request.user.login == 'dependabot[bot]')) && 'ubuntu-latest' || fromJSON('[\"self-hosted\",\"example-exec\"]') }}\n    steps:\n      - run: echo test", ")) && 'ubuntu-latest' || fromJSON('[\"self-hosted\",\"example-exec\"]') }}\n    steps:\n      - run: echo test") }, /ci\.yml test: a Dependabot PR runs on GitHub's/],
+  ['the repository-only expression on a PR job', { 'ci.yml': (y) => y.replace(/runs-on: \$\{\{ \(github\.repository != 'askalf\/example' .*\n    steps:\n      - run: echo test/, "runs-on: ${{ github.repository == 'askalf/example' && fromJSON('[\"self-hosted\",\"example-exec\"]') || 'ubuntu-latest' }}\n    steps:\n      - run: echo test") }, /ci\.yml test: only a job that never runs PR code uses it/],
+  ['a literal label with no if:', { 'deploy.yml': () => `name: deploy\non:\n  push:\njobs:\n${job('d', '    runs-on: [self-hosted, example-exec]\n')}` }, /deploy\.yml d: a literal self-hosted job's if: keeps forks off/],
+  ['a literal job unguarded while another job in the file is guarded', { 'ci.yml': (y) => `${y}${job('guarded', '    if: github.repository == \'askalf/example\'\n    runs-on: ubuntu-latest\n')}${job('open', '    runs-on: [self-hosted, example-exec]\n')}` }, /ci\.yml open: a literal self-hosted job's if: keeps forks, fork PRs and Dependabot PRs off/],
+  ['a literal job on pull requests guarded by the repository alone', { 'ci.yml': (y) => `${y}${job('pr', "    if: github.repository == 'askalf/example'\n    runs-on: [self-hosted, example-exec]\n")}` }, /ci\.yml pr: a literal self-hosted job's if: keeps forks, fork PRs and Dependabot PRs off/],
+  ['a literal job that keeps fork PRs out but lets Dependabot in', { 'ci.yml': (y) => `${y}${job('pr', '    if: github.event.pull_request.head.repo.full_name == github.repository\n    runs-on: [self-hosted, example-exec]\n')}` }, /ci\.yml pr: a literal self-hosted job's if:/],
+  ['a bare self-hosted label with no if:', { 'deploy.yml': () => `name: deploy\non:\n  schedule:\n    - cron: '0 * * * *'\njobs:\n${job('d', '    runs-on: self-hosted\n')}` }, /deploy\.yml d: a literal self-hosted job's if:/],
+  ['the status action without the PR number', { [STATUS]: (y) => y.replace(/\n {10}pr: .*/, '') }, /gets the PR number/],
+  ['the status action with the comment path dropped from the PR number', { [STATUS]: (y) => y.replace(' || github.event.issue.number', '') }, /gets the PR number/],
+  ['the status action as a dry run', { [STATUS]: (y) => y.replace('          head-branch:', "          dry-run: 'true'\n          head-branch:") }, /no dry-run/],
   ['CodeQL on our runners', { 'codeql.yml': (y) => y.replace('    runs-on: ubuntu-latest', "    runs-on: ${{ (github.repository != 'askalf/example' || github.event.pull_request && (github.event.pull_request.head.repo.full_name != github.repository || github.event.pull_request.user.login == 'dependabot[bot]')) && 'ubuntu-latest' || fromJSON('[\"self-hosted\",\"example-exec\"]') }}") }, /CodeQL runs on GitHub's runners/],
   ['a self-test with a push trigger', { 'fleet-status-self-test.yml': (y) => y.replace('on:\n', 'on:\n  push:\n') }, /self-test runs on pull_request, and a dispatch, alone/],
   ['a self-test with a write token', { 'fleet-status-self-test.yml': (y) => y.replace('      contents: read\n', '      contents: write\n') }, /self-test token reads contents alone/],
