@@ -1,5 +1,5 @@
 // Tests for scripts/redline/public-text.mjs. Run: node scripts/redline/public-text.test.mjs
-import { addedByContent, addedLines, check as checkPr, creditHits, dashHits, needsContent } from './public-text.mjs';
+import { addedByContent, addedLines, check as checkPr, creditHits, dashHits, needsContent, ownDescription } from './public-text.mjs';
 
 let pass = 0;
 let fail = 0;
@@ -177,6 +177,14 @@ console.log('check, against a stubbed GitHub');
   const both = await checkPr(world(() => down, { ...PR, title: 'docs: Generated with Claude Code' }), 5);
   check('a credit with an unread file still fails as a finding (1), and the summary names both',
     both.code === 1 && /credit a model/.test(both.summary) && /Not every added line could be read/.test(both.summary));
+  const bump = { ...PR, changed_files: 1, commits: 1, user: { login: 'dependabot[bot]', type: 'Bot' }, body: `Release notes\n<li>fix: keys ${EM} values</li>\nGenerated with Claude Code` };
+  const quoted = await checkPr(world(cleanRead, bump), 5);
+  check('a Dependabot description quoting upstream dashes and credits passes (0)', quoted.code === 0);
+  const bumpTitle = await checkPr(world(cleanRead, { ...bump, title: `chore(deps): bump x ${EM} y` }), 5);
+  check('a Dependabot title is still checked (1)', bumpTitle.code === 1 && bumpTitle.summary.includes('PR title, line 1'));
+  const lookalike = await checkPr(world(cleanRead, { ...bump, user: { login: 'dependabot[bot]', type: 'User' } }), 5);
+  check('an account named like Dependabot but not a bot is checked (1)', lookalike.code === 1);
+  check('ownDescription: a person keeps the description', ownDescription({ user: { login: 'askalf', type: 'User' }, body: 'x' }) === 'x');
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);
