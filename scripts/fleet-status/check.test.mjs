@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { checkCaller, condOf, evalExpr, evalIf, homeOf, jobsOf, misfits, uncomment, UNKNOWN, workflowRunList } from './check.mjs';
+import { checkCaller, condOf, evalExpr, evalIf, homeOf, jobsOf, misfits, Other, uncomment, UNKNOWN, workflowRunList } from './check.mjs';
 
 let pass = 0;
 let fail = 0;
@@ -41,6 +41,16 @@ console.log('\n  the evaluator');
 check('reads literals, paths and functions',
   evalIf("contains(fromJSON('[\"a\",\"b\"]'), x.y[0]) && x.z == null && 'A' == 'a'", { x: { y: ['B'] } })
   && !evalIf("x.y != 'q' && x.y == 'q'", { x: { y: 'q' } }));
+{
+  const repo = new Other(['askalf/example'], { repo: true });
+  const login = new Other(['dependabot[bot]']);
+  const ctx = { r: repo, s: repo, l: login };
+  check('a value known by what it is not settles only against itself and what it excludes',
+    evalExpr("r == 'ASKALF/example'", ctx) === false && evalExpr("r == 'someone/example'", ctx) === UNKNOWN
+    && evalExpr('r == s', ctx) === true && evalExpr('r == null', ctx) === false
+    && evalExpr("l != 'dependabot[bot]'", ctx) === true && evalExpr("l == 'contributor'", ctx) === UNKNOWN
+    && evalExpr('l == 0', ctx) === UNKNOWN && evalExpr("startsWith(l, 'a')", ctx) === UNKNOWN && evalExpr('l.x', ctx) === UNKNOWN);
+}
 check('&& and || return operands, as Actions does', evalIf("(x && 'ubuntu-latest' || 'ours') == 'ours'", { x: false }));
 check('mixed types compare as numbers, as Actions does',
   evalIf("null == ''", {}) && evalIf('false == 0', {}) && evalIf("'1' == 1", {}) && evalIf("true == '1'", {})
@@ -127,7 +137,7 @@ const cases = [
   ['another repository\'s label in a quoted flow list', { 'ci.yml': (y) => `${y}${job('extra', "    runs-on: ['self-hosted', 'other-exec']\n")}` }, /this repository's own \(not: ci\.yml extra: other-exec\)/],
   ['another repository\'s label in a block list', { 'ci.yml': (y) => `${y}${job('extra', '    runs-on:\n      - self-hosted\n      - other-exec\n')}` }, /this repository's own \(not: ci\.yml extra: other-exec\)/],
   ['another repository\'s label under labels:', { 'ci.yml': (y) => `${y}${job('extra', '    runs-on:\n      group: ours\n      labels: [self-hosted, other-exec]\n')}` }, /this repository's own \(not: ci\.yml extra: other-exec\)/],
-  ['a fork repository sent to our runners', { 'ci.yml': (y) => y.replace("(github.repository != 'askalf/example' || github.event.pull_request", '(github.event.pull_request') }, /ci\.yml test: in a fork repository every event runs on GitHub's/],
+  ['a fork repository sent to our runners', { 'ci.yml': (y) => y.replace("(github.repository != 'askalf/example' || github.event.pull_request", '(github.event.pull_request') }, /ci\.yml test: in a fork repository every event runs on GitHub's|not: ci\.yml test: <unreadable>/],
   ['Dependabot sent to our runners', { 'ci.yml': (y) => y.replace(" || github.event.pull_request.user.login == 'dependabot[bot]')) && 'ubuntu-latest' || fromJSON('[\"self-hosted\",\"example-exec\"]') }}\n    steps:\n      - run: echo test", ")) && 'ubuntu-latest' || fromJSON('[\"self-hosted\",\"example-exec\"]') }}\n    steps:\n      - run: echo test") }, /ci\.yml test: a Dependabot PR runs on GitHub's/],
   ['the repository-only expression on a PR job', { 'ci.yml': (y) => y.replace(/runs-on: \$\{\{ \(github\.repository != 'askalf\/example' .*\n    steps:\n      - run: echo test/, "runs-on: ${{ github.repository == 'askalf/example' && fromJSON('[\"self-hosted\",\"example-exec\"]') || 'ubuntu-latest' }}\n    steps:\n      - run: echo test") }, /ci\.yml test: only a job that never runs PR code uses it/],
   ['a literal label with no if:', { 'deploy.yml': () => `name: deploy\non:\n  push:\njobs:\n${job('d', '    runs-on: [self-hosted, example-exec]\n')}` }, /deploy\.yml d: a literal self-hosted job's if: keeps forks off/],
@@ -157,6 +167,9 @@ const cases = [
   ['two include entries that together send a fork PR to our runners', { 'ci.yml': (y) => `${y}\n  extra:\n    strategy:\n      matrix:\n        os: [ubuntu-latest]\n        include:\n          - a: 'yes'\n          - b: 'yes'\n    runs-on: \${{ matrix.a == 'yes' && matrix.b == 'yes' && fromJSON('["self-hosted","example-exec"]') || 'ubuntu-latest' }}\n    steps:\n      - run: echo\n` }, /ci\.yml extra: only a job that never runs PR code uses it/],
   ['a matrix value YAML versions read differently', { 'ci.yml': (y) => `${y}\n  extra:\n    strategy:\n      matrix:\n        flag: [no]\n    runs-on: \${{ matrix.flag && 'ubuntu-latest' || fromJSON('["self-hosted","example-exec"]') }}\n    steps:\n      - run: echo\n` }, /not: ci\.yml extra: <unreadable>/],
   ['an include entry with a nested value', { 'ci.yml': (y) => `${y}\n  extra:\n    strategy:\n      matrix:\n        os: [ubuntu-latest]\n        include:\n          - os: ubuntu-latest\n            cfg:\n              runner: other-exec\n    runs-on: \${{ matrix.os }}\n    steps:\n      - run: echo\n` }, /not: ci\.yml extra: <unreadable>/],
+  ['a literal guard that lets one outside author in', { 'ci.yml': (y) => `${y}${job('pr', "    if: github.repository == 'askalf/example' && github.event.pull_request.user.login == 'contributor'\n    runs-on: [self-hosted, example-exec]\n")}` }, /ci\.yml pr: a literal self-hosted job's if: keeps forks, fork PRs and Dependabot PRs off/],
+  ['a literal guard that lets one fork repository in', { 'ci.yml': (y) => `${y}${job('pr', "    if: github.repository == 'askalf/example' && (github.event.pull_request.head.repo.full_name == github.repository || github.event.pull_request.head.repo.full_name == 'someone/example') && github.event.pull_request.user.login != 'dependabot[bot]'\n    runs-on: [self-hosted, example-exec]\n")}` }, /ci\.yml pr: a literal self-hosted job's if: keeps forks, fork PRs and Dependabot PRs off/],
+  ['a runner expression that sends one outside author to our runners', { 'ci.yml': (y) => y.replace("    runs-on: ${{ (github.repository != 'askalf/example'", "    runs-on: ${{ github.event.pull_request.user.login == 'contributor' && fromJSON('[\"self-hosted\",\"example-exec\"]') || (github.repository != 'askalf/example'") }, /not: ci\.yml test: <unreadable>/],
   ['a literal guard on a github field the scenarios do not supply', { 'ci.yml': (y) => `${y}${job('pr', "    if: github.repository == 'askalf/example' && github.actor == 'contributor'\n    runs-on: [self-hosted, example-exec]\n")}` }, /ci\.yml pr: a literal self-hosted job's if:/],
   ['a literal job guarded only by failure() after another job', { 'ci.yml': (y) => `${y}${job('after', '    needs: test\n    if: failure()\n    runs-on: [self-hosted, example-exec]\n')}` }, /ci\.yml after: a literal self-hosted job's if:/],
   ['a literal job guarded only by cancelled()', { 'ci.yml': (y) => `${y}${job('after', '    needs: test\n    if: cancelled() && github.repository == \'askalf/example\'\n    runs-on: [self-hosted, example-exec]\n')}` }, /ci\.yml after: a literal self-hosted job's if:/],

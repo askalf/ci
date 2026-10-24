@@ -49,6 +49,16 @@ export const GROUP = "github.event_name == 'workflow_run' && format('fleet-statu
 
 /** A value this check cannot know: one a fork's author sets, or a context it does not supply. */
 export const UNKNOWN = Symbol('unknown');
+/**
+ * A string this check knows only by what it is not: a fork PR's author is any login, and a fork's
+ * repository is any repository but this one. It equals itself and is unequal to the strings it
+ * excludes; any other comparison with it, or function or property read on it, is UNKNOWN. A
+ * repository's full name has a slash, so it is never a number and is unequal to every value that
+ * is not a string; a login may be all digits, so only strings settle a comparison with one.
+ */
+export class Other {
+  constructor(not = [], { repo = false } = {}) { this.not = not.map((s) => s.toLowerCase()); this.repo = repo; }
+}
 const STATUS_FNS = new Set(['success', 'failure', 'cancelled']);
 const UNKNOWN_CONTEXTS = new Set(['vars', 'inputs', 'needs', 'env', 'steps', 'secrets', 'job', 'runner']);
 
@@ -86,6 +96,7 @@ export function evalExpr(src, ctx, { strict = false, trusted = null } = {}) {
   const peek = () => toks[p]?.t;
   const eat = (t) => { if (peek() !== t) throw new Error(`expected ${t} at token ${p}`); return toks[p++]; };
   const U = (v) => v === UNKNOWN;
+  const S = (v) => v instanceof Other;
   const truthy = (v) => !(v === null || v === undefined || v === false || v === 0 || v === '');
   // Actions' ==: two strings compare case-insensitively; two values of one other type compare as
   // that type (an object or array only to itself); values of different types are both coerced to
@@ -96,6 +107,12 @@ export function evalExpr(src, ctx, { strict = false, trusted = null } = {}) {
   const kind = (v) => (v === null || v === undefined ? 'null' : Array.isArray(v) ? 'object' : typeof v);
   const eq = (a, b) => {
     if (U(a) || U(b)) return UNKNOWN;
+    if (S(a) || S(b)) {
+      if (a === b) return true;
+      const [s, o] = S(a) ? [a, b] : [b, a];
+      if (typeof o !== 'string') return s.repo && !S(o) ? false : UNKNOWN;
+      return s.not.includes(o.toLowerCase()) ? false : UNKNOWN;
+    }
     if (kind(a) === kind(b)) return kind(a) === 'string' ? a.toLowerCase() === b.toLowerCase() : kind(a) === 'null' ? true : a === b;
     return num(a) === num(b);
   };
@@ -127,7 +144,7 @@ export function evalExpr(src, ctx, { strict = false, trusted = null } = {}) {
       eat(')');
       if (!fns[k.v]) throw new Error(`unknown function ${k.v}`);
       if (trusted && STATUS_FNS.has(k.v)) return UNKNOWN;
-      return args.some(U) ? UNKNOWN : fns[k.v](...args);
+      return args.some((a) => U(a) || S(a)) ? UNKNOWN : fns[k.v](...args);
     }
     if (strict && !(k.v in ctx) && !(trusted && UNKNOWN_CONTEXTS.has(k.v))) throw new Error(`unknown context ${k.v}`);
     let v = trusted && (UNKNOWN_CONTEXTS.has(k.v) || !(k.v in ctx)) ? UNKNOWN : ctx[k.v] ?? null;
@@ -136,6 +153,7 @@ export function evalExpr(src, ctx, { strict = false, trusted = null } = {}) {
       let key;
       if (peek() === '.') { p++; key = eat('id').v; } else if (peek() === '[') { p++; key = or(); eat(']'); } else return v;
       if (U(v)) continue;
+      if (S(v)) { v = UNKNOWN; continue; }
       if (U(key)) { v = UNKNOWN; continue; }
       if (strict && k.v === 'matrix' && depth === 0 && !(key in (v ?? {}))) throw new Error(`unknown matrix.${key}`);
       path.push(String(key));
@@ -529,7 +547,12 @@ export function checkCaller(dir, opts = {}) {
   const repoOnly = [];
   const literal = [];
   const foreign = [];
-  const FORK_REPO = `someone/${NAME}`;
+  // A fork's PR may come from any repository but this one and any author, maintainers included; a
+  // fork repository is any repository but this one; a same-repo PR's author is anyone but Dependabot,
+  // which has its own scenario.
+  const FORK_REPO = new Other([HOME], { repo: true });
+  const ANYONE = new Other();
+  const NOT_DEPENDABOT = new Other(['dependabot[bot]']);
   // What a runs-on expression gives, as labels: a string is one, an array of strings is each;
   // anything else, or an expression that reads a context or matrix key this check does not
   // supply, is UNREADABLE.
@@ -546,14 +569,15 @@ export function checkCaller(dir, opts = {}) {
     if (ls.includes(UNREADABLE)) return 'unreadable';
     return ls.length === 1 && hostedLabel(ls[0]) ? ls[0] : 'ours';
   };
-  const prFrom = (event_name, headRepo, login = 'askalf') =>
+  const prFrom = (event_name, headRepo, login = NOT_DEPENDABOT) =>
     ({ event_name, event: { pull_request: { head: { repo: { full_name: headRepo } }, user: { login } } } });
+  const forkPr = (event_name) => prFrom(event_name, FORK_REPO, ANYONE);
   const EVENTS = ['push', 'schedule', 'workflow_dispatch'].map((event_name) => ({ event_name, event: {} }));
   // Every event an expression is read under, here and in a fork repository.
   const SCENARIOS = [
     ...EVENTS.map((g) => [g, HOME]), ...EVENTS.map((g) => [g, FORK_REPO]),
-    ...['pull_request', 'pull_request_review', 'pull_request_target'].flatMap((ev) => [[prFrom(ev, HOME), HOME], [prFrom(ev, FORKED), HOME]]),
-    [prFrom('pull_request', HOME, 'dependabot[bot]'), HOME], [prFrom('pull_request', FORK_REPO), FORK_REPO],
+    ...['pull_request', 'pull_request_review', 'pull_request_target'].flatMap((ev) => [[prFrom(ev, HOME), HOME], [forkPr(ev), HOME]]),
+    [prFrom('pull_request', HOME, 'dependabot[bot]'), HOME], [forkPr('pull_request'), FORK_REPO],
   ];
   for (const f of files) {
     const y = readLf(dir, f);
@@ -580,7 +604,7 @@ export function checkCaller(dir, opts = {}) {
       const ours = cs.filter((_, i) => !per[i].every(hostedLabel));
       if (!ours.length) continue;
       const entry = { f, at, e: job.expr, cs: ours, all: cs };
-      if (ours.every((c) => hostedLabel(runner(job.expr, prFrom('pull_request', FORKED), HOME, c)))) ownExprs.push(entry);
+      if (ours.every((c) => hostedLabel(runner(job.expr, forkPr('pull_request'), HOME, c)))) ownExprs.push(entry);
       else repoOnly.push(entry);
     }
   }
@@ -595,14 +619,14 @@ export function checkCaller(dir, opts = {}) {
   const hosted = (r) => hostedLabel(r);
   for (const { at: f, e, cs, all } of ownExprs) {
     const each = (fn) => cs.every(fn);
-    check(`${f}: a fork's pull_request runs on GitHub's runners`, each((c) => hosted(runner(e, prFrom('pull_request', FORKED), HOME, c))));
-    check(`${f}: a fork's pull_request_review runs on GitHub's runners`, each((c) => hosted(runner(e, prFrom('pull_request_review', FORKED), HOME, c))));
-    check(`${f}: a fork's pull_request_target runs on GitHub's runners`, each((c) => hosted(runner(e, prFrom('pull_request_target', FORKED), HOME, c))));
+    check(`${f}: a fork's pull_request runs on GitHub's runners`, each((c) => hosted(runner(e, forkPr('pull_request'), HOME, c))));
+    check(`${f}: a fork's pull_request_review runs on GitHub's runners`, each((c) => hosted(runner(e, forkPr('pull_request_review'), HOME, c))));
+    check(`${f}: a fork's pull_request_target runs on GitHub's runners`, each((c) => hosted(runner(e, forkPr('pull_request_target'), HOME, c))));
     check(`${f}: a Dependabot PR runs on GitHub's runners`, each((c) => hosted(runner(e, prFrom('pull_request', HOME, 'dependabot[bot]'), HOME, c))));
     check(`${f}: a same-repo PR runs on ours`, each((c) => runner(e, prFrom('pull_request', HOME), HOME, c) === 'ours'));
     check(`${f}: a push, schedule or dispatch runs on ours`, each((c) => EVENTS.every((ev) => runner(e, ev, HOME, c) === 'ours')));
     check(`${f}: in a fork repository every event runs on GitHub's runners`,
-      each((c) => [...EVENTS, prFrom('pull_request', FORK_REPO)].every((ev) => hosted(runner(e, ev, FORK_REPO, c)))));
+      each((c) => [...EVENTS, forkPr('pull_request')].every((ev) => hosted(runner(e, ev, FORK_REPO, c)))));
     check(`${f}: the expression names exactly our label`, e.includes(`fromJSON('["self-hosted","${LABEL}"]')`));
     const other = all.filter((c) => /^(windows|macos)-/.test(c.os ?? ''));
     if (e.includes('matrix.os') && other.length) {
@@ -612,7 +636,7 @@ export function checkCaller(dir, opts = {}) {
     }
   }
   for (const { f, at, e, cs } of repoOnly) {
-    check(`${at}: every event here runs on ours`, cs.every((c) => [...EVENTS, prFrom('pull_request', FORKED)].every((ev) => runner(e, ev, HOME, c) === 'ours')));
+    check(`${at}: every event here runs on ours`, cs.every((c) => [...EVENTS, forkPr('pull_request')].every((ev) => runner(e, ev, HOME, c) === 'ours')));
     check(`${at}: in a fork repository it runs on GitHub's runners`, cs.every((c) => EVENTS.every((ev) => hosted(runner(e, ev, FORK_REPO, c)))));
     check(`${at}: only a job that never runs PR code uses it`, repoOnlyAllowed.includes(f));
   }
@@ -626,8 +650,8 @@ export function checkCaller(dir, opts = {}) {
       try { return condOf(job.cond, { github: { repository, ...github } }) !== false; } catch { readable = false; return true; }
     };
     const kept = job.cond !== ''
-      && (!onPrs || (!runsFor(prFrom('pull_request', FORKED)) && !runsFor(prFrom('pull_request_review', FORKED))
-        && !runsFor(prFrom('pull_request_target', FORKED)) && !runsFor(prFrom('pull_request', HOME, 'dependabot[bot]'))))
+      && (!onPrs || (!runsFor(forkPr('pull_request')) && !runsFor(forkPr('pull_request_review'))
+        && !runsFor(forkPr('pull_request_target')) && !runsFor(prFrom('pull_request', HOME, 'dependabot[bot]'))))
       && ['push', 'schedule'].every((event_name) => !runsFor({ event_name, event: {} }, FORK_REPO));
     check(`${at}: a literal self-hosted job's if: keeps forks${onPrs ? ', fork PRs and Dependabot PRs' : ''} off our runners`, kept && readable);
   }
