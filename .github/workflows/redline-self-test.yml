@@ -31,6 +31,10 @@ jobs:
       - run: node scripts/redline/public-text.test.mjs
       # The drift-report action's script and the action pin, against a fake gh and git.
       - run: node scripts/drift-report/report.test.mjs
+      # The fleet-status action's lane rules and CLI against a stubbed GitHub, and the checks the
+      # fleet-status-check action holds a caller's workflows to, over a fixture caller.
+      - run: node scripts/fleet-status/fleet-status.test.mjs
+      - run: node scripts/fleet-status/check.test.mjs
       # The pin bump workflow's bump step, run as the workflow runs it, against a fake gh.
       - run: node scripts/redline/pin-bump.test.mjs
       # The real run-account tests need a second account this job may sudo to. A host that

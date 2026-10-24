@@ -1,0 +1,16 @@
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    # CodeQL sizes itself to the machine; it stays on GitHub's runners.
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo analyze

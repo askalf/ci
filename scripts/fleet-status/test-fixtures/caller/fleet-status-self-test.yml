@@ -1,0 +1,38 @@
+# Checks this repository's fleet-status workflows with askalf/ci's fleet-status-check action: the
+# refresh list in fleet-status.yml against every workflow that runs on pull requests, the status
+# job's if: against fork and same-repo events, every runs-on that names our runner label, and the
+# review relay. The workflows are read as text from the PR's checkout with a read-only token;
+# nothing in them runs. The paths are every file the check reads.
+# self-test is not a required check here, so a PR that touches none of them runs nothing.
+name: Fleet status self-test
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - .github/workflows/**
+      # A Redline pin bump touches only these two, and moves no fleet-status rule.
+      - '!.github/workflows/redline.yml'
+      - '!.github/workflows/redline-fix.yml'
+
+permissions: {}
+
+jobs:
+  self-test:
+    # Our own code (pushes, same-repo PRs, schedules, dispatches) runs on example-exec, the
+    # non-root one-job runners on our host, so GitHub's hosted queue going down does not hold
+    # our PRs. A fork's PR and a Dependabot PR run code nobody here wrote, so they stay on
+    # GitHub's runners.
+    # A fork repository has no example-exec runners, so every run there stays on GitHub's runners too.
+    runs-on: ${{ (github.repository != 'askalf/example' || github.event.pull_request && (github.event.pull_request.head.repo.full_name != github.repository || github.event.pull_request.user.login == 'dependabot[bot]')) && 'ubuntu-latest' || fromJSON('["self-hosted","example-exec"]') }}
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: askalf/ci/actions/checkout-with-retry@1111111111111111111111111111111111111111 # main 2026-10-23
+        with:
+          persist-credentials: false
+
+      - uses: askalf/ci/actions/fleet-status-check@1111111111111111111111111111111111111111 # main 2026-10-23
+        with:
+          min-own-exprs: '3'

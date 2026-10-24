@@ -1,0 +1,25 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    # Our own code on example-exec; a fork's PR, a Dependabot PR and a fork repository on GitHub's.
+    runs-on: ${{ (github.repository != 'askalf/example' || github.event.pull_request && (github.event.pull_request.head.repo.full_name != github.repository || github.event.pull_request.user.login == 'dependabot[bot]')) && 'ubuntu-latest' || fromJSON('["self-hosted","example-exec"]') }}
+    steps:
+      - run: echo test
+
+  build:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    # The Linux entry follows the own-code rule; Windows and macOS keep their own runners.
+    runs-on: ${{ matrix.os != 'ubuntu-latest' && matrix.os || (github.repository != 'askalf/example' || github.event.pull_request && (github.event.pull_request.head.repo.full_name != github.repository || github.event.pull_request.user.login == 'dependabot[bot]')) && 'ubuntu-latest' || fromJSON('["self-hosted","example-exec"]') }}
+    steps:
+      - run: echo build

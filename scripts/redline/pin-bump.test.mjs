@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { actionPins, bumpActionPins, bumpCaller, CHECKOUT_RETRY_ACTION, countActionPins, DRIFT_REPORT_ACTION, maskPins, missingGrants, permissionsOf, REVIEW_WORKFLOW } from './pin.mjs';
+import { actionPins, bumpActionPins, bumpCaller, CHECKOUT_RETRY_ACTION, countActionPins, DRIFT_REPORT_ACTION, FLEET_STATUS_ACTION, FLEET_STATUS_CHECK_ACTION, maskPins, missingGrants, permissionsOf, REVIEW_WORKFLOW } from './pin.mjs';
 
 let pass = 0;
 let fail = 0;
@@ -49,6 +49,13 @@ console.log('\n  --action moves every askalf/ci action pin, each on its own path
     moved.includes(`actions/setup-node@${OLDSHA} # v7\n`) && moved.replace(new RegExp(NEWSHA, 'g'), OLDSHA).replace(/ # main 2026-10-20/g, '') === both.replace(/ # main 2026-10-01/g, ''), moved);
   check('a workflow with a plain actions/checkout and no askalf/ci action is not a caller and comes back unchanged',
     countActionPins(`steps:\n  - uses: actions/checkout@${OLDSHA}\n`) === 0 && bumpActionPins(`steps:\n  - uses: actions/checkout@${OLDSHA}\n`, NEWSHA) === `steps:\n  - uses: actions/checkout@${OLDSHA}\n`);
+  // fleet-status is a prefix of fleet-status-check: each pin must keep its own path.
+  const fleet = `jobs:\n  s:\n    steps:\n      - uses: ${FLEET_STATUS_ACTION}@${OLDSHA} # main\n        with:\n          pr: 7\n  t:\n    steps:\n      - uses: ${FLEET_STATUS_CHECK_ACTION}@${OLDSHA}\n`;
+  const fleetMoved = bumpActionPins(fleet, NEWSHA, 'main 2026-10-20');
+  check('a fleet-status pin and a fleet-status-check pin are both pins',
+    countActionPins(fleet) === 2 && countActionPins(`      - uses: ${FLEET_STATUS_ACTION}x@${OLDSHA}\n`) === 0);
+  check('each moves on its own path',
+    fleetMoved.includes(`      - uses: ${FLEET_STATUS_ACTION}@${NEWSHA} # main 2026-10-20\n`) && fleetMoved.includes(`      - uses: ${FLEET_STATUS_CHECK_ACTION}@${NEWSHA} # main 2026-10-20\n`), fleetMoved);
 }
 
 console.log('\n  --mask hides only the revision of the pins pin.mjs rewrites');

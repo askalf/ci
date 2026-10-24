@@ -1,0 +1,64 @@
+# Posts the fleet review-lane commit statuses, fleet/verify and fleet/review, on a pull request's
+# head. The rules and the mechanics are scripts/fleet-status/fleet-status.mjs, tested without GitHub.
+#
+# Pinned like the Redline workflows: a caller names one full commit sha of this repository's main,
+#   uses: askalf/ci/actions/fleet-status@<sha>
+# and a change here reaches a repository only through a reviewed bump of that line.
+#
+# The script runs from this action's own files at that commit and reads and writes through the
+# REST API only. The step checks out nothing, so a fork PR's events may run it with a write token:
+# no PR code is ever on the runner. The caller's job if: decides which events run it (fleet-status.yml
+# in each repository; the fleet-status-check action holds it to that shape).
+#
+# The job needs `statuses: write` and `contents`, `pull-requests`, `issues` and `checks` read.
+name: Fleet status
+description: Post the fleet/verify and fleet/review statuses on a pull request's head, or on every open same-repo pull request.
+
+inputs:
+  token:
+    description: A token with statuses write and contents, pull-requests, issues and checks read on the repository.
+    required: false
+    default: ${{ github.token }}
+  pr:
+    description: The pull request number. Empty on a fork's workflow_run, where head-repo and head-branch find it.
+    required: false
+    default: ''
+  head-repo:
+    description: A workflow_run's head repository. When it is not this repository, the open PRs from it and head-branch get the statuses.
+    required: false
+    default: ''
+  head-branch:
+    description: A workflow_run's head branch, with head-repo.
+    required: false
+    default: ''
+  all-open:
+    description: "true: every open same-repo pull request, every page (the backfill)."
+    required: false
+    default: 'false'
+  dry-run:
+    description: "true: print the statuses, post nothing."
+    required: false
+    default: 'false'
+  target-url:
+    description: Where each status links. Empty links the run.
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+      with:
+        node-version: 22
+
+    - shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.token }}
+        REPO: ${{ github.repository }}
+        PR: ${{ inputs.pr }}
+        HEAD_REPO: ${{ inputs.head-repo }}
+        HEAD_BRANCH: ${{ inputs.head-branch }}
+        ALL_OPEN: ${{ inputs.all-open }}
+        DRY_RUN: ${{ inputs.dry-run }}
+        TARGET_URL: ${{ inputs.target-url || format('{0}/{1}/actions/runs/{2}', github.server_url, github.repository, github.run_id) }}
+      run: node "$GITHUB_ACTION_PATH/../../scripts/fleet-status/fleet-status.mjs"

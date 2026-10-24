@@ -3,8 +3,9 @@
 # workflows by SHA: redline.yml calls redline-review.yml and redline-fix.yml, where the repository
 # has one, calls redline-fix-run.yml. A workflow pins this repository's actions as steps, in
 # whichever workflow file it lives: uses: askalf/ci/actions/drift-report@<sha> (a watcher's report
-# step) and uses: askalf/ci/actions/checkout-with-retry@<sha> (any job's checkout). Each pins by
-# SHA so a change reaches it only through a reviewed bump there; this writes those bumps
+# step), uses: askalf/ci/actions/checkout-with-retry@<sha> (any job's checkout), and
+# uses: askalf/ci/actions/fleet-status@<sha> and fleet-status-check@<sha> (the fleet lanes).
+# Each pins by SHA so a change reaches it only through a reviewed bump there; this writes those bumps
 # (scripts/redline/pin.mjs), and each repo's own gate reviews and merges them.
 #
 # Writing to other repos needs a token GITHUB_TOKEN cannot be: REDLINE_PIN_BUMP_TOKEN, a
@@ -65,9 +66,10 @@ jobs:
       # The review caller is in every repo but platform; the fix caller only where the fix lane is
       # wired, and the public-text caller where the dash check is, so a missing one is skipped, not
       # an error. A repository with neither is still a caller
-      # when a workflow there pins one of this repository's actions, drift-report or
-      # checkout-with-retry (platform, whose own CI gates it, not Redline): it is bumped for those
-      # pins alone, and only a repository with no pin at all is wrong.
+      # when a workflow there pins one of this repository's actions, drift-report,
+      # checkout-with-retry, fleet-status or fleet-status-check (platform, whose own CI gates it,
+      # not Redline): it is bumped for those pins alone, and only a repository with no pin at all
+      # is wrong.
       CALLER_PATHS: >-
         .github/workflows/redline.yml .github/workflows/redline-fix.yml
         .github/workflows/public-text.yml
@@ -83,6 +85,12 @@ jobs:
         :(exclude)scripts/drift-report/README.md
         actions/drift-report
         actions/checkout-with-retry
+        scripts/fleet-status
+        :(exclude)scripts/fleet-status/*.test.mjs
+        :(exclude)scripts/fleet-status/test-fixtures
+        :(exclude)scripts/fleet-status/README.md
+        actions/fleet-status
+        actions/fleet-status-check
         .github/workflows/redline-review.yml
         .github/workflows/redline-fix-run.yml
         .github/workflows/public-text.yml
@@ -212,7 +220,7 @@ jobs:
           if [ -n "$pr" ]; then note="${note}, ${SOURCE}#${pr}"; fi
           pattern="uses: ${SOURCE}/.github/workflows/(redline-review|redline-fix-run|public-text).yml@[0-9a-f]{40}"
           title="ci: bump Redline to ${SOURCE}@${short}"
-          body="Moves the pinned ${SOURCE} calls and their redline-ref inputs, and every ${SOURCE} action pin (drift-report, checkout-with-retry), to ${SOURCE}@${SHA}, the main commit that last changed the review, the fix or an action (${note}). The scripts are fetched at that same commit. The pins are the only change."
+          body="Moves the pinned ${SOURCE} calls and their redline-ref inputs, and every ${SOURCE} action pin (drift-report, checkout-with-retry, fleet-status, fleet-status-check), to ${SOURCE}@${SHA}, the main commit that last changed the review, the fix or an action (${note}). The scripts are fetched at that same commit. The pins are the only change."
 
           # A path as the Contents API takes it: each segment percent-encoded, so a workflow named
           # with a space, a # or a ? is read and written as one whole path.
@@ -274,7 +282,7 @@ jobs:
               fi
               todo+=("$path")
             done
-            # An action (drift-report, checkout-with-retry) is pinned as a step in whichever workflow
+            # An action (drift-report, checkout-with-retry, fleet-status) is pinned as a step in whichever workflow
             # file uses it, so those files are found by reading the directory, not from a list. A file whose every pin is
             # already at the commit needs nothing. A directory or file that could not be read is not a
             # file without pins: it is reported, and this repository's bump stops for this run, so a
