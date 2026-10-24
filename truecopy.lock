@@ -4,8 +4,8 @@
     "redline": {
       "source": "scripts/redline/tools.json",
       "kind": "mcp",
-      "hash": "2a88dae4cf4b573bddfcdb50763f49838c8716ef82bf04edbab1749e46f2d831",
-      "scannedAt": "2026-10-16T22:57:47.989Z",
+      "hash": "46e5a752690a4f8ee0aaac3008e36f458ef435320fd82ff9f743eec3f690f581",
+      "scannedAt": "2026-10-24T01:48:47.625Z",
       "verdict": "clean",
       "findings": 0,
       "detection": {
@@ -14,7 +14,7 @@
       },
       "parts": {
         "redline_list": "8a8997e9490d207b20997e677bbcd0b08f10c9d05701cfe7df588d5d68f3050c",
-        "redline_read": "0383612515e7d857ce140e91b7a607996a7a3cfadb4c4ecb490240ff9c4fe854",
+        "redline_read": "4fc9d66077ad60b6c37d6770c5fe7b37506833745b1d5963906d553785a33db6",
         "redline_search": "cf7d81fe6046aa7736c04dca05a61027f8e5c68c3ae24cc41d5565456b744611",
         "redline_submit": "a4aa20911d47592caff0697419c20448be6622293f6bf60823f478b6e6413cb1",
         "(manifest)": "1b07cce04824c7641dc023f8490abf1069607791019f84a4bb05c8c4ba800fd7"
