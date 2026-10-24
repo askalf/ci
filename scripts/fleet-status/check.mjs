@@ -49,6 +49,7 @@ export const GROUP = "github.event_name == 'workflow_run' && format('fleet-statu
 
 /** A value this check cannot know: one a fork's author sets, or a context it does not supply. */
 export const UNKNOWN = Symbol('unknown');
+const STATUS_FNS = new Set(['success', 'failure', 'cancelled']);
 const UNKNOWN_CONTEXTS = new Set(['vars', 'inputs', 'needs', 'env', 'steps', 'secrets', 'job', 'runner']);
 
 /**
@@ -64,7 +65,10 @@ const UNKNOWN_CONTEXTS = new Set(['vars', 'inputs', 'needs', 'env', 'steps', 'se
  * author's login). Any other github.event path, and the contexts in UNKNOWN_CONTEXTS, read as
  * UNKNOWN, which spreads three-valued: `false && UNKNOWN` is false, `true || UNKNOWN` is true, and
  * anything else UNKNOWN touches is UNKNOWN. A condition is only false when it is false whatever
- * those values are.
+ * those values are. Also UNKNOWN when trusted: a context, or a github property, the caller did not
+ * supply (github.actor is a fork PR's author, github.head_ref its branch), and the status functions
+ * other than always(), since whether an earlier job failed or the run was cancelled is not
+ * something a fork is kept from arranging.
  */
 export function evalExpr(src, ctx, { strict = false, trusted = null } = {}) {
   const toks = [];
@@ -100,7 +104,7 @@ export function evalExpr(src, ctx, { strict = false, trusted = null } = {}) {
     fromJSON: (x) => JSON.parse(x),
     startsWith: (h, n) => String(h ?? '').toLowerCase().startsWith(String(n ?? '').toLowerCase()),
     endsWith: (h, n) => String(h ?? '').toLowerCase().endsWith(String(n ?? '').toLowerCase()),
-    // A job's status functions, as they read before any step has run.
+    // A job's status functions, as they read before any step has run; only always() is read when trusted.
     always: () => true,
     success: () => true,
     failure: () => false,
@@ -122,10 +126,11 @@ export function evalExpr(src, ctx, { strict = false, trusted = null } = {}) {
       if (peek() !== ')') for (args.push(or()); peek() === ','; p++, args.push(or()));
       eat(')');
       if (!fns[k.v]) throw new Error(`unknown function ${k.v}`);
+      if (trusted && STATUS_FNS.has(k.v)) return UNKNOWN;
       return args.some(U) ? UNKNOWN : fns[k.v](...args);
     }
     if (strict && !(k.v in ctx) && !(trusted && UNKNOWN_CONTEXTS.has(k.v))) throw new Error(`unknown context ${k.v}`);
-    let v = trusted && UNKNOWN_CONTEXTS.has(k.v) ? UNKNOWN : ctx[k.v] ?? null;
+    let v = trusted && (UNKNOWN_CONTEXTS.has(k.v) || !(k.v in ctx)) ? UNKNOWN : ctx[k.v] ?? null;
     const path = [k.v];
     for (let depth = 0; ; depth++) {
       let key;
@@ -134,6 +139,7 @@ export function evalExpr(src, ctx, { strict = false, trusted = null } = {}) {
       if (U(key)) { v = UNKNOWN; continue; }
       if (strict && k.v === 'matrix' && depth === 0 && !(key in (v ?? {}))) throw new Error(`unknown matrix.${key}`);
       path.push(String(key));
+      if (trusted && k.v === 'github' && depth === 0 && !(String(key) in (v ?? {}))) { v = UNKNOWN; continue; }
       v = trusted && path[0] === 'github' && path[1] === 'event' && path.length > 2 && !known(path.slice(2).join('.')) ? UNKNOWN : v?.[key] ?? null;
     }
   };
