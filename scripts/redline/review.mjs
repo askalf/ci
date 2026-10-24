@@ -130,7 +130,9 @@ export const SUBMIT_REQUIRED = 'The read budget is spent. Your next response mus
   + 'with verdict, summary and findings, based on what you have read. Do not call any other tool and do not answer in text.';
 export const LIMITS = {
   diffChars: 180_000, bodyChars: 8_000, commitChars: 600, commits: 100, contextChars: 60_000, earlierReviews: 3, earlierReviewChars: 6_000,
-  readLines: 400, readBytes: 64_000, listEntries: 400,
+  // filesChars caps the changed files sent in full with the brief; readLines and readBytes cap one
+  // redline_read. Each read is a model round trip, so a larger range means fewer turns.
+  filesChars: 120_000, readLines: 1_000, readBytes: 120_000, listEntries: 400,
   grepResults: 80, grepFiles: 5_000, grepFileBytes: 1_000_000, grepPattern: 200, searchMs: 10_000,
   corpusBytes: 8_000_000,
   // timeMs forces the submit; past hardMs no model call starts or retries, so the run ends inside
@@ -773,6 +775,39 @@ export function buildBrief(pr, files, commits, diff, protectedFiles = []) {
 }
 
 /**
+ * The changed files as they stand at the head, numbered as redline_read numbers them, so the
+ * review starts with what it would otherwise read over many turns. Removed and binary files are
+ * left out; files past LIMITS.filesChars in all are named for redline_read instead. Empty when no
+ * file qualifies. This text is not grounding: a finding still quotes the diff, the PR text or a
+ * commit, so an unchanged line of a changed file cannot carry one.
+ */
+export function changedFilesSection(root, files, cap = LIMITS.filesChars) {
+  let out = '';
+  const left = [];
+  for (const f of files) {
+    if (f.status === 'removed') continue;
+    let text;
+    try {
+      const file = safePath(root, f.filename);
+      const st = lstatSync(file);
+      if (!st.isFile()) continue;
+      // Numbering only lengthens a file, so one whose bytes alone pass what is left of the cap is
+      // named without being read: a huge changed file never reaches memory.
+      if (out.length + st.size > cap) { left.push(f.filename); continue; }
+      if (isBinary(file)) continue;
+      text = readFileSync(file, 'utf8');
+    } catch { continue; }
+    const lines = text.split('\n');
+    const part = `--- ${f.filename} (${lines.length} lines)\n${lines.map((l, i) => `${i + 1}\t${l}`).join('\n')}\n`;
+    if (out.length + part.length > cap) { left.push(f.filename); continue; }
+    out += part;
+  }
+  if (!out && !left.length) return '';
+  return ['', '', 'Changed files at the head, numbered as redline_read numbers them (to read, not to quote: findings quote the diff):',
+    out.trimEnd(), ...(left.length ? [`(not included, over the size cap; read them with redline_read: ${left.join(', ')})`] : [])].join('\n');
+}
+
+/**
  * The brief's closing section for REDLINE_CONTEXT_FILE: empty when there is nothing, else the text
  * under a heading that says what it is, cut at LIMITS.contextChars with the cut stated. Pure.
  */
@@ -921,7 +956,7 @@ export async function runReview(ctx) {
   const corpus = [...corpusOf(brief), ...checkoutCorpus(ctx.checkout, unshownFiles(files, diff.omitted))];
 
   // Earlier reviews reach the model but not the corpus: a line they quote may be gone from the head.
-  const messages = [{ role: 'user', content: `${brief}${earlierReviewsSection(reviews, headSha)}\n\nReview this change and finish with redline_submit.` }];
+  const messages = [{ role: 'user', content: `${brief}${changedFilesSection(ctx.checkout, files)}${earlierReviewsSection(reviews, headSha)}\n\nReview this change and finish with redline_submit.` }];
   const started = ctx.now();
   let review = null;
   let repaired = false;

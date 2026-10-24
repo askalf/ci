@@ -16,7 +16,7 @@
     },
     {
       "name": "redline_read",
-      "description": "Read lines of a file in the PR checkout, numbered. At most 400 lines per call.",
+      "description": "Read lines of a file in the PR checkout, numbered. At most 1000 lines per call.",
       "input_schema": {
         "type": "object",
         "properties": {

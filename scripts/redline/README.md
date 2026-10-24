@@ -8,7 +8,8 @@ repository to one commit of both.
 
 Each repository's `.github/workflows/redline.yml` runs on `pull_request` and calls
 `redline-review.yml` at a pinned commit, on that repository's `redline` runner (ephemeral, its own
-account, reads only). `review.mjs` gives the model the PR and its diff, read-only tools over the
+account, reads only). `review.mjs` gives the model the PR, its diff and the changed files in full (numbered, up to
+120,000 characters in all, larger ones named for `redline_read`), read-only tools over the
 checkout, and ends when the model submits a verdict. The job's status is the verdict: APPROVE
 passes, REQUEST_CHANGES fails. The finished review goes up as the `redline-verdict` artifact and
 forge posts it as `sprayberry-redline` after checking where the run came from. The reviewer's brief is
@@ -17,7 +18,8 @@ this repository; `review.test.mjs` runs it all against a stubbed GitHub and mode
 stand-in in `test-fixtures/`. `tools.json` is `TOOLS` as a file, pinned in the repository's
 `truecopy.lock` and verified by `truecopy-gate.yml`; `dump-tools.mjs --check` fails when the two
 drift apart. A finding must quote the diff, the PR text or a commit message, or, for a changed file
-the diff could not show, that file in the checkout. A changed file the base commit's root
+the diff could not show, that file in the checkout. The changed files sent in full are there to read, not to quote:
+an unchanged line in one cannot carry a finding. A changed file the base commit's root
 `.gitattributes` marks `redline-protected` (captured payloads, vendored code) is named in the brief
 as captured data: a wording finding on it (its own rule `reads-as-generated`, `ai-attribution` or
 `misleading-text`; each finding carries a rule) is sent back once and then dropped, since nobody

@@ -8,7 +8,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   parseEnvFile, readPrompt, safePath, buildDiff, planDiff, unshownFiles, checkoutCorpus, quoteIsGrounded, corpusOf, checkSubmission, finalVerdict,
-  renderBody, verdictAtHead, runTool, runReview, buildBrief, contextSection, earlierReviewsSection, REVIEWER_LOGIN, LIMITS, metaPhrase,
+  renderBody, verdictAtHead, runTool, runReview, buildBrief, contextSection, changedFilesSection, earlierReviewsSection, REVIEWER_LOGIN, LIMITS, metaPhrase,
   verdictRecord, verdictProblem, saveVerdict, VERDICT_VERSION,
 } from './review.mjs';
 import * as reviewModule from './review.mjs';
@@ -57,7 +57,7 @@ console.log('\n  readPrompt');
 const root = mkdtempSync(join(tmpdir(), 'redline-'));
 const outside = mkdtempSync(join(tmpdir(), 'redline-out-'));
 mkdirSync(join(root, 'src'));
-writeFileSync(join(root, 'src', 'a.js'), Array.from({ length: 900 }, (_, i) => `line ${i + 1}`).join('\n'));
+writeFileSync(join(root, 'src', 'a.js'), Array.from({ length: 1200 }, (_, i) => `line ${i + 1}`).join('\n'));
 writeFileSync(join(root, 'src', 'b.js'), 'export const token = process.env.X;\nconst y = 2;\n');
 writeFileSync(join(root, 'img.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0, 1, 2]));
 writeFileSync(join(outside, 'secret.txt'), 'top secret');
@@ -74,7 +74,7 @@ console.log('\n  tools');
 check('redline_list lists, directories with a slash', runTool(root, 'redline_list', {}).split('\n').includes('src/'));
 {
   const r = runTool(root, 'redline_read', { path: 'src/a.js', start_line: 10, end_line: 12 });
-  check('redline_read returns the numbered range', r.startsWith('10\tline 10\n11\tline 11\n12\tline 12\n') && r.includes('(file has 900 lines)'));
+  check('redline_read returns the numbered range', r.startsWith('10\tline 10\n11\tline 11\n12\tline 12\n') && r.includes('(file has 1200 lines)'));
   const big = runTool(root, 'redline_read', { path: 'src/a.js' });
   check(`redline_read stops at ${LIMITS.readLines} lines`, big.includes(`${LIMITS.readLines}\tline ${LIMITS.readLines}\n`) && !big.includes(`${LIMITS.readLines + 1}\tline`));
 }
@@ -194,7 +194,7 @@ console.log('\n  diff, brief and grounding');
     check('a file of hundreds of thousands of short lines grounds a quote from its end', quoteIsGrounded('the unique last line', checkoutCorpus(many, ['big.txt'])));
     rmSync(many, { recursive: true, force: true });
   }
-  check('the checkout corpus skips paths outside, binaries and missing files', !fromCheckout.some((l) => /PNG/.test(l)) && fromCheckout.length === 900);
+  check('the checkout corpus skips paths outside, binaries and missing files', !fromCheckout.some((l) => /PNG/.test(l)) && fromCheckout.length === 1200);
   const pr = { number: 7, title: 'feat: add token', body: '- adds the token\n\nGenerated with a tool', user: { login: 'askalf' },
     head: { ref: 'feat/x', sha: HEAD }, base: { ref: 'main', repo: { full_name: 'askalf/r' } } };
   const brief = buildBrief(pr, files, [{ sha: HEAD, commit: { message: 'feat: add token\n\nCo-Authored-By: Someone' } }], diff);
@@ -337,6 +337,39 @@ console.log('\n  runReview');
   const { ctx: plain, calls: plainCalls } = world({ turns: [submit(APPROVE)] });
   await runReview(plain);
   check('without context the brief is unchanged', !plainCalls.model[0].messages[0].content.includes('Context the workflow gathered'));
+}
+console.log('\n  changed files sent with the brief');
+{
+  const files = [{ filename: 'src/b.js', status: 'modified' }];
+  const sec = changedFilesSection(root, files);
+  const body = readFileSync(join(root, 'src/b.js'), 'utf8').split('\n');
+  check('a changed file arrives whole and numbered as redline_read numbers it',
+    sec.includes('--- src/b.js (') && body.every((l, i) => !l || sec.includes(`${i + 1}\t${l}`)));
+  check('a removed file and one gone from the checkout are left out',
+    changedFilesSection(root, [{ filename: 'src/b.js', status: 'removed' }, { filename: 'src/nope.js', status: 'added' }]) === '');
+  const capped = changedFilesSection(root, files, 5);
+  check('a file past the cap is named for redline_read instead', !capped.includes('1\t') && capped.includes('read them with redline_read: src/b.js'));
+  const huge = mkdtempSync(join(tmpdir(), 'redline-huge-'));
+  writeFileSync(join(huge, 'big.txt'), 'x\n'.repeat(5_000_000));
+  const big = changedFilesSection(huge, [{ filename: 'big.txt', status: 'added' }]);
+  check('a file whose bytes pass the cap is named without being read or numbered',
+    big.includes('read them with redline_read: big.txt') && !big.includes('1\tx'));
+  rmSync(huge, { recursive: true, force: true });
+  const { ctx, calls } = world({ turns: [submit(APPROVE)] });
+  await runReview(ctx);
+  const first = calls.model[0].messages[0].content;
+  check('runReview sends the changed files after the diff', first.indexOf('Changed files at the head') > first.indexOf('+export const token'));
+}
+{
+  // The changed files are context, not grounding: a quote from a line the diff does not show is
+  // still refused, so the section cannot widen what a finding may block on.
+  const files = [{ filename: 'src/a.js', status: 'modified', additions: 1, deletions: 1, patch: '@@ -1 +1 @@\n-line 0\n+line 1' }];
+  const OFF = { severity: 'blocking', file: 'src/a.js', line: 500, quote: 'line 500', problem: 'An unchanged line.' };
+  const { ctx, calls } = world({ files, turns: [submit({ verdict: 'REQUEST_CHANGES', summary: 's', findings: [OFF] }), submit(APPROVE)] });
+  await runReview(ctx);
+  check('the unchanged line did reach the model', calls.model[0].messages[0].content.includes('500\tline 500'));
+  check('a finding quoting an unchanged line of a changed file is still ungrounded',
+    JSON.stringify(calls.model[1].messages.at(-1)).includes('not in the diff'));
 }
 console.log('\n  earlier reviews on the PR');
 {
