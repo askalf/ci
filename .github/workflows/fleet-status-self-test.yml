@@ -1,0 +1,55 @@
+# Runs the two fleet-status actions from this checkout as a caller would, so the composite wiring
+# (node, the script path under the action, the inputs as environment) is proven on a runner and
+# not only in the unit tests, which redline-self-test.yml's `test` job runs.
+#
+# `check` runs fleet-status-check over the fixture caller in scripts/fleet-status/test-fixtures.
+# `status` runs fleet-status on this pull request as a dry run: it reads the PR, its reviews, its
+# comments, the base branch's rules and the head's checks with a read-only token, prints the two
+# lanes, and posts nothing.
+#
+# Not a required check, so it is path-filtered to the files it proves.
+name: Fleet status action self-test
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - actions/fleet-status/**
+      - actions/fleet-status-check/**
+      - scripts/fleet-status/**
+      - .github/workflows/fleet-status-self-test.yml
+
+permissions: {}
+
+jobs:
+  check:
+    # Our own code on ci-exec; a fork's PR, a Dependabot PR and a fork repository on GitHub's.
+    runs-on: ${{ (github.repository != 'askalf/ci' || github.event.pull_request && (github.event.pull_request.head.repo.full_name != github.repository || github.event.pull_request.user.login == 'dependabot[bot]')) && 'ubuntu-latest' || fromJSON('["self-hosted","ci-exec"]') }}
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: askalf/ci/actions/checkout-with-retry@cfe64b8b39e96b7f8d87f69df210fda6349d3198 # main 2026-10-23, askalf/ci#118
+        with:
+          persist-credentials: false
+      - uses: ./actions/fleet-status-check
+        with:
+          workflows: scripts/fleet-status/test-fixtures/caller
+
+  status:
+    runs-on: ${{ (github.repository != 'askalf/ci' || github.event.pull_request && (github.event.pull_request.head.repo.full_name != github.repository || github.event.pull_request.user.login == 'dependabot[bot]')) && 'ubuntu-latest' || fromJSON('["self-hosted","ci-exec"]') }}
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: read
+      checks: read
+      statuses: read
+    steps:
+      - uses: askalf/ci/actions/checkout-with-retry@cfe64b8b39e96b7f8d87f69df210fda6349d3198 # main 2026-10-23, askalf/ci#118
+        with:
+          persist-credentials: false
+      - uses: ./actions/fleet-status
+        with:
+          pr: ${{ github.event.pull_request.number }}
+          dry-run: 'true'

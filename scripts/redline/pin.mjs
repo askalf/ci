@@ -15,7 +15,8 @@
 //      node scripts/redline/pin.mjs --mask < workflow.yml
 //
 // The third form moves the action pins (actions/drift-report in a drift watcher,
-// actions/checkout-with-retry in any workflow), which a workflow carries as steps and not as a
+// actions/checkout-with-retry in any workflow, actions/fleet-status and actions/fleet-status-check
+// in the fleet-status workflows), which a workflow carries as steps and not as a
 // job, so they have no redline-ref to keep in step. Each pin keeps its own action path.
 // The fourth prints the sha of each of those pins, one per line, so a caller deciding whether a
 // file needs the third form recognises exactly the lines the third form rewrites.
@@ -36,8 +37,10 @@ export const FIX_WORKFLOW = 'askalf/ci/.github/workflows/redline-fix-run.yml';
 export const PUBLIC_TEXT_WORKFLOW = 'askalf/ci/.github/workflows/public-text.yml';
 export const DRIFT_REPORT_ACTION = 'askalf/ci/actions/drift-report';
 export const CHECKOUT_RETRY_ACTION = 'askalf/ci/actions/checkout-with-retry';
+export const FLEET_STATUS_ACTION = 'askalf/ci/actions/fleet-status';
+export const FLEET_STATUS_CHECK_ACTION = 'askalf/ci/actions/fleet-status-check';
 /** Every action of this repository a workflow pins as a step; `--action` moves them all. */
-export const ACTIONS = [DRIFT_REPORT_ACTION, CHECKOUT_RETRY_ACTION];
+export const ACTIONS = [DRIFT_REPORT_ACTION, CHECKOUT_RETRY_ACTION, FLEET_STATUS_ACTION, FLEET_STATUS_CHECK_ACTION];
 /** Every reusable workflow a caller pins, and the caller file that pins it. */
 export const CALLERS = [
   { workflow: REVIEW_WORKFLOW, path: '.github/workflows/redline.yml' },

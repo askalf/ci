@@ -1,0 +1,41 @@
+# Checks a repository's fleet-status callers: the refresh list in fleet-status.yml against every
+# workflow that runs on pull requests, the status job's if: against fork and same-repo events, the
+# pinned fleet-status action as the job's only step, the self-test and backfill shapes, every
+# runs-on that names a self-hosted label, and the review relay. The checks are
+# scripts/fleet-status/check.mjs, tested by check.test.mjs.
+#
+# Pinned like the Redline workflows: a caller names one full commit sha of this repository's main,
+#   uses: askalf/ci/actions/fleet-status-check@<sha>
+# and runs it as the self-test job of its fleet-status-self-test.yml, after a checkout of the PR
+# with `persist-credentials: false`. The workflows are read as text; nothing in them is executed,
+# and the job needs `contents: read` alone.
+name: Fleet status check
+description: Check a repository's fleet-status workflows, its runs-on labels and its review relay.
+
+inputs:
+  workflows:
+    description: The directory of workflows to check.
+    required: false
+    default: .github/workflows
+  repo-only:
+    description: Space-separated workflow files allowed the repository-only runs-on expression (jobs that never run PR code).
+    required: false
+    default: fleet-status.yml fleet-status-backfill.yml
+  min-own-exprs:
+    description: The fewest own-code runs-on expressions the repository uses, so a workflow that loses its expression fails here.
+    required: false
+    default: '1'
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+      with:
+        node-version: 22
+
+    - shell: bash
+      env:
+        FS_DIR: ${{ inputs.workflows }}
+        FS_REPO_ONLY: ${{ inputs.repo-only }}
+        FS_MIN_OWN: ${{ inputs.min-own-exprs }}
+      run: node "$GITHUB_ACTION_PATH/../../scripts/fleet-status/check.mjs" "$FS_DIR"
