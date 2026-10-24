@@ -474,6 +474,24 @@ export const STATUS_TRIGGERS = [
   '    types: [completed]',
 ];
 
+/** The self-test's triggers, exactly: every PR that opens, updates or reopens with a workflow change. */
+export const SELF_TEST_TRIGGERS = [
+  'on:',
+  '  pull_request:',
+  '    types: [opened, synchronize, reopened, ready_for_review]',
+  '    paths:',
+  '      - .github/workflows/**',
+];
+
+/** The grants the status and backfill jobs hold, exactly: what the action reads, and statuses. */
+export const STATUS_PERMISSIONS = ['contents: read', 'pull-requests: read', 'issues: read', 'checks: read', 'statuses: write'];
+
+/** The grants under a workflow's first job-level `permissions:`, comments dropped. */
+export function jobPermissions(y) {
+  const m = /^ {4}permissions:\n((?: {6}.*\n?)*)/m.exec(y);
+  return m ? m[1].split('\n').map((l) => uncomment(l)).filter(Boolean) : [];
+}
+
 /** A workflow's `on:` block as lines, comments and blank lines dropped and the workflows list elided. */
 export function triggerLines(y) {
   const lines = y.split('\n');
@@ -651,6 +669,10 @@ export function checkCaller(dir, opts = {}) {
   // continue-on-error, strategy or a second if: at the job level could hide a failed post or skip it.
   check('the status job has only if, runs-on, timeout-minutes, permissions and steps',
     jobKeysOf(own, 'status').join() === 'if,runs-on,timeout-minutes,permissions,steps');
+  // A token that cannot write statuses posts nothing; one that cannot read the PR, its comments or
+  // its checks computes the lanes from nothing.
+  check('the status token reads what the action reads and writes statuses, and nothing more',
+    jobPermissions(own).join() === STATUS_PERMISSIONS.join() && /^permissions: \{\}$/m.test(own));
   check('the status job\'s one step is the pinned action with exactly pr, head-repo and head-branch, and no other key',
     onlyStep(own, STATUS_ACTION, ['pr', 'head-repo', 'head-branch']));
   check(`the status job runs ${STATUS_ACTION} at a full commit sha, and no other action`,
@@ -679,6 +701,8 @@ export function checkCaller(dir, opts = {}) {
     const on = onBlock(self.y);
     check('the self-test runs on pull_request, and a dispatch, alone', /^\s+pull_request:/m.test(on)
       && !/\b(pull_request_target|pull_request_review|issue_comment|workflow_run|push|schedule)\b/.test(on));
+    // Every PR that opens, updates or reopens with a workflow change runs it; no path is left out.
+    check('the self-test runs on every PR that changes a workflow', triggerLines(self.y).join('\n') === SELF_TEST_TRIGGERS.join('\n'));
     check('the self-test job is named self-test', jobs(self.y).join() === 'self-test');
     check(`the self-test runs ${CHECK_ACTION} at a full commit sha`, usesOf(self.y).some((u) => new RegExp(`^${CHECK_ACTION}@[0-9a-f]{40}$`).test(u)));
     check('the self-test token reads contents alone', /^    permissions:\n      contents: read\n(?! {6})/m.test(self.y) && /^permissions: \{\}$/m.test(self.y));
@@ -696,6 +720,8 @@ export function checkCaller(dir, opts = {}) {
   const backfill = beside.find((w) => w.f === 'fleet-status-backfill.yml');
   if (backfill) {
     const bstep = stepWith(backfill.y, STATUS_ACTION) ?? '';
+    check('the backfill\'s token reads what the action reads and writes statuses, and nothing more',
+      jobPermissions(backfill.y).join() === STATUS_PERMISSIONS.join());
     check('the backfill runs on a dispatch alone', /^\s+workflow_dispatch:/m.test(onBlock(backfill.y)) && onBlock(backfill.y).replace(/\s+/g, ' ').trim() === 'workflow_dispatch:');
     check(`the backfill runs ${STATUS_ACTION} over every open PR, and nothing else`,
       usesOf(backfill.y).length === 1 && /^ {10}all-open: (?:'true'|"true"|true)$/m.test(bstep) && !/^\s+(?:- )?run:/im.test(backfill.y));
