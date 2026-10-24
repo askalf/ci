@@ -441,6 +441,8 @@ if (spawnSync('bash', ['-c', 'true']).status !== 0 || process.platform === 'win3
   // The bump PR in this repository: its own caller and the action pins move, nothing else.
   commit({ '.github/workflows/redline-review.yml': review(SHA2).replace('askalf/ci#1', 'askalf/ci#2'), '.github/workflows/redline.yml': callerFile(SHA2) }, 'ci: bump Redline to askalf/ci@2222222');
   commit({ 'README.md': 'not a path a caller runs\n' }, 'docs');
+  // The pre-push review runs in no caller: a change to it alone starts no wave.
+  commit({ 'scripts/redline/local.mjs': 'export const local = 1;\n', 'scripts/redline/local.test.mjs': '// test\n' }, 'redline local: a change');
   const first = pickRun();
   check('the newest commit that changes more than pins is picked, past a bump that moves only this repository\'s pins',
     first.r.status === 0 && first.out.includes(`sha=${real}\n`) && first.r.stdout.includes('skipped ') && first.r.stdout.includes('it changes only the revisions of pins to this repository'),
