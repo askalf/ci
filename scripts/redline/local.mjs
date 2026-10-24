@@ -21,9 +21,9 @@
 // Only committed work is reviewed: the head commit and the commits since its merge base with the base
 // branch (origin's default branch unless --base names one).
 
-import { readFileSync, writeFileSync, mkdtempSync, rmSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdtempSync, mkdirSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 import {
@@ -75,7 +75,8 @@ export function changedFiles(cwd, base, head) {
     const c = counts.get(f.filename) ?? { additions: 0, deletions: 0 };
     Object.assign(f, c, { changes: c.additions + c.deletions });
     const paths = f.previous_filename ? [f.previous_filename, f.filename] : [f.filename];
-    const out = git(cwd, ['diff', '--no-color', '--no-ext-diff', '-M', base, head, '--', ...paths]);
+    // The names are filenames, not pathspecs: `src/a[1].js` must not also select `src/a1.js`.
+    const out = git(cwd, ['--literal-pathspecs', 'diff', '--no-color', '--no-ext-diff', '-M', base, head, '--', ...paths]);
     const at = out.search(/^@@/m);
     if (at >= 0) f.patch = out.slice(at).replace(/\n$/, '');
   }
@@ -144,8 +145,17 @@ export function packChange(cwd, change, out = 'inherit') {
   const dir = mkdtempSync(join(tmpdir(), 'redline-local-'));
   try {
     writeFileSync(join(dir, 'change.json'), JSON.stringify(change));
+    // tree/ holds the committed blobs, as CI checks them out, not a distribution archive: git archive
+    // runs in an empty repository that borrows this one's objects, and its info/attributes (which
+    // outrank the tree's .gitattributes) turn export-ignore and export-subst off.
+    const bare = join(dir, 'archive.git');
+    git(dir, ['init', '-q', '--bare', bare]);
+    mkdirSync(join(bare, 'objects', 'info'), { recursive: true });
+    mkdirSync(join(bare, 'info'), { recursive: true });
+    writeFileSync(join(bare, 'objects', 'info', 'alternates'), `${resolve(cwd, git(cwd, ['rev-parse', '--git-path', 'objects']).trim())}\n`);
+    writeFileSync(join(bare, 'info', 'attributes'), '* -export-ignore -export-subst\n');
     // --add-file takes the --prefix before it, so change.json sits at the top and the tree under tree/.
-    const r = spawnSync('git', ['archive', '--format=tar', '--prefix=', `--add-file=${join(dir, 'change.json')}`, '--prefix=tree/', change.head.sha],
+    const r = spawnSync('git', [`--git-dir=${bare}`, 'archive', '--format=tar', '--prefix=', `--add-file=${join(dir, 'change.json')}`, '--prefix=tree/', change.head.sha],
       { cwd, stdio: ['ignore', out, 'pipe'], maxBuffer: 2 * 1024 * 1024 * 1024 });
     if (r.status !== 0) throw new Error(`git archive failed: ${String(r.stderr ?? '').trim().slice(0, 300)}`);
     return r.stdout;

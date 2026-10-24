@@ -153,7 +153,44 @@ const unpacked = mkdtempSync(join(tmpdir(), 'redline-local-in-'));
   check('a broken change.json stops before any model call', /full head and base/.test((await throws(() => reviewLocal(ctx, unpacked)))?.message ?? '') && calls.model.length === 2);
 }
 
+// A second repository whose names are pathspec magic and whose .gitattributes asks archives to drop
+// and rewrite files.
+console.log('\n  literal paths and archive attributes');
+const odd = mkdtempSync(join(tmpdir(), 'redline-local-odd-'));
+const oddOut = mkdtempSync(join(tmpdir(), 'redline-local-odd-in-'));
+{
+  const o = (...args) => git(odd, args);
+  o('init', '-q', '-b', 'main');
+  o('config', 'user.name', 'tester');
+  o('config', 'user.email', 'tester@example.invalid');
+  o('config', 'core.autocrlf', 'false');
+  mkdirSync(join(odd, 'src'));
+  writeFileSync(join(odd, 'src', 'a[1].js'), 'export const bracket = 0;\n');
+  writeFileSync(join(odd, 'src', 'a1.js'), 'export const plain = 0;\n');
+  writeFileSync(join(odd, '.gitattributes'), 'src/ export-ignore\nstamp.txt export-subst\n');
+  writeFileSync(join(odd, 'stamp.txt'), 'built from $Format:%H$\n');
+  o('add', '-A');
+  o('commit', '-q', '-m', 'base');
+  const oddBase = o('rev-parse', 'HEAD').trim();
+  o('checkout', '-q', '-b', 'feat/odd');
+  writeFileSync(join(odd, 'src', 'a[1].js'), 'export const bracket = 1;\n');
+  writeFileSync(join(odd, 'src', 'a1.js'), 'export const plain = 1;\n');
+  o('add', '-A');
+  o('commit', '-q', '-m', 'feat: both');
+  const files = changedFiles(odd, oddBase, o('rev-parse', 'HEAD').trim());
+  const by = Object.fromEntries(files.map((f) => [f.filename, f]));
+  check('a name with pathspec magic gets only its own patch', by['src/a[1].js'].patch.includes('+export const bracket = 1;') && !by['src/a[1].js'].patch.includes('plain')
+    && by['src/a1.js'].patch.includes('+export const plain = 1;') && !by['src/a1.js'].patch.includes('bracket'));
+  const tar = packChange(odd, buildChange(odd, { base: 'main', repo: 'askalf/odd' }), 'pipe');
+  const x = spawnSync('tar', ['-x', '-f', '-'], { cwd: oddOut, input: tar });
+  check('export-ignore does not drop committed files from tree/', x.status === 0
+    && readFileSync(join(oddOut, 'tree', 'src', 'a[1].js'), 'utf8') === 'export const bracket = 1;\n' && readFileSync(join(oddOut, 'tree', 'src', 'a1.js'), 'utf8') === 'export const plain = 1;\n');
+  check('export-subst does not rewrite committed bytes in tree/', existsSync(join(oddOut, 'tree', 'stamp.txt')) && readFileSync(join(oddOut, 'tree', 'stamp.txt'), 'utf8') === 'built from $Format:%H$\n');
+}
+
 rmSync(repo, { recursive: true, force: true });
 rmSync(unpacked, { recursive: true, force: true });
+rmSync(odd, { recursive: true, force: true });
+rmSync(oddOut, { recursive: true, force: true });
 console.log(`\n  ${pass} pass, ${fail} fail`);
 process.exit(fail ? 1 : 0);
