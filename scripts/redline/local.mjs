@@ -325,6 +325,10 @@ async function main() {
   const mode = args._[0];
   if (mode === 'pack') {
     if (process.stdout.isTTY) { console.error('pack writes a tar: pipe it to the host (| ssh <host> /opt/askalf/redline-local.sh)'); process.exit(2); }
+    if (git(process.cwd(), ['rev-parse', '--show-toplevel'], { allowFail: true }) === null) {
+      console.error(`redline local: ${process.cwd()} is not in a git repository; run pack inside the repository whose branch you want reviewed (cd there first)`);
+      process.exit(2);
+    }
     const pr = args.pr === undefined ? 0 : Number(args.pr);
     if (!Number.isInteger(pr) || pr < 0) { console.error('--pr must be a PR number'); process.exit(2); }
     const change = buildChange(process.cwd(), {
