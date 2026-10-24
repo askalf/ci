@@ -904,29 +904,10 @@ export function deepReview(files) {
 }
 
 /**
- * Review one PR head. ctx: { repo, pr, headSha, checkout, readToken, reviewToken, darioUrl, darioKey,
- * model, fallbackModel, pinModel?, deepModel?, system, context?, fetch, sleep, now, log }. With no reviewToken the review is built but not posted.
- * Returns { outcome: 'posted'|'unposted'|'existing'|'skipped'|'dry-run', verdict?, url?, reason?, record? };
- * record (verdict.json) is set when a review was built for this head, posted or not.
+ * Move a review to the pin model when the change only moves pins, or to the deep model (and the
+ * deep key) when it touches a sensitive path or is large. Sets ctx.model and ctx.darioKey.
  */
-export async function runReview(ctx) {
-  const { repo, pr: n, headSha } = ctx;
-  const deadline = ctx.now() + LIMITS.hardMs;
-  const pr = await gh(ctx, `/repos/${repo}/pulls/${n}`);
-  if (pr.state !== 'open') return { outcome: 'skipped', reason: `PR is ${pr.state}` };
-  if (pr.head.sha !== headSha) return { outcome: 'skipped', reason: `head moved to ${pr.head.sha.slice(0, 7)}` };
-  // A fork head is read only when the workflow said so (REDLINE_FORK=1: a dispatch that fetched
-  // the head by the repository's pull ref and checked the contributor gate). On pull_request the
-  // job never runs for a fork, and a dispatch that did not set it skips the head as before.
-  if (pr.head.repo?.full_name !== repo && !ctx.fork) return { outcome: 'skipped', reason: 'fork PR' };
-  if (pr.draft) return { outcome: 'skipped', reason: 'draft PR' };
-
-  // A re-read reviews the head again: the verdict standing there is the one being reconsidered.
-  const reviews = await ghAll(ctx, `/repos/${repo}/pulls/${n}/reviews`);
-  const standing = ctx.reread ? null : verdictAtHead(reviews, headSha);
-  if (standing) return { outcome: 'existing', verdict: standing.state === 'APPROVED' ? 'APPROVE' : 'REQUEST_CHANGES', url: standing.html_url };
-
-  const files = await ghAll(ctx, `/repos/${repo}/pulls/${n}/files`);
+export function routeModel(ctx, files) {
   // A pin-only PR stays on the pin model even when that is REDLINE_MODEL: its caller files sit
   // under .github/, so deepReview() would otherwise move it to the deep model.
   if (ctx.pinModel && pinOnly(files)) {
@@ -944,19 +925,22 @@ export async function runReview(ctx) {
     }
     if (ctx.deepKey) ctx.darioKey = ctx.deepKey;
   }
-  const commits = await ghAll(ctx, `/repos/${repo}/pulls/${n}/commits`, 3);
+}
+
+/**
+ * The review of one change: the brief, the model's turns and the grounding of its findings. pr
+ * carries what buildBrief reads (number, title, body, user, head, base); files are GitHub's
+ * pull-request files (patch per file); reviews are the PR's reviews, for the earlier requests.
+ * runReview reads all of it from GitHub; local.mjs builds it from a local branch. Returns
+ * { review, verdict, notes }; throws when no review is submitted.
+ */
+export async function reviewChange(ctx, { pr, files, commits, reviews = [], protectedSet = new Set(), deadline = ctx.now() + LIMITS.hardMs }) {
   const diff = planDiff(files);
-  let protectedSet = new Set();
-  try {
-    protectedSet = protectedIn(await baseAttributes(ctx, pr), files.filter((f) => f.status !== 'removed').map((f) => f.filename));
-  } catch (e) {
-    ctx.log?.(`no path counts as ${PROTECTED_ATTR}: ${e.message}`);
-  }
   const brief = buildBrief(pr, files, commits, diff.text, [...protectedSet].sort()) + contextSection(ctx.context);
   const corpus = [...corpusOf(brief), ...checkoutCorpus(ctx.checkout, unshownFiles(files, diff.omitted))];
 
   // Earlier reviews reach the model but not the corpus: a line they quote may be gone from the head.
-  const messages = [{ role: 'user', content: `${brief}${changedFilesSection(ctx.checkout, files)}${earlierReviewsSection(reviews, headSha)}\n\nReview this change and finish with redline_submit.` }];
+  const messages = [{ role: 'user', content: `${brief}${changedFilesSection(ctx.checkout, files)}${earlierReviewsSection(reviews, pr.head.sha)}\n\nReview this change and finish with redline_submit.` }];
   const started = ctx.now();
   let review = null;
   let repaired = false;
@@ -1064,7 +1048,42 @@ export async function runReview(ctx) {
   }
   if (!review) throw new Error(`no review submitted within ${LIMITS.turns} turns`);
 
-  const verdict = finalVerdict(review);
+  return { review, verdict: finalVerdict(review), notes };
+}
+
+/**
+ * Review one PR head. ctx: { repo, pr, headSha, checkout, readToken, reviewToken, darioUrl, darioKey,
+ * model, fallbackModel, pinModel?, deepModel?, system, context?, fetch, sleep, now, log }. With no reviewToken the review is built but not posted.
+ * Returns { outcome: 'posted'|'unposted'|'existing'|'skipped'|'dry-run', verdict?, url?, reason?, record? };
+ * record (verdict.json) is set when a review was built for this head, posted or not.
+ */
+export async function runReview(ctx) {
+  const { repo, pr: n, headSha } = ctx;
+  const deadline = ctx.now() + LIMITS.hardMs;
+  const pr = await gh(ctx, `/repos/${repo}/pulls/${n}`);
+  if (pr.state !== 'open') return { outcome: 'skipped', reason: `PR is ${pr.state}` };
+  if (pr.head.sha !== headSha) return { outcome: 'skipped', reason: `head moved to ${pr.head.sha.slice(0, 7)}` };
+  // A fork head is read only when the workflow said so (REDLINE_FORK=1: a dispatch that fetched
+  // the head by the repository's pull ref and checked the contributor gate). On pull_request the
+  // job never runs for a fork, and a dispatch that did not set it skips the head as before.
+  if (pr.head.repo?.full_name !== repo && !ctx.fork) return { outcome: 'skipped', reason: 'fork PR' };
+  if (pr.draft) return { outcome: 'skipped', reason: 'draft PR' };
+
+  // A re-read reviews the head again: the verdict standing there is the one being reconsidered.
+  const reviews = await ghAll(ctx, `/repos/${repo}/pulls/${n}/reviews`);
+  const standing = ctx.reread ? null : verdictAtHead(reviews, headSha);
+  if (standing) return { outcome: 'existing', verdict: standing.state === 'APPROVED' ? 'APPROVE' : 'REQUEST_CHANGES', url: standing.html_url };
+
+  const files = await ghAll(ctx, `/repos/${repo}/pulls/${n}/files`);
+  routeModel(ctx, files);
+  const commits = await ghAll(ctx, `/repos/${repo}/pulls/${n}/commits`, 3);
+  let protectedSet = new Set();
+  try {
+    protectedSet = protectedIn(await baseAttributes(ctx, pr), files.filter((f) => f.status !== 'removed').map((f) => f.filename));
+  } catch (e) {
+    ctx.log?.(`no path counts as ${PROTECTED_ATTR}: ${e.message}`);
+  }
+  const { review, verdict, notes } = await reviewChange(ctx, { pr, files, commits, reviews, protectedSet, deadline });
   if (ctx.dryRun) return { outcome: 'dry-run', verdict, body: renderBody(review, verdict, headSha, notes) };
   const now = await gh(ctx, `/repos/${repo}/pulls/${n}`);
   if (now.head.sha !== headSha) return { outcome: 'skipped', reason: `head moved to ${now.head.sha.slice(0, 7)} during the review` };
@@ -1079,6 +1098,22 @@ export async function runReview(ctx) {
 }
 
 // ---------- CLI ----------
+
+/**
+ * The model half of a review's ctx, from the host's env file and darioAccess(): dario, the models,
+ * the deep key, fetch and the clock. main() and local.mjs both build their ctx on it.
+ */
+export function modelContext(secrets, dario) {
+  return {
+    darioUrl: dario.darioUrl, darioKey: dario.darioKey,
+    model: secrets.REDLINE_MODEL || DEFAULT_MODEL,
+    fallbackModel: secrets.REDLINE_FALLBACK_MODEL ?? DEFAULT_FALLBACK_MODEL,
+    pinModel: secrets.REDLINE_PIN_MODEL ?? DEFAULT_PIN_MODEL,
+    deepModel: secrets.REDLINE_DEEP_MODEL || '',
+    deepKey: dario.darioSocket ? '' : (secrets.REDLINE_DEEP_API_KEY || ''),
+    fetch: withDarioSocket(globalThis.fetch, dario.darioUrl, dario.darioSocket), sleep: (ms) => new Promise((r) => setTimeout(r, ms)), now: () => Date.now(),
+  };
+}
 
 async function main() {
   const env = process.env;
@@ -1106,15 +1141,9 @@ async function main() {
     repo: need('REPO'), pr: Number(need('PR')), headSha: need('HEAD_SHA'), checkout: need('CHECKOUT'),
     readToken: need('GH_READ_TOKEN'),
     reviewToken: secrets.REDLINE_GITHUB_TOKEN || secrets.GITHUB_PAT_REVIEWER || '',
-    darioUrl: dario.darioUrl, darioKey: dario.darioKey,
-    model: secrets.REDLINE_MODEL || DEFAULT_MODEL,
-    fallbackModel: secrets.REDLINE_FALLBACK_MODEL ?? DEFAULT_FALLBACK_MODEL,
-    pinModel: secrets.REDLINE_PIN_MODEL ?? DEFAULT_PIN_MODEL,
-    deepModel: secrets.REDLINE_DEEP_MODEL || '',
-    deepKey: dario.darioSocket ? '' : (secrets.REDLINE_DEEP_API_KEY || ''),
+    ...modelContext(secrets, dario),
     system,
     context,
-    fetch: withDarioSocket(globalThis.fetch, dario.darioUrl, dario.darioSocket), sleep: (ms) => new Promise((r) => setTimeout(r, ms)), now: () => Date.now(),
     dryRun: env.REDLINE_DRY_RUN === '1',
     reread: env.REDLINE_REREAD === '1',
     fork: env.REDLINE_FORK === '1',

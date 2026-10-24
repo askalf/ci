@@ -28,6 +28,8 @@ jobs:
         with:
           node-version: 22
       - run: node scripts/redline/review.test.mjs
+      # The review before a push, against a throwaway repository and a stubbed model.
+      - run: node scripts/redline/local.test.mjs
       - run: node scripts/redline/public-text.test.mjs
       # The drift-report action's script and the action pin, against a fake gh and git.
       - run: node scripts/drift-report/report.test.mjs
