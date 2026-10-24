@@ -52,14 +52,17 @@ check('reads literals, paths and functions',
     && evalExpr('l == 0', ctx) === UNKNOWN && evalExpr("startsWith(l, 'a')", ctx) === UNKNOWN && evalExpr('l.x', ctx) === UNKNOWN);
 }
 {
-  const inside = 'name: x # c\non:\n  push:\n    branches:\n    - main\n  workflow_run:\n    workflows: [a, \'b c\',\n                "d"]\njobs:\n  a:\n    name: --help smoke\n    if: >-\n      a ==\n      b\n    runs-on: [self-hosted, x-exec]\n    steps:\n      -\n        run: |\n          echo a: b\n\n          echo # c\n      - with: { a: 1 }\n';
+  const inside = 'name: x # c\non:\n  push:\n    branches:\n    - main\n  workflow_run:\n    workflows: [a, \'b c\',\n                "d"]\njobs:\n  a:\n    name: --help smoke\n    if: >-\n      a ==\n      b\n    runs-on: [self-hosted, x-exec]\n    steps:\n      -\n        run: |\n          echo a: b\n\n          echo # c\n      - with: {}\n';
   check('a workflow in the YAML subset has no gaps', yamlGaps(inside).length === 0);
   const gap = (s) => String(yamlGaps(s)[0]);
   check('each shape outside the YAML subset is a gap, from its first line',
     gap("'on':\n  push:\n") === '1' && gap('a: b\n  c\n') === '2' && gap("a: 'b\n  c'\n") === '1'
     && gap('a: &x b\n') === '1' && gap('a: *x\n') === '1' && gap('a: !t b\n') === '1' && gap('---\na: b\n') === '1'
     && gap('a:\n\tb: c\n') === '2' && gap('a: b: c\n') === '1' && gap('a: [b,\n  {c: d}]\n') === '1'
-    && gap('a: [b,\nc]\n') === '1' && gap('? a\n: b\n') === '1' && gap('- a\n  b\n') === '2');
+    && gap('a: [b,\nc]\n') === '1' && gap('? a\n: b\n') === '1' && gap('- a\n  b\n') === '2'
+    && gap("- { run: 'echo' }\n") === '1' && gap('a: { b: c }\n') === '1' && gap('a: [b, [c]]\n') === '1'
+    && gap('on: ["pull\\u005frequest"]\n') === '1' && gap('a: "b\\"c"\n') === '1' && gap("a: 'b''c'\n") === '1'
+    && gap("a: ['b''c']\n") === '1' && gap('a: [b: c]\n') === '1');
 }
 check('&& and || return operands, as Actions does', evalIf("(x && 'ubuntu-latest' || 'ours') == 'ours'", { x: false }));
 check('mixed types compare as numbers, as Actions does',
@@ -177,6 +180,10 @@ const cases = [
   ['two include entries that together send a fork PR to our runners', { 'ci.yml': (y) => `${y}\n  extra:\n    strategy:\n      matrix:\n        os: [ubuntu-latest]\n        include:\n          - a: 'yes'\n          - b: 'yes'\n    runs-on: \${{ matrix.a == 'yes' && matrix.b == 'yes' && fromJSON('["self-hosted","example-exec"]') || 'ubuntu-latest' }}\n    steps:\n      - run: echo\n` }, /ci\.yml extra: only a job that never runs PR code uses it/],
   ['a matrix value YAML versions read differently', { 'ci.yml': (y) => `${y}\n  extra:\n    strategy:\n      matrix:\n        flag: [no]\n    runs-on: \${{ matrix.flag && 'ubuntu-latest' || fromJSON('["self-hosted","example-exec"]') }}\n    steps:\n      - run: echo\n` }, /not: ci\.yml extra: <unreadable>/],
   ['an include entry with a nested value', { 'ci.yml': (y) => `${y}\n  extra:\n    strategy:\n      matrix:\n        os: [ubuntu-latest]\n        include:\n          - os: ubuntu-latest\n            cfg:\n              runner: other-exec\n    runs-on: \${{ matrix.os }}\n    steps:\n      - run: echo\n` }, /not: ci\.yml extra: <unreadable>/],
+  ['a run step written as a flow mapping in the status job', { [STATUS]: (y) => `${y}      - { run: 'echo unexpected' }\n` }, /fleet-status\.yml: is in the YAML subset this check reads/],
+  ['a second action written as a flow mapping in the status job', { [STATUS]: (y) => `${y}      - { uses: 'someone/action@v1' }\n` }, /fleet-status\.yml: is in the YAML subset this check reads/],
+  ['a run step after a wide dash in the status job', { [STATUS]: (y) => `${y}      -   run: echo unexpected\n` }, /fleet-status\.yml: is in the YAML subset this check reads/],
+  ['an escaped PR trigger', { 'pr.yml': () => `name: pr\non: ["pull\\u005frequest"]\njobs:\n${job('p', "    if: github.repository == 'askalf/example'\n    runs-on: [self-hosted, example-exec]\n")}` }, /pr\.yml: is in the YAML subset this check reads \(not line 2\)/],
   ['a quoted on: key hiding a PR trigger', { 'pr.yml': () => `name: pr\n'on':\n  pull_request:\njobs:\n${job('p', "    if: github.repository == 'askalf/example'\n    runs-on: [self-hosted, example-exec]\n")}` }, /pr\.yml: is in the YAML subset this check reads \(not line 2\)/],
   ['an if: whose next line continues it', { 'ci.yml': (y) => `${y}${job('pr', "    if: github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]' && github.repository == 'askalf/example'\n      || github.event_name == 'pull_request'\n    runs-on: [self-hosted, example-exec]\n")}` }, /ci\.yml: is in the YAML subset this check reads/],
   ['an if: in a quoted string over two lines', { 'ci.yml': (y) => `${y}${job('pr', "    if: \"github.repository == 'askalf/example'\n      || true\"\n    runs-on: [self-hosted, example-exec]\n")}` }, /ci\.yml: is in the YAML subset this check reads/],

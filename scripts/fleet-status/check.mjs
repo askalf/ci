@@ -197,28 +197,37 @@ export function uncomment(s) {
 /**
  * The lines of a workflow outside the YAML subset this check reads, 1-based. Its readers go line
  * by line, so a workflow they could misread fails instead of passing on a partial reading. Every
- * line is blank, a comment, inside a block scalar, `- ` items, or an unquoted `key:`; a value is
- * empty, a block scalar indicator, one complete quoted string, one complete flow collection, or a
- * plain scalar, all on one line. A scalar that continues on a further-indented line, a quoted or
- * complex key, a tab in the indentation, an anchor, alias or tag, and a document marker are outside it.
+ * line is blank, a comment, inside a block scalar, `- ` items (one space after each dash, as the
+ * readers expect), or an unquoted `key:`; a value is
+ * empty, a block scalar indicator, `{}`, a flow sequence of scalars, or one scalar, all on one
+ * line. A quoted scalar has no escapes (no backslash in double quotes, no doubled single quote),
+ * since the readers here do not decode them. A scalar that continues on a further-indented line,
+ * a flow mapping or anything nested in a flow sequence, a quoted or complex key, a tab in the
+ * indentation, an anchor, alias or tag, and a document marker are outside it.
  */
 export function yamlGaps(y) {
   const gaps = [];
   const lines = y.split('\n');
   let block = null; // a block scalar's content is indented past this
   let scalarAt = null; // after a value on its line, a line indented past this would continue it
-  const balanced = (s) => {
+  const QUOTED = /^(?:'[^']*'|"[^"\\]*")$/;
+  const plain = (s) => s !== '' && !/^[&*!%@`|>?,[\]{}#'"]/.test(s) && !/^-(\s|$)/.test(s) && !/:(\s|$)/.test(s);
+  // A flow sequence of scalars, each quoted without escapes or plain; a trailing comma is allowed.
+  const flowSeq = (s) => {
+    if (!/^\[.*\]$/.test(s)) return false;
+    const items = [];
+    let cur = '';
     let q = '';
-    const stack = [];
-    for (let i = 0; i < s.length; i++) {
-      const c = s[i];
-      if (q === '"' && c === '\\') { i++; continue; }
-      if (q) { if (c === q) q = ''; continue; }
+    for (const c of s.slice(1, -1)) {
+      if (q) { cur += c; if (c === q) q = ''; continue; }
       if (c === "'" || c === '"') q = c;
-      else if (c === '[' || c === '{') stack.push(c === '[' ? ']' : '}');
-      else if (c === ']' || c === '}') { if (stack.pop() !== c) return false; if (!stack.length && i !== s.length - 1) return false; }
+      if (c === ',') { items.push(cur.trim()); cur = ''; } else cur += c;
     }
-    return !q && !stack.length;
+    if (q) return false;
+    items.push(cur.trim());
+    if (items.length > 1 && items[items.length - 1] === '') items.pop();
+    if (items.length === 1 && items[0] === '') return true;
+    return items.every((x) => (/^['"]/.test(x) ? QUOTED.test(x) : plain(x)));
   };
   for (let i = 0; i < lines.length; i++) {
     const l = lines[i];
@@ -232,7 +241,7 @@ export function yamlGaps(y) {
     let rest = l.slice(ind);
     let col = ind;
     let dashAt = null;
-    for (let d; (d = /^-( +|$)/.exec(rest));) { dashAt = col; col += d[0].length; rest = rest.slice(d[0].length); }
+    for (let d; (d = /^-( |$)/.exec(rest));) { dashAt = col; col += d[0].length; rest = rest.slice(d[0].length); }
     if (rest === '' || /^#/.test(rest)) continue;
     const key = /^([A-Za-z0-9_][\w.-]*):(?:\s+(.*))?$/.exec(rest);
     if (!key && dashAt === null) { gaps.push(i + 1); continue; }
@@ -240,24 +249,21 @@ export function yamlGaps(y) {
     const x = uncomment(key ? key[2] ?? '' : rest);
     if (x === '') continue;
     if (/^[|>][-+1-9]*$/.test(x)) { block = at; continue; }
-    // A flow sequence of scalars may run over further-indented lines; nothing nests in it.
-    if (x.startsWith('[') && !balanced(x)) {
+    // A flow sequence may run over further-indented lines, up to the line that ends it.
+    if (x.startsWith('[')) {
       let flow = x;
       let j = i + 1;
-      for (; j < lines.length && !balanced(flow); j++) {
+      for (; j < lines.length && !flow.endsWith(']'); j++) {
         if (/^\s*(#.*)?$/.test(lines[j])) continue;
         if (/^ *\t/.test(lines[j]) || /^ */.exec(lines[j])[0].length <= at) break;
         flow += ` ${uncomment(lines[j])}`;
       }
-      if (!balanced(flow) || /[[{]/.test(flow.slice(1)) || /:(\s|$)/.test(flow.replace(/'(?:[^']|'')*'|"(?:[^"\\]|\\.)*"/g, ''))) { gaps.push(i + 1); continue; }
+      if (!flowSeq(flow)) { gaps.push(i + 1); continue; }
       i = j - 1;
       scalarAt = at;
       continue;
     }
-    const ok = x.startsWith("'") ? /^'(?:[^']|'')*'$/.test(x)
-      : x.startsWith('"') ? /^"(?:[^"\\]|\\.)*"$/.test(x)
-        : /^[[{]/.test(x) ? balanced(x)
-          : !/^[&*!%@`|>?,\]}#]/.test(x) && !/^-(\s|$)/.test(x) && !/:(\s|$)/.test(x);
+    const ok = /^['"]/.test(x) ? QUOTED.test(x) : x.startsWith('{') ? /^\{\s*\}$/.test(x) : plain(x);
     if (!ok) { gaps.push(i + 1); continue; }
     scalarAt = at;
   }
@@ -473,7 +479,7 @@ export function misfits(list, workflows) {
 export const jobs = (y) => [...y.slice(Math.max(0, y.search(/^jobs:/m))).matchAll(/^  ([\w-]+):/gm)].map((m) => m[1]);
 
 /** The `uses:` values of a workflow, in order. */
-export const usesOf = (y) => [...y.matchAll(/^\s+(?:- )?uses:\s*(\S+)/gm)].map((m) => m[1]);
+export const usesOf = (y) => [...y.matchAll(/^\s+(?:- )?uses:\s*(\S+)/gim)].map((m) => m[1]);
 
 /** The block under the step that uses `action`, through its last more-indented line. */
 function stepWith(y, action) {
@@ -575,7 +581,7 @@ export function checkCaller(dir, opts = {}) {
   const step = stepWith(own, STATUS_ACTION) ?? '';
   check(`the status job runs ${STATUS_ACTION} at a full commit sha, and no other action`,
     usesOf(own).length === 1 && new RegExp(`^${STATUS_ACTION}@[0-9a-f]{40}$`).test(usesOf(own)[0] ?? ''));
-  check('the status job has no run step', !/^\s+(?:- )?run:/m.test(own));
+  check('the status job has no run step', !/^\s+(?:- )?run:/im.test(own));
   check('the fork path hands the action the head repo and branch',
     /head-repo: \$\{\{ github\.event\.workflow_run\.head_repository\.full_name \}\}/.test(step)
     && /head-branch: \$\{\{ github\.event\.workflow_run\.head_branch \}\}/.test(step));
@@ -610,7 +616,7 @@ export function checkCaller(dir, opts = {}) {
     const bstep = stepWith(backfill.y, STATUS_ACTION) ?? '';
     check('the backfill runs on a dispatch alone', /^\s+workflow_dispatch:/m.test(onBlock(backfill.y)) && onBlock(backfill.y).replace(/\s+/g, ' ').trim() === 'workflow_dispatch:');
     check(`the backfill runs ${STATUS_ACTION} over every open PR, and nothing else`,
-      usesOf(backfill.y).length === 1 && /all-open: ['"]?true['"]?/.test(bstep) && !/^\s+(?:- )?run:/m.test(backfill.y));
+      usesOf(backfill.y).length === 1 && /all-open: ['"]?true['"]?/.test(bstep) && !/^\s+(?:- )?run:/im.test(backfill.y));
   }
 
   // runs-on: our own code on our runners, code nobody here wrote never, a fork repository never.
