@@ -83,8 +83,18 @@ export function evalExpr(src, ctx, { strict = false, trusted = null } = {}) {
   const eat = (t) => { if (peek() !== t) throw new Error(`expected ${t} at token ${p}`); return toks[p++]; };
   const U = (v) => v === UNKNOWN;
   const truthy = (v) => !(v === null || v === undefined || v === false || v === 0 || v === '');
-  const eq = (a, b) => (U(a) || U(b) ? UNKNOWN
-    : typeof a === 'string' && typeof b === 'string' ? a.toLowerCase() === b.toLowerCase() : (a ?? null) === (b ?? null));
+  // Actions' ==: two strings compare case-insensitively; two values of one other type compare as
+  // that type (an object or array only to itself); values of different types are both coerced to
+  // numbers (null and '' are 0, true is 1, a string that is not a number and any object are NaN),
+  // so null == '' and false == 0 are true.
+  const num = (v) => (v === null || v === undefined ? 0 : typeof v === 'boolean' ? Number(v) : typeof v === 'number' ? v
+    : typeof v === 'string' ? (v.trim() === '' ? 0 : /^\s*[-+]?(\d+\.?\d*|\.\d+)([eE][-+]?\d+)?\s*$|^\s*0x[0-9a-f]+\s*$/i.test(v) ? Number(v) : NaN) : NaN);
+  const kind = (v) => (v === null || v === undefined ? 'null' : Array.isArray(v) ? 'object' : typeof v);
+  const eq = (a, b) => {
+    if (U(a) || U(b)) return UNKNOWN;
+    if (kind(a) === kind(b)) return kind(a) === 'string' ? a.toLowerCase() === b.toLowerCase() : kind(a) === 'null' ? true : a === b;
+    return num(a) === num(b);
+  };
   const fns = {
     contains: (h, n) => (Array.isArray(h) ? h.some((x) => eq(x, n) === true) : String(h ?? '').toLowerCase().includes(String(n ?? '').toLowerCase())),
     fromJSON: (x) => JSON.parse(x),
@@ -173,9 +183,9 @@ const content = (l) => l.trim() !== '' && !/^\s*#/.test(l);
  * runs-on is read in each form a job writes it: an expression, a flow list (quoted items or not), a
  * block list, a bare label, or a mapping with `labels:`; any other form (an alias, a block scalar,
  * a group with no labels) is UNREADABLE. `labels` is every label it names, quotes dropped; `expr`
- * is the expression when it is one; `matrix` is each matrix key's values, read from the job's
+ * is the expression when it is one; `combos` is every matrix combination, read from the job's
  * strategy. A job that calls a reusable workflow has no runs-on.
- * @returns {Array<{id:string, cond:string, expr:string|null, labels:string[], matrix:Record<string,string[]>, hasRunsOn:boolean}>}
+ * @returns {Array<{id:string, cond:string, expr:string|null, labels:string[], combos:Array<Record<string,string|null>>, hasRunsOn:boolean}>}
  */
 export function jobsOf(y) {
   const at = /^jobs:[ \t]*(#.*)?$/m.exec(y);
@@ -241,21 +251,55 @@ export function jobsOf(y) {
     }
     // The matrix values a runs-on expression may read: each key's flow or block list under
     // strategy.matrix. A value that is itself an expression is not a value this check can use.
+    // include entries are expanded over a superset of what Actions makes of them: each one alone,
+    // and each one merged into every base combination in both orders. exclude only removes
+    // combinations, so it is ignored: checking more of them can only fail more.
     const matrix = {};
+    const include = [];
+    let readable = true;
     const strategy = value('strategy');
     const mx = strategy?.under.length ? valueIn(strategy.under, 'matrix', indentOf(strategy.under[0])) : null;
+    if (mx && (uncomment(mx.rest) !== '' || !mx.under.length)) readable = false;
     if (mx?.under.length) {
       const keyIndent = indentOf(mx.under[0]);
+      const scalar = (s) => { const x = strip(s); return /\$\{\{|^[[{*&!|>]/.test(x) ? UNREADABLE : x; };
       for (const l of mx.under.filter((x) => indentOf(x) === keyIndent)) {
         const m = /^\s*([\w-]+):\s*(.*)$/.exec(l);
-        if (!m || m[1] === 'include' || m[1] === 'exclude') continue;
+        if (!m) { readable = false; continue; }
         const v = valueIn(mx.under, m[1], keyIndent);
-        const vals = v.rest ? (v.rest.startsWith('[') ? listItems(uncomment(v.rest)) : [strip(v.rest)])
-          : v.under.map((x) => (/^\s*-\s+/.test(x) ? strip(x.replace(/^\s*-\s+/, '')) : UNREADABLE));
-        matrix[m[1]] = vals.some((x) => x.includes('${{')) ? [UNREADABLE] : vals;
+        if (m[1] === 'exclude') continue;
+        if (m[1] === 'include') {
+          if (uncomment(v.rest) !== '' || !v.under.length) { readable = false; continue; }
+          const itemIndent = indentOf(v.under[0]);
+          for (const x of v.under) {
+            const item = indentOf(x) === itemIndent ? /^\s*-\s+([\w-]+):\s*(.*)$/.exec(x) : null;
+            const more = indentOf(x) > itemIndent ? /^\s*([\w-]+):\s*(.*)$/.exec(x) : null;
+            if (item) include.push({ [item[1]]: scalar(item[2]) });
+            else if (more && include.length) include[include.length - 1][more[1]] = scalar(more[2]);
+            else readable = false;
+          }
+          continue;
+        }
+        const vals = v.rest ? (v.rest.startsWith('[') ? listItems(uncomment(v.rest)) : [scalar(v.rest)])
+          : v.under.map((x) => (/^\s*-\s+/.test(x) ? scalar(x.replace(/^\s*-\s+/, '')) : UNREADABLE));
+        matrix[m[1]] = vals;
       }
     }
-    return { id, cond, expr, labels, matrix, hasRunsOn: ro !== null };
+    const all = [matrix, ...include].flatMap(Object.values).flat();
+    if (all.includes(UNREADABLE)) readable = false;
+    // Every combination; a key defined somewhere in the matrix but not in a combination reads as
+    // null there, as in Actions. An unreadable matrix is one empty combination, so any matrix key
+    // a strict expression reads is unknown.
+    let combos = [{}];
+    if (readable) {
+      const keys = [...new Set([...Object.keys(matrix), ...include.flatMap(Object.keys)])];
+      const base = Object.entries(matrix).reduce((acc, [k, vs]) => acc.flatMap((c) => vs.map((v) => ({ ...c, [k]: v }))), [{}]);
+      const raw = [...base, ...include.flatMap((inc) => [inc, ...base.flatMap((c) => [{ ...c, ...inc }, { ...inc, ...c }])])];
+      const seen = new Set();
+      combos = raw.map((c) => Object.fromEntries(keys.map((k) => [k, c[k] ?? null])))
+        .filter((c) => { const s = JSON.stringify(c); return !seen.has(s) && seen.add(s); });
+    }
+    return { id, cond, expr, labels, combos, hasRunsOn: ro !== null };
   });
 }
 
@@ -464,11 +508,10 @@ export function checkCaller(dir, opts = {}) {
     ...['pull_request', 'pull_request_review', 'pull_request_target'].flatMap((ev) => [[prFrom(ev, HOME), HOME], [prFrom(ev, FORKED), HOME]]),
     [prFrom('pull_request', HOME, 'dependabot[bot]'), HOME], [prFrom('pull_request', FORK_REPO), FORK_REPO],
   ];
-  // Every combination of a job's matrix values ([{}] for no matrix).
-  const combos = (matrix) => Object.entries(matrix).reduce((acc, [k, vs]) => acc.flatMap((c) => vs.map((v) => ({ ...c, [k]: v }))), [{}]);
   for (const f of files) {
     const y = readLf(dir, f);
-    const onPrs = /\bpull_request(_target|_review)?\b/.test(onBlock(y));
+    // A called workflow runs on whatever event its caller ran on, pull requests included.
+    const onPrs = /\bpull_request(_target|_review)?\b|\bworkflow_call\b/.test(onBlock(y));
     const js = jobsOf(y);
     // A runs-on this check did not read is a runner it cannot vouch for.
     check(`${f}: every runs-on is in a job this check reads`,
@@ -476,16 +519,22 @@ export function checkCaller(dir, opts = {}) {
     for (const job of js) {
       if (!job.hasRunsOn) continue;
       const at = `${f} ${job.id}`;
-      const cs = combos(job.matrix);
-      const base = cs.find((c) => c.os === 'ubuntu-latest') ?? cs[0];
-      const labels = job.expr === null ? job.labels
-        : job.expr === UNREADABLE ? [UNREADABLE]
-          : [...new Set(SCENARIOS.flatMap(([g, repo]) => cs.flatMap((c) => labelsOf(job.expr, g, repo, c))))];
-      for (const l of labels) if (!hostedLabel(l) && l !== 'self-hosted' && !ourLabel(l)) foreign.push(`${at}: ${l}`);
-      if (labels.every(hostedLabel) || labels.includes(UNREADABLE)) continue;
-      if (job.expr === null) literal.push({ at, job, onPrs });
-      else if (runner(job.expr, prFrom('pull_request', FORKED), HOME, base) === 'ubuntu-latest') ownExprs.push({ f, at, e: job.expr, base });
-      else repoOnly.push({ f, at, e: job.expr, base });
+      if (job.expr === null || job.expr === UNREADABLE) {
+        const labels = job.expr === null ? job.labels : [UNREADABLE];
+        for (const l of labels) if (!hostedLabel(l) && l !== 'self-hosted' && !ourLabel(l)) foreign.push(`${at}: ${l}`);
+        if (!labels.every(hostedLabel) && !labels.includes(UNREADABLE)) literal.push({ at, job, onPrs });
+        continue;
+      }
+      // Each matrix combination is its own job to Actions, so each is held to the rules alone.
+      const cs = job.combos;
+      const per = cs.map((c) => [...new Set(SCENARIOS.flatMap(([g, repo]) => labelsOf(job.expr, g, repo, c)))]);
+      for (const l of new Set(per.flat())) if (!hostedLabel(l) && l !== 'self-hosted' && !ourLabel(l)) foreign.push(`${at}: ${l}`);
+      if (per.flat().includes(UNREADABLE)) continue;
+      const ours = cs.filter((_, i) => !per[i].every(hostedLabel));
+      if (!ours.length) continue;
+      const entry = { f, at, e: job.expr, cs: ours, all: cs };
+      if (ours.every((c) => hostedLabel(runner(job.expr, prFrom('pull_request', FORKED), HOME, c)))) ownExprs.push(entry);
+      else repoOnly.push(entry);
     }
   }
   check(`every runs-on names only GitHub's runners, self-hosted, or this repository's own${foreign.length ? ` (not: ${foreign.join('; ')})` : ''}`, foreign.length === 0);
@@ -495,25 +544,29 @@ export function checkCaller(dir, opts = {}) {
     const codeql = jobsOf(readLf(dir, 'codeql.yml')).filter((j) => j.hasRunsOn);
     check('CodeQL runs on GitHub\'s runners', codeql.length > 0 && codeql.every((j) => j.expr === null && j.labels.length > 0 && j.labels.every(hostedLabel)));
   }
-  for (const { at: f, e, base } of ownExprs) {
-    check(`${f}: a fork's pull_request runs on GitHub's runners`, runner(e, prFrom('pull_request', FORKED), HOME, base) === 'ubuntu-latest');
-    check(`${f}: a fork's pull_request_review runs on GitHub's runners`, runner(e, prFrom('pull_request_review', FORKED), HOME, base) === 'ubuntu-latest');
-    check(`${f}: a Dependabot PR runs on GitHub's runners`, runner(e, prFrom('pull_request', HOME, 'dependabot[bot]'), HOME, base) === 'ubuntu-latest');
-    check(`${f}: a same-repo PR runs on ours`, runner(e, prFrom('pull_request', HOME), HOME, base) === 'ours');
-    check(`${f}: a push, schedule or dispatch runs on ours`, EVENTS.every((ev) => runner(e, ev, HOME, base) === 'ours'));
+  // `cs` is each combination that can land on our runners; every check holds for each of them.
+  const hosted = (r) => hostedLabel(r);
+  for (const { at: f, e, cs, all } of ownExprs) {
+    const each = (fn) => cs.every(fn);
+    check(`${f}: a fork's pull_request runs on GitHub's runners`, each((c) => hosted(runner(e, prFrom('pull_request', FORKED), HOME, c))));
+    check(`${f}: a fork's pull_request_review runs on GitHub's runners`, each((c) => hosted(runner(e, prFrom('pull_request_review', FORKED), HOME, c))));
+    check(`${f}: a fork's pull_request_target runs on GitHub's runners`, each((c) => hosted(runner(e, prFrom('pull_request_target', FORKED), HOME, c))));
+    check(`${f}: a Dependabot PR runs on GitHub's runners`, each((c) => hosted(runner(e, prFrom('pull_request', HOME, 'dependabot[bot]'), HOME, c))));
+    check(`${f}: a same-repo PR runs on ours`, each((c) => runner(e, prFrom('pull_request', HOME), HOME, c) === 'ours'));
+    check(`${f}: a push, schedule or dispatch runs on ours`, each((c) => EVENTS.every((ev) => runner(e, ev, HOME, c) === 'ours')));
     check(`${f}: in a fork repository every event runs on GitHub's runners`,
-      [...EVENTS, prFrom('pull_request', FORK_REPO)].every((ev) => runner(e, ev, FORK_REPO, base) === 'ubuntu-latest'));
+      each((c) => [...EVENTS, prFrom('pull_request', FORK_REPO)].every((ev) => hosted(runner(e, ev, FORK_REPO, c)))));
     check(`${f}: the expression names exactly our label`, e.includes(`fromJSON('["self-hosted","${LABEL}"]')`));
-    if (e.includes('matrix.os')) {
+    const other = all.filter((c) => /^(windows|macos)-/.test(c.os ?? ''));
+    if (e.includes('matrix.os') && other.length) {
       check(`${f}: Windows and macOS entries keep their own runners, here and in a fork repository`,
-        runner(e, prFrom('pull_request', HOME), HOME, { ...base, os: 'windows-latest' }) === 'windows-latest'
-        && runner(e, EVENTS[0], HOME, { ...base, os: 'macos-latest' }) === 'macos-latest'
-        && runner(e, EVENTS[0], FORK_REPO, { ...base, os: 'windows-latest' }) === 'windows-latest');
+        other.every((c) => runner(e, prFrom('pull_request', HOME), HOME, c) === c.os
+          && runner(e, EVENTS[0], HOME, c) === c.os && runner(e, EVENTS[0], FORK_REPO, c) === c.os));
     }
   }
-  for (const { f, at, e, base } of repoOnly) {
-    check(`${at}: every event here runs on ours`, [...EVENTS, prFrom('pull_request', FORKED)].every((ev) => runner(e, ev, HOME, base) === 'ours'));
-    check(`${at}: in a fork repository it runs on GitHub's runners`, EVENTS.every((ev) => runner(e, ev, FORK_REPO, base) === 'ubuntu-latest'));
+  for (const { f, at, e, cs } of repoOnly) {
+    check(`${at}: every event here runs on ours`, cs.every((c) => [...EVENTS, prFrom('pull_request', FORKED)].every((ev) => runner(e, ev, HOME, c) === 'ours')));
+    check(`${at}: in a fork repository it runs on GitHub's runners`, cs.every((c) => EVENTS.every((ev) => hosted(runner(e, ev, FORK_REPO, c)))));
     check(`${at}: only a job that never runs PR code uses it`, repoOnlyAllowed.includes(f));
   }
   // A literal self-hosted runs-on has no fallback, so the job's own if: is what keeps code nobody
