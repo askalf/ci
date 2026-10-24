@@ -494,6 +494,12 @@ export function triggerLines(y) {
   return out;
 }
 
+/** The keys of a job at two-space job indentation, in order, from its line to the next job or the end. */
+export function jobKeysOf(y, id) {
+  const m = new RegExp(`^ {2}${id.replace(/[.]/g, '\\.')}:\\n((?:(?! {2}\\S).*\\n?)*)`, 'm').exec(y);
+  return m ? [...m[1].matchAll(/^ {4}([\w-]+):/gm)].map((k) => k[1]) : [];
+}
+
 /**
  * Whether a workflow's last job ends in a `steps:` block that is exactly one `- uses:` of `action`
  * at a full sha, whose only other key is `with:` holding exactly `inputs`, one line each.
@@ -642,14 +648,17 @@ export function checkCaller(dir, opts = {}) {
   const step = stepWith(own, STATUS_ACTION) ?? '';
   // The steps end the file and are exactly the one pinned step: a step-level if: could skip it,
   // and any other input could change what it posts (all-open ignores the PR it was given).
+  // continue-on-error, strategy or a second if: at the job level could hide a failed post or skip it.
+  check('the status job has only if, runs-on, timeout-minutes, permissions and steps',
+    jobKeysOf(own, 'status').join() === 'if,runs-on,timeout-minutes,permissions,steps');
   check('the status job\'s one step is the pinned action with exactly pr, head-repo and head-branch, and no other key',
     onlyStep(own, STATUS_ACTION, ['pr', 'head-repo', 'head-branch']));
   check(`the status job runs ${STATUS_ACTION} at a full commit sha, and no other action`,
     usesOf(own).length === 1 && new RegExp(`^${STATUS_ACTION}@[0-9a-f]{40}$`).test(usesOf(own)[0] ?? ''));
   check('the status job has no run step', !/^\s+(?:- )?run:/im.test(own));
   check('the fork path hands the action the head repo and branch',
-    /head-repo: \$\{\{ github\.event\.workflow_run\.head_repository\.full_name \}\}/.test(step)
-    && /head-branch: \$\{\{ github\.event\.workflow_run\.head_branch \}\}/.test(step));
+    /^ {10}head-repo: \$\{\{ github\.event\.workflow_run\.head_repository\.full_name \}\}$/m.test(step)
+    && /^ {10}head-branch: \$\{\{ github\.event\.workflow_run\.head_branch \}\}$/m.test(step));
   // Every other path needs the PR number: without it (and without a fork head) the script stops
   // with a usage error and posts nothing.
   const prExpr = /^\s+pr: \$\{\{ (.+) \}\}\s*$/m.exec(step)?.[1] ?? '';
@@ -673,6 +682,14 @@ export function checkCaller(dir, opts = {}) {
     check('the self-test job is named self-test', jobs(self.y).join() === 'self-test');
     check(`the self-test runs ${CHECK_ACTION} at a full commit sha`, usesOf(self.y).some((u) => new RegExp(`^${CHECK_ACTION}@[0-9a-f]{40}$`).test(u)));
     check('the self-test token reads contents alone', /^    permissions:\n      contents: read\n(?! {6})/m.test(self.y) && /^permissions: \{\}$/m.test(self.y));
+    // Nothing may skip the check or swallow its failure: the job has no if: or continue-on-error
+    // (its keys are exactly these), and its steps, which end the file, are exactly the checkout
+    // and the pinned check, with no key but the inputs the check takes.
+    check('the self-test job has only runs-on, timeout-minutes, permissions and steps', jobKeysOf(self.y, 'self-test').join() === 'runs-on,timeout-minutes,permissions,steps');
+    const selfSteps = self.y.slice(self.y.lastIndexOf('\n    steps:\n') + '\n    steps:\n'.length);
+    const pin = (a) => `${a.replace(/[.]/g, '\\.')}@[0-9a-f]{40}(?: #[^\\n]*)?\\n`;
+    check('the self-test\'s steps are the checkout and the pinned check alone, with no if: or other key',
+      self.y.includes('\n    steps:\n') && new RegExp(`^ {6}- uses: ${pin('askalf/ci/actions/checkout-with-retry')} {8}with:\\n {10}persist-credentials: false\\n\\n? {6}- uses: ${pin(CHECK_ACTION)}(?: {8}with:\\n(?: {10}(?:min-own-exprs: '?[0-9]+'?|repo-only: [^\\n]+)\\n){1,2})?\\s*$`).test(selfSteps));
   }
 
   // The backfill, where there is one.
@@ -681,7 +698,9 @@ export function checkCaller(dir, opts = {}) {
     const bstep = stepWith(backfill.y, STATUS_ACTION) ?? '';
     check('the backfill runs on a dispatch alone', /^\s+workflow_dispatch:/m.test(onBlock(backfill.y)) && onBlock(backfill.y).replace(/\s+/g, ' ').trim() === 'workflow_dispatch:');
     check(`the backfill runs ${STATUS_ACTION} over every open PR, and nothing else`,
-      usesOf(backfill.y).length === 1 && /all-open: ['"]?true['"]?/.test(bstep) && !/^\s+(?:- )?run:/im.test(backfill.y));
+      usesOf(backfill.y).length === 1 && /^ {10}all-open: (?:'true'|"true"|true)$/m.test(bstep) && !/^\s+(?:- )?run:/im.test(backfill.y));
+    check('the backfill is one job with only runs-on, timeout-minutes, permissions and steps',
+      jobs(backfill.y).length === 1 && jobKeysOf(backfill.y, jobs(backfill.y)[0]).join() === 'runs-on,timeout-minutes,permissions,steps');
     check('the backfill\'s one step is the pinned action with all-open alone, and no other key',
       onlyStep(backfill.y, STATUS_ACTION, ['all-open']));
   }
