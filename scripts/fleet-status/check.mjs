@@ -614,16 +614,21 @@ export function checkCaller(dir, opts = {}) {
     /\["pull_request","pull_request_target"\]/.test(own));
   check('fleet-status.yml runs only the status job, on no dispatch', jobs(own).join() === 'status' && !/\bworkflow_dispatch\b/.test(onBlock(own)));
 
-  // A burst of finishing workflows is one status run per PR branch; nothing on the PR is cancelled.
+  // A burst of finishing workflows is one status run per PR branch, and no run on the PR is ever
+  // cancelled by a newer one: a cancelled check run there rolls up as a failure. A workflow_run run
+  // may still be (its check run sits on the default branch), but need not: a superseded run is
+  // replaced while it waits for the group, before it has a job, and a running one finishes.
   const group = /\n  group: \$\{\{ (.+) \}\}\n/.exec(own)?.[1] ?? '';
-  const cancel = /\n  cancel-in-progress: \$\{\{ (.+) \}\}\n/.exec(own)?.[1] ?? '';
+  const cancel = uncomment(/\n  cancel-in-progress: (.+)\n/.exec(own)?.[1] ?? '').trim();
+  const cancelExpr = /^\$\{\{ (.+) \}\}$/.exec(cancel)?.[1] ?? null;
   check('workflow_run runs share a group per PR branch and triggering event; every other run has its own', group === GROUP);
-  let cancels = false;
+  let cancelsOnPr = true;
   try {
-    cancels = cancel.length > 0 && evalIf(cancel, { github: { event_name: 'workflow_run' } })
-      && ['pull_request', 'pull_request_review', 'issue_comment'].every((event_name) => !evalIf(cancel, { github: { event_name } }));
-  } catch { cancels = false; }
-  check('only a workflow_run run is cancelled by a newer one', cancels);
+    cancelsOnPr = cancel === '' || cancel === 'false' ? false
+      : cancelExpr === null ? true
+        : ['pull_request', 'pull_request_review', 'issue_comment'].some((event_name) => evalIf(cancelExpr, { github: { event_name } }));
+  } catch { cancelsOnPr = true; }
+  check('no run on the PR is cancelled by a newer one (cancel-in-progress false, or an expression false for every event but workflow_run)', !cancelsOnPr);
 
   // Which events run the job, for a fork and for this repository.
   const where = homeOf(own);
