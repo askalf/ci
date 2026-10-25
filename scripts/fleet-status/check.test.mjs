@@ -116,6 +116,8 @@ console.log('\n  the fixture passes');
   check('the older line that cancels only a workflow_run run still passes', failing(checkCaller(older)).length === 0, failing(checkCaller(older)).join('\n'));
   const none = variant({ 'fleet-status.yml': (y) => y.replace('  cancel-in-progress: false\n', '') });
   check('no cancel-in-progress line at all passes (the default is false)', failing(checkCaller(none)).length === 0, failing(checkCaller(none)).join('\n'));
+  const commented = variant({ 'fleet-status.yml': (y) => y.replace('cancel-in-progress: false', 'cancel-in-progress: false # a running status job finishes') });
+  check('cancel-in-progress: false with a trailing comment passes', failing(checkCaller(commented)).length === 0, failing(checkCaller(commented)).join('\n'));
 }
 
 console.log('\n  jobs are read one at a time');

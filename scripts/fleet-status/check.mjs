@@ -614,15 +614,12 @@ export function checkCaller(dir, opts = {}) {
     /\["pull_request","pull_request_target"\]/.test(own));
   check('fleet-status.yml runs only the status job, on no dispatch', jobs(own).join() === 'status' && !/\bworkflow_dispatch\b/.test(onBlock(own)));
 
-  // A burst of finishing workflows is one status run per PR branch. No run is cancelled while it
-  // works: a workflow_run run that a newer one supersedes is replaced while it still waits for the
-  // group, before GitHub creates its job (so no runner is started and cancelled for it: 915 of 6405
-  // self-hosted jobs in three days were, 2026-10-22 to 10-25), and a running status job finishes,
-  // the one waiting corrects after it. Nothing on the PR is ever cancelled. Until every caller has
-  // moved, the older line that cancels a workflow_run run is still accepted: the pin-bump wave
-  // carries this checker to a caller before the caller's own change does.
+  // A burst of finishing workflows is one status run per PR branch, and no run on the PR is ever
+  // cancelled by a newer one: a cancelled check run there rolls up as a failure. A workflow_run run
+  // may still be (its check run sits on the default branch), but need not: a superseded run is
+  // replaced while it waits for the group, before it has a job, and a running one finishes.
   const group = /\n  group: \$\{\{ (.+) \}\}\n/.exec(own)?.[1] ?? '';
-  const cancel = /\n  cancel-in-progress: (.+)\n/.exec(own)?.[1]?.trim() ?? '';
+  const cancel = uncomment(/\n  cancel-in-progress: (.+)\n/.exec(own)?.[1] ?? '').trim();
   const cancelExpr = /^\$\{\{ (.+) \}\}$/.exec(cancel)?.[1] ?? null;
   check('workflow_run runs share a group per PR branch and triggering event; every other run has its own', group === GROUP);
   let cancelsOnPr = true;
