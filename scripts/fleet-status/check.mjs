@@ -614,21 +614,21 @@ export function checkCaller(dir, opts = {}) {
     /\["pull_request","pull_request_target"\]/.test(own));
   check('fleet-status.yml runs only the status job, on no dispatch', jobs(own).join() === 'status' && !/\bworkflow_dispatch\b/.test(onBlock(own)));
 
-  // A burst of finishing workflows is one status run per PR branch, and no run on the PR is ever
-  // cancelled by a newer one: a cancelled check run there rolls up as a failure. A workflow_run run
-  // may still be (its check run sits on the default branch), but need not: a superseded run is
-  // replaced while it waits for the group, before it has a job, and a running one finishes.
+  // A burst of finishing workflows is one status run per PR branch, and no run is cancelled by a
+  // newer one: a cancelled check run on the PR rolls up as a failure, and a workflow_run run need
+  // not be cancelled either, since a superseded run is replaced while it waits for the group,
+  // before it has a job, and a running one finishes; the waiting one corrects after it.
   const group = /\n  group: \$\{\{ (.+) \}\}\n/.exec(own)?.[1] ?? '';
   const cancel = uncomment(/\n  cancel-in-progress: (.+)\n/.exec(own)?.[1] ?? '').trim();
   const cancelExpr = /^\$\{\{ (.+) \}\}$/.exec(cancel)?.[1] ?? null;
   check('workflow_run runs share a group per PR branch and triggering event; every other run has its own', group === GROUP);
-  let cancelsOnPr = true;
+  let cancels = true;
   try {
-    cancelsOnPr = cancel === '' || cancel === 'false' ? false
+    cancels = cancel === '' || cancel === 'false' ? false
       : cancelExpr === null ? true
-        : ['pull_request', 'pull_request_review', 'issue_comment'].some((event_name) => evalIf(cancelExpr, { github: { event_name } }));
-  } catch { cancelsOnPr = true; }
-  check('no run on the PR is cancelled by a newer one (cancel-in-progress false, or an expression false for every event but workflow_run)', !cancelsOnPr);
+        : ['pull_request', 'pull_request_review', 'issue_comment', 'workflow_run'].some((event_name) => evalIf(cancelExpr, { github: { event_name } }));
+  } catch { cancels = true; }
+  check('no run is cancelled by a newer one (cancel-in-progress false, absent, or an expression false for every event)', !cancels);
 
   // Which events run the job, for a fork and for this repository.
   const where = homeOf(own);

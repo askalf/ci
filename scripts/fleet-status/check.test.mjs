@@ -110,10 +110,6 @@ console.log('\n  the fixture passes');
   check('the home and label are read from the status job', JSON.stringify(homeOf(readFileSync(join(FIXTURE, 'fleet-status.yml'), 'utf8'))) === '{"home":"askalf/example","label":"example-exec"}');
   const crlf = variant(Object.fromEntries(['fleet-status.yml', 'fleet-review-relay.yml', 'ci.yml'].map((f) => [f, (y) => y.replace(/\n/g, '\r\n')])));
   check('a CRLF checkout passes the same', failing(checkCaller(crlf)).length === 0, failing(checkCaller(crlf)).join('\n'));
-  // cancel-in-progress: false is the shape; the older expression that cancels only a workflow_run run
-  // passes until every caller has moved (the pin-bump wave carries the checker ahead of the change).
-  const older = variant({ 'fleet-status.yml': (y) => y.replace('cancel-in-progress: false', "cancel-in-progress: ${{ github.event_name == 'workflow_run' }}") });
-  check('the older line that cancels only a workflow_run run still passes', failing(checkCaller(older)).length === 0, failing(checkCaller(older)).join('\n'));
   const none = variant({ 'fleet-status.yml': (y) => y.replace('  cancel-in-progress: false\n', '') });
   check('no cancel-in-progress line at all passes (the default is false)', failing(checkCaller(none)).length === 0, failing(checkCaller(none)).join('\n'));
   const commented = variant({ 'fleet-status.yml': (y) => y.replace('cancel-in-progress: false', 'cancel-in-progress: false # a running status job finishes') });
@@ -158,9 +154,10 @@ const cases = [
   ['the action at a branch, not a sha', { [STATUS]: (y) => y.replace(/fleet-status@[0-9a-f]{40}/, 'fleet-status@main') }, /at a full commit sha, and no other action/],
   ['the fork path without the head branch', { [STATUS]: (y) => y.replace(/\n {10}head-branch: .*/, '') }, /head repo and branch/],
   ['a step reading the PR head sha', { [STATUS]: (y) => y.replace('          head-branch:', '          sha: ${{ github.event.pull_request.head.sha }}\n          head-branch:') }, /PR head ref or sha/],
-  ['cancel-in-progress on every run, as an expression', { [STATUS]: (y) => y.replace('cancel-in-progress: false', 'cancel-in-progress: ${{ true }}') }, /no run on the PR is cancelled/],
-  ['cancel-in-progress on every run, literal', { [STATUS]: (y) => y.replace('cancel-in-progress: false', 'cancel-in-progress: true') }, /no run on the PR is cancelled/],
-  ['cancel-in-progress on pull_request runs', { [STATUS]: (y) => y.replace('cancel-in-progress: false', "cancel-in-progress: ${{ github.event_name == 'pull_request' }}") }, /no run on the PR is cancelled/],
+  ['cancel-in-progress on every run, as an expression', { [STATUS]: (y) => y.replace('cancel-in-progress: false', 'cancel-in-progress: ${{ true }}') }, /no run is cancelled/],
+  ['cancel-in-progress on every run, literal', { [STATUS]: (y) => y.replace('cancel-in-progress: false', 'cancel-in-progress: true') }, /no run is cancelled/],
+  ['cancel-in-progress on pull_request runs', { [STATUS]: (y) => y.replace('cancel-in-progress: false', "cancel-in-progress: ${{ github.event_name == 'pull_request' }}") }, /no run is cancelled/],
+  ['the older line that cancelled a workflow_run run (every caller moved on 2026-10-25)', { [STATUS]: (y) => y.replace('cancel-in-progress: false', "cancel-in-progress: ${{ github.event_name == 'workflow_run' }}") }, /no run is cancelled/],
   ['a second job in fleet-status.yml', { [STATUS]: (y) => `${y}  extra:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo\n` }, /runs only the status job/],
   ['another repository\'s runner label', { 'ci.yml': (y) => y.replace('fromJSON(\'["self-hosted","example-exec"]\') }}\n    steps:\n      - run: echo test', 'fromJSON(\'["self-hosted","other-exec"]\') }}\n    steps:\n      - run: echo test') }, /this repository's own \(not: ci\.yml test: other-exec\)/],
   ['another repository\'s label in a quoted flow list', { 'ci.yml': (y) => `${y}${job('extra', "    runs-on: ['self-hosted', 'other-exec']\n")}` }, /this repository's own \(not: ci\.yml extra: other-exec\)/],
