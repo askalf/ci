@@ -266,6 +266,75 @@ esac
       && !out.includes('askalf/f: no .github/workflows/redline.yml') && !calls.includes('pr create --repo askalf/f') && !calls.includes('repos/askalf/f/git/refs'), out + calls);
 }
 
+console.log('\n  a caller whose workflows are unchanged since it was found at the commit');
+if (spawnSync('bash', ['-c', 'true']).status !== 0 || process.platform === 'win32') {
+  console.log('  skip the bump step run: no POSIX bash here');
+} else {
+  // askalf/s: its workflows tree is the one on file, so one read of it is all. askalf/m: its tree
+  // moved since (tree2 against tree1 on file) but every pin is still at the commit, so it is read
+  // in full and its new tree replaces the old line. askalf/o: a tree not on file and a caller at
+  // the old commit, so it is bumped and not noted.
+  const d = mkdtempSync(join(tmpdir(), 'pin-bump-converged-'));
+  const old = caller.replaceAll(NEWSHA, OLDSHA);
+  writeFileSync(join(d, 'gh'), `#!/usr/bin/env bash
+echo "$*" >> "${d}/calls"
+case "$*" in
+  *"commits/${NEWSHA}/pulls"*) ;;
+  "api repos/askalf/s/contents/.github --jq"*|"api repos/askalf/s/contents/.github?ref=tip0000 --jq"*) echo tree1 ;;
+  "api repos/askalf/m/contents/.github --jq"*|"api repos/askalf/m/contents/.github?ref=tip0000 --jq"*) echo tree2 ;;
+  "api repos/askalf/o/contents/.github --jq"*) echo tree3 ;;
+  "api repos/askalf/"*" --jq .default_branch") echo main ;;
+  *"git/ref/heads/main --jq .object.sha") echo tip0000 ;;
+  *"git/ref/heads/bot/redline-pin") exit 1 ;;
+  "api repos/askalf/o/contents/.github/workflows/redline.yml?ref="*" --jq .content") echo "${b64(old)}" ;;
+  *"contents/.github/workflows/redline.yml?ref=tip0000 --jq .content") echo "${b64(caller)}" ;;
+  *"contents/.github/workflows/redline.yml?ref=bot/redline-pin --jq .sha") echo blob1 ;;
+  *"contents/.github/workflows?ref=tip0000 --jq"*) printf '%s\\n' redline.yml ;;
+  "api -X POST repos/askalf/o/git/refs"*) ;;
+  "api -X PUT repos/askalf/o/"*) ;;
+  "pr list"*) ;;
+  "pr create --repo "*) echo "https://github.com/$4/pull/1" ;;
+  *) exit 1 ;;
+esac
+`);
+  chmodSync(join(d, 'gh'), 0o755);
+  mkdirSync(join(d, 'work', 'scripts', 'redline'), { recursive: true });
+  writeFileSync(join(d, 'work', 'scripts', 'redline', 'pin.mjs'), readFileSync(fileURLToPath(new URL('./pin.mjs', import.meta.url))));
+  calledWorkflows(join(d, 'work'));
+  const state = join(d, 'work', '.redline-pin-bump', 'converged.tsv');
+  // list: the text on file before the run, or null to keep what the last run left.
+  const run = (list) => {
+    rmSync(join(d, 'calls'), { force: true });
+    mkdirSync(join(d, 'work', '.redline-pin-bump'), { recursive: true });
+    if (list !== null) writeFileSync(state, list);
+    writeFileSync(join(d, 'output'), '');
+    const r = spawnSync('bash', ['-c', script.join('\n')], { encoding: 'utf8', cwd: join(d, 'work'),
+      env: { ...process.env, PATH: `${d}:${process.env.PATH}`, GH_TOKEN: 't', SHA: NEWSHA, SOURCE: 'askalf/ci', CALLERS: 'askalf/s askalf/m askalf/o',
+        BRANCH: 'bot/redline-pin', CALLER_PATHS: '.github/workflows/redline.yml', CONVERGED: '.redline-pin-bump/converged.tsv', GITHUB_OUTPUT: join(d, 'output') } });
+    const calls = existsSync(join(d, 'calls')) ? readFileSync(join(d, 'calls'), 'utf8') : '';
+    const reads = (repo) => calls.split('\n').filter((l) => l.includes(`repos/${repo}/`) || l.includes(`repos/${repo} `)).length;
+    return { r, calls, reads, out: r.stdout + r.stderr, list: readFileSync(state, 'utf8'), output: readFileSync(join(d, 'output'), 'utf8') };
+  };
+  const first = run(`commit ${NEWSHA}\naskalf/s\ttree1\naskalf/m\ttree1\n`);
+  check('the caller whose tree is on file is read once, for that tree, and skipped',
+    first.r.status === 0 && first.reads('askalf/s') === 1 && first.out.includes('workflows unchanged since every pin here was found at bbbbbbb'), first.out + first.calls);
+  check('a caller whose tree moved is read in full, opens nothing, and its new tree replaces the old line',
+    first.calls.includes('repos/askalf/m/contents/.github/workflows/redline.yml?ref=tip0000') && !first.calls.includes('pr create --repo askalf/m')
+      && first.list === `commit ${NEWSHA}\naskalf/s\ttree1\naskalf/m\ttree2\n`, first.list + first.calls);
+  check('a caller that needed a bump opens its PR and is not noted',
+    first.calls.includes('pr create --repo askalf/o') && !first.list.includes('askalf/o'), first.list + first.calls);
+  check('a list that changed is saved', first.output.includes('save=true'), first.output);
+  const second = run(null);
+  check('on the next run both noted callers take one read each, and the one still behind is read in full',
+    second.r.status === 0 && second.reads('askalf/s') === 1 && second.reads('askalf/m') === 1 && second.calls.includes('pr create --repo askalf/o'), second.out + second.calls);
+  check('a list that did not change is not saved again', !second.output.includes('save=true'), second.output);
+  const stale = run(`commit ${OLDSHA}\naskalf/s\ttree1\n`);
+  check('a list for another commit is not trusted: every caller is read and the list starts over for this one',
+    stale.calls.includes('repos/askalf/s/contents/.github/workflows/redline.yml?ref=tip0000')
+      && stale.list === `commit ${NEWSHA}\naskalf/s\ttree1\naskalf/m\ttree2\n` && stale.output.includes('save=true'), stale.list + stale.calls);
+  rmSync(d, { recursive: true, force: true });
+}
+
 console.log('\n  under pipefail, grep never reads a pipe');
 {
   // grep -q exits on its first match; a writer still writing then fails on the closed pipe, and

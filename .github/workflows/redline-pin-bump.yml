@@ -26,6 +26,12 @@
 # with wait-for-quiet) opens or updates at most WAVE_SIZE PRs, in CALLERS order; the callers after
 # that are left for the next hourly run, where the ones already bumped read as done. A dispatch
 # without wait-for-quiet bumps every caller in one run, for a fix that cannot wait.
+#
+# Once a wave is done every caller reads as done, and reading each of their workflow files to find
+# that out took most of every hourly run. So a caller found with every pin at the commit is noted
+# with its .github/workflows tree, in a cache entry kept per commit (CONVERGED): the next run reads
+# that one tree id there and skips the caller while it is the same. A change to any workflow in the
+# caller moves the tree, so the caller is read in full again; a new commit starts an empty list.
 name: Redline pin bump
 
 on:
@@ -101,6 +107,11 @@ jobs:
         .github/workflows/redline-pin-bump.yml
       QUIET_MINUTES: 60
       WAVE_SIZE: 3
+      # The callers found with every pin at the picked commit: the commit on the first line, then
+      # one line per caller, the repository and its .github/workflows tree when it was found. A path
+      # in the workspace, not runner.temp: the cache keys a path as written, and runner.temp is
+      # spelled differently on each ci-exec runner.
+      CONVERGED: .redline-pin-bump/converged.tsv
     steps:
       - name: Check for the token
         id: guard
@@ -207,7 +218,18 @@ jobs:
             echo "cap=0" >> "$GITHUB_OUTPUT"
           fi
 
+      # The newest list an earlier run saved for this commit. None is an empty list: every caller
+      # is read.
+      - name: Restore the callers found at the commit
+        if: steps.pick.outputs.ok == 'true'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.CONVERGED }}
+          key: redline-pin-bump-${{ steps.pick.outputs.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: redline-pin-bump-${{ steps.pick.outputs.sha }}-
+
       - name: Open or update a bump PR in each caller
+        id: bump
         if: steps.pick.outputs.ok == 'true'
         env:
           GH_TOKEN: ${{ secrets.REDLINE_PIN_BUMP_TOKEN }}
@@ -230,6 +252,18 @@ jobs:
           # with a space, a # or a ? is read and written as one whole path.
           uri() { node -e 'process.stdout.write(process.argv[1].split("/").map(encodeURIComponent).join("/"))' "$1"; }
 
+          # A caller's .github/workflows tree, from the listing of .github: one read whose answer
+          # changes whenever any workflow there does.
+          treeq='.[] | select(.type == "dir" and .name == "workflows") | .sha'
+          # The list names its commit on its first line. One left in the workspace by an earlier job,
+          # or saved for another commit, is not this commit's: the run starts from an empty list.
+          # Unset, there is no list and every caller is read.
+          if [ -n "${CONVERGED:-}" ]; then
+            mkdir -p "$(dirname "$CONVERGED")"
+            if [ "$(head -n 1 "$CONVERGED" 2>/dev/null)" != "commit ${SHA}" ]; then printf 'commit %s\n' "$SHA" > "$CONVERGED"; fi
+            cp "$CONVERGED" "$CONVERGED.restored"
+          fi
+
           # One caller repository. Any command that fails ends this repository's bump (set -e
           # holds inside the subshell it runs in), never the loop: the next repository is still bumped.
           # The files to rewrite are kept in arrays, so a path is never split on its spaces.
@@ -238,8 +272,15 @@ jobs:
           # that failure, so a file with a stale pin read as already at the commit (askalf/dario,
           # 2026-10-23: deployed-version-watch.yml was left out of the bump PR).
           bump() {
-            local repo="$1" base tip path at current updated blob bad=0 unread=0 bumped=0 noreview=0 pinned=0 open name listing pins caller out called missing
+            local repo="$1" base tip path at current updated blob bad=0 unread=0 bumped=0 noreview=0 pinned=0 open name listing pins caller out called missing tree
             local -a todo=() atodo=() names=() absent=() own=()
+            # A caller whose workflows tree is the one an earlier run found with every pin at this
+            # commit has nothing to bump: no workflow there has changed since. A read that fails is
+            # no match, so the caller is read in full.
+            if [ -n "${CONVERGED:-}" ] && tree="$(gh api "repos/${repo}/contents/.github" --jq "$treeq" 2>/dev/null)" && [ -n "$tree" ] \
+              && grep -qxF "${repo}"$'\t'"${tree}" "$CONVERGED"; then
+              echo "workflows unchanged since every pin here was found at ${short}"; return 0
+            fi
             # Callers are bumped side by side, so each keeps its own file for the rewritten workflow.
             out="$(mktemp)"
             base="$(gh api "repos/${repo}" --jq .default_branch)"
@@ -323,7 +364,16 @@ jobs:
             done
             if [ "$unread" -ne 0 ]; then echo "::error::${repo}: not every workflow could be read; nothing is bumped here this run"; return 1; fi
             if [ "$noreview" -ne 0 ] && [ "$pinned" -eq 0 ]; then echo "::error::${repo}: no .github/workflows/redline.yml and no action pin; nothing here calls ${SOURCE}"; bad=1; fi
-            if [ "${#todo[@]}" -eq 0 ] && [ "${#atodo[@]}" -eq 0 ]; then return "$bad"; fi
+            if [ "${#todo[@]}" -eq 0 ] && [ "${#atodo[@]}" -eq 0 ]; then
+              # Every pin here is at the commit: note the tree at the tip just read, not the default
+              # branch now, which may have moved since. A caller that failed a check is not noted.
+              if [ "$bad" -eq 0 ] && [ -n "${CONVERGED:-}" ] && tree="$(gh api "repos/${repo}/contents/.github?ref=${tip}" --jq "$treeq")" && [ -n "$tree" ]; then
+                awk -F '\t' -v r="$repo" '$1 != r' "$CONVERGED" > "$CONVERGED.next"
+                printf '%s\t%s\n' "$repo" "$tree" >> "$CONVERGED.next"
+                mv "$CONVERGED.next" "$CONVERGED"
+              fi
+              return "$bad"
+            fi
             # An open bump PR that already proposes this commit in every file that needs it is left
             # alone: resetting its branch would restart its review and checks for no change.
             open="$(gh pr list --repo "$repo" --head "$BRANCH" --state open --json number --jq '.[0].number // empty')"
@@ -401,4 +451,14 @@ jobs:
             set -e
             if [ "$rc" -ne 0 ]; then echo "::error::${repo}: the bump did not complete (exit ${rc})"; failed=1; fi
           done
+          # A cache entry cannot be replaced, so only a list that changed is saved, under a key of
+          # its own; a run that failed for some callers still saves the ones it found.
+          if [ -n "${CONVERGED:-}" ] && ! cmp -s "$CONVERGED" "$CONVERGED.restored"; then echo "save=true" >> "$GITHUB_OUTPUT"; fi
           exit "$failed"
+
+      - name: Save the callers found at the commit
+        if: ${{ !cancelled() && steps.bump.outputs.save == 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.CONVERGED }}
+          key: redline-pin-bump-${{ steps.pick.outputs.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
