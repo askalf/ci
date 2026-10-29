@@ -72,7 +72,10 @@ CI); one with no pin of either kind is reported as wrong. The job needs
 `REDLINE_PIN_BUMP_TOKEN`, a fine-grained token with Contents, Pull requests and Workflows read and
 write on every repository in the list (Workflows because the pins live in `.github/workflows/`);
 without it the job says so and stops, green. A repository whose bump fails is reported and the job
-goes on to the next one, then fails at the end.
+goes on to the next one, then fails at the end. A repository found with every pin at the commit is
+noted with its `.github/workflows` tree in a cache entry for that commit, and later runs read only
+that tree id there until a workflow in it changes, so the hourly runs after a wave read 18 trees,
+not every workflow file in every caller.
 
 ## The drift report
 
