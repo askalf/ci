@@ -10,7 +10,7 @@ import { join } from 'node:path';
 import {
   parseDispatchTitle, pinOnlyPatchSha, callerPin, referencedPin, runFromApi, zipEntry, exitCode, postRun,
   ruleNotYetReviewed, rulePrRun, ruleDispatchRun, ruleNoCiChanges, ruleDispatchOnDefault, rulePinnedOnMain, ruleVerdictMatches,
-  CALLER_PATH,
+  baseCallerChoice, CALLER_PATH, BASE_CALLER_COMMITS,
 } from './post.mjs';
 
 let pass = 0;
@@ -23,8 +23,9 @@ function check(name, cond) {
 const REPO = 'askalf/demo';
 const HEAD = '47536435fb5c9540d8cb36fd26d81e101955b364';
 const MAIN = '1111111111111111111111111111111111111111';
-/** The base branch's newest commit to redline.yml from before the run. */
+/** Commits to redline.yml on the base branch: the copy the run used, and a later one. */
 const BASE_AT_RUN = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+const BASE_LATER = 'cccccccccccccccccccccccccccccccccccccccc';
 const X = '5305beec29bdd65ff79d5b431d8c3a25fe945bb1';
 const Y = '34b7875f46525f7899a4e6601fbca4be75443903';
 const RUN_ID = 900;
@@ -109,7 +110,7 @@ const bytes = (buf) => ({
 /**
  * A stub GitHub for one PR. `o` overrides any fact; `o.reviews` may be a list of review lists, one
  * per read, the last repeating, and `o.prs` a list of PR states, one per read, the last repeating.
- * `o.baseCommits` answers the base branch's history of redline.yml.
+ * `o.baseCommits` answers the base branch's commits to redline.yml, newest first.
  */
 function world(o = {}) {
   const s = {
@@ -138,7 +139,7 @@ function world(o = {}) {
     if (p === `/repos/${REPO}`) return json(200, { default_branch: 'main' });
     if (p === `/repos/${REPO}/pulls/5`) return json(200, s.prs ? s.prs[Math.min(prReads++, s.prs.length - 1)] : s.pr);
     if (p === `/repos/${REPO}/commits` && params.get('path') === CALLER_PATH) {
-      return Date.parse(params.get('until')) === Date.parse(s.run.created_at) && params.get('sha') === s.pr.base.ref ? json(200, s.baseCommits) : json(200, []);
+      return params.get('sha') === s.pr.base.ref && !params.has('until') && Number(params.get('per_page')) === BASE_CALLER_COMMITS ? json(200, s.baseCommits) : json(200, []);
     }
     if (p === `/repos/${REPO}/pulls/5/files`) return json(200, params.get('page') === '1' ? s.files : []);
     if (p === `/repos/${REPO}/commits/${s.run.head_sha}/pulls`) return json(200, s.commitPulls ?? []);
@@ -244,6 +245,18 @@ console.log('\n  the rules');
   check('rule 4 refuses text that is not JSON', r4({ verdictText: '{' }).action === 'refuse');
 }
 
+console.log('\n  baseCallerChoice');
+{
+  const x = { repo: 'askalf/ci', sha: X };
+  const c = (sha, text) => ({ sha, text });
+  check('the newest copy that pins X', baseCallerChoice([c('1', caller(Y)), c('2', caller(X)), c('3', caller(X))], x).sha === '2');
+  check('a copy that names X with another ref wins over one that pins X', baseCallerChoice([c('1', caller(X)), c('2', caller(X, Y))], x).sha === '2');
+  check('a copy that names X twice is judged', baseCallerChoice([c('1', caller(X)), c('2', caller(X) + caller(X))], x).sha === '2');
+  check('a commented line naming X is not a copy that names X', baseCallerChoice([c('1', caller(Y)), c('2', `# uses: askalf/ci/.github/workflows/redline-review.yml@${X}\n${caller(Y)}`)], x).sha === '1');
+  check('X from another tooling repository is not X', baseCallerChoice([c('1', caller(Y)), c('2', caller(X).replace('askalf/ci/', 'askalf/askalf/'))], x).sha === '1');
+  check('no copy names X: the newest copy', baseCallerChoice([c('1', caller(Y)), c('2', caller(Y))], x).sha === '1');
+}
+
 console.log('\n  zipEntry');
 {
   check('a deflated entry', zipEntry(makeZip('verdict.json', '{"a":1}'), 'verdict.json')?.toString() === '{"a":1}');
@@ -300,26 +313,49 @@ console.log('\n  postRun, pull_request');
 }
 {
   // The run used X; a bump to Y merged on the base branch before this job read the caller.
-  const w = world({ callerAt: { main: caller(Y), [BASE_AT_RUN]: caller(X) } });
+  const w = world({ callerAt: { main: caller(Y), [BASE_LATER]: caller(Y), [BASE_AT_RUN]: caller(X) }, baseCommits: [{ sha: BASE_LATER }, { sha: BASE_AT_RUN }] });
   const out = await postRun(w.ctx);
   check('a pin bump merged after the run does not refuse its verdict', out[0].outcome === 'posted' && w.posts().length === 1);
-  check('the caller is read at the base commit from before the run, never the base tip',
-    w.calls.some((c) => c.url.includes(`/contents/${CALLER_PATH}?ref=${BASE_AT_RUN}`)) && !w.calls.some((c) => c.url.includes(`/contents/${CALLER_PATH}?ref=main`)));
+  check('every copy in the base branch\'s commits to redline.yml is read, never the base tip by name',
+    w.calls.some((c) => c.url.includes(`/contents/${CALLER_PATH}?ref=${BASE_AT_RUN}`)) && w.calls.some((c) => c.url.includes(`/contents/${CALLER_PATH}?ref=${BASE_LATER}`))
+    && !w.calls.some((c) => c.url.includes(`/contents/${CALLER_PATH}?ref=main`)));
+  check('the history is read with no date filter', w.calls.some((c) => /\/commits\?/.test(c.url) && !c.url.includes('until=')));
 }
 {
-  const w = world({ callerAt: { main: caller(X), [BASE_AT_RUN]: caller(Y) } });
+  // A merge after the run brought in a commit to redline.yml dated before the run: by date it is
+  // the newest before the run, but it is not the copy the run used. Its order in the list does not matter.
+  for (const order of [[BASE_LATER, BASE_AT_RUN], [BASE_AT_RUN, BASE_LATER]]) {
+    const w = world({ callerAt: { main: caller(Y), [BASE_LATER]: caller(Y), [BASE_AT_RUN]: caller(X) }, baseCommits: order.map((sha) => ({ sha })) });
+    const out = await postRun(w.ctx);
+    check(`a caller-changing commit merged later with an older date does not refuse the verdict (${order[0] === BASE_LATER ? 'listed first' : 'listed last'})`,
+      out[0].outcome === 'posted' && w.posts().length === 1);
+  }
+}
+{
+  const w = world({ callerAt: { main: caller(X), [BASE_LATER]: caller(X), [BASE_AT_RUN]: caller(X, Y) }, baseCommits: [{ sha: BASE_LATER }, { sha: BASE_AT_RUN }] });
   const out = await postRun(w.ctx);
-  check('a base tip that pins the run\'s sha does not stand in for the copy the run used', out[0].outcome === 'refused' && w.posts().length === 0);
+  check('a base copy that names X with another redline-ref refuses, though another pins X in both lines', out[0].outcome === 'refused' && w.posts().length === 0
+    && new RegExp(`at the base branch at ${BASE_AT_RUN.slice(0, 7)}`).test(out[0].reason));
+}
+{
+  const w = world({ callerAt: { main: caller(Y), [BASE_LATER]: caller(Y), [BASE_AT_RUN]: caller(Y) }, baseCommits: [{ sha: BASE_LATER }, { sha: BASE_AT_RUN }] });
+  const out = await postRun(w.ctx);
+  check('no base copy that names the run\'s sha is a refusal', out[0].outcome === 'refused' && w.posts().length === 0);
 }
 {
   const w = world({ baseCommits: [] });
   const out = await postRun(w.ctx);
-  check('no base commit to redline.yml before the run fails the run, nothing posted', out[0].outcome === 'failed' && w.posts().length === 0);
+  check('no base commit to redline.yml fails the run, nothing posted', out[0].outcome === 'failed' && w.posts().length === 0);
 }
 {
   const w = world({ failRead: /\/commits\?/ });
   const out = await postRun(w.ctx);
   check('an unread base history fails the run, nothing posted', out[0].outcome === 'failed' && w.posts().length === 0);
+}
+{
+  const w = world({ callerAt: { main: caller(X), [BASE_AT_RUN]: caller(X) }, baseCommits: [{ sha: BASE_LATER }, { sha: BASE_AT_RUN }] });
+  const out = await postRun(w.ctx);
+  check('one unread base copy fails the run, nothing posted', out[0].outcome === 'failed' && w.posts().length === 0);
 }
 {
   const pr = { number: 5, state: 'open', head: { sha: HEAD, repo: { full_name: REPO } }, base: { ref: 'main' }, changed_files: 1 };

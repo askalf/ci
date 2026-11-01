@@ -21,9 +21,11 @@
 //      shape its own run; such a head is reviewed in dispatch mode instead.
 //   3. The run called redline-review.yml from one tooling repository at one sha X on that
 //      repository's main, and the redline.yml the run used pins the same repository and X in both
-//      lines. That file is read at the PR head when the PR changes it, else at the base branch's
-//      newest commit to it from before the run was created, never at the base tip: a pin bump merged
-//      after the run would otherwise refuse the run's verdict for good.
+//      lines. When the PR changes that file it is read at the PR head. Otherwise the run used a copy
+//      from the base branch, and neither the run nor the base's history by date says which (the base
+//      may have moved since, and a commit's date is not when it was merged), so every copy among
+//      the base branch's last BASE_CALLER_COMMITS commits to the file is read: those that name X in
+//      the uses line, which the run's copy did, must number at least one and all set redline-ref X.
 //   4. The run's redline-verdict artifact holds a verdict.json (version 1) for this repository, PR
 //      and head, with posted: false, whose event agrees with the run's conclusion (APPROVE exactly
 //      when the run succeeded).
@@ -69,6 +71,11 @@ export const VERDICT_FILE = 'verdict.json';
 export const MAX_ARTIFACT_BYTES = 1_000_000;
 /** The identity that dispatches a review. A dispatched run attributed to anyone else is not ours. */
 export const DISPATCH_ACTOR = 'askalf';
+/**
+ * How many of the base branch's commits to redline.yml rule 3 reads. The run's copy is among them
+ * unless that many changes to the file merged between the run and its post.
+ */
+export const BASE_CALLER_COMMITS = 20;
 
 const SHA = /^[0-9a-f]{40}$/;
 const CI_DIRS = ['.github/workflows/', '.github/actions/'];
@@ -243,6 +250,27 @@ export function referencedPin(run) {
 }
 
 /**
+ * The copy of redline.yml rule 3 judges for a pull_request run that does not change the file, from
+ * the base branch's copies (`copies`, newest first, each { sha, text }). The run's copy named X in
+ * its uses line, so: the first copy that names X but does not pin X in both lines, else the newest
+ * copy that names X, else, when none does, the newest copy. Pure.
+ */
+export function baseCallerChoice(copies, x) {
+  if (!x) return copies[0];
+  const names = (text) => String(text ?? '').split(/\r?\n/).some((line) => {
+    if (line.trimStart().startsWith('#')) return false;
+    const u = ANY_USES.exec(line);
+    return u !== null && u[1] === x.repo && u[2].replace(/#.*$/, '').trim() === x.sha;
+  });
+  const named = copies.filter((c) => names(c.text));
+  const bad = named.find((c) => {
+    const pin = callerPin(c.text);
+    return !pin || pin.repo !== x.repo || pin.uses !== x.sha || pin.ref !== x.sha;
+  });
+  return bad ?? named[0] ?? copies[0];
+}
+
+/**
  * Rule 3. `caller` is the redline.yml the run used and `where` says where it was read; `patch` is
  * the PR's own change to redline.yml (pull_request only), whose pin must name the same sha.
  * `pinCompare` is the compare status of <tooling repo> main...X.
@@ -362,17 +390,22 @@ async function fileText(ctx, path, ref) {
 }
 
 /**
- * The base branch's newest commit to redline.yml from before `createdAt`: the copy a pull_request
- * run created then used, as the PR does not change it. Null when it could not be read. A commit merged
- * after the run with an older date can only pick another
- * copy from the branch, never one a pull request wrote.
+ * The copies of redline.yml in the base branch's last BASE_CALLER_COMMITS commits to it, newest
+ * first, each { sha, text }. Null unless the list and every copy were read.
  */
-async function baseCallerCommit(ctx, baseRef, createdAt) {
-  if (!baseRef || Number.isNaN(Date.parse(createdAt))) return null;
-  const q = new URLSearchParams({ sha: baseRef, path: CALLER_PATH, until: createdAt, per_page: '1' });
+async function baseCallerCopies(ctx, baseRef) {
+  if (!baseRef) return null;
+  const q = new URLSearchParams({ sha: baseRef, path: CALLER_PATH, per_page: String(BASE_CALLER_COMMITS) });
   const rows = await read(ctx, `/repos/${ctx.repo}/commits?${q}`);
-  const sha = Array.isArray(rows) ? String(rows[0]?.sha ?? '') : '';
-  return SHA.test(sha) ? sha : null;
+  if (!Array.isArray(rows) || rows.length === 0) return null;
+  const copies = [];
+  for (const row of rows.slice(0, BASE_CALLER_COMMITS)) {
+    const sha = String(row?.sha ?? '');
+    const text = SHA.test(sha) ? await fileText(ctx, CALLER_PATH, sha) : null;
+    if (text === null) return null;
+    copies.push({ sha, text });
+  }
+  return copies;
 }
 
 async function compareStatus(ctx, path) {
@@ -487,11 +520,19 @@ async function decideAndPost(ctx, run, number, mode, defaultBranch, reread) {
     const files = await prFiles(ctx, pr);
     if ((d = ruleNoCiChanges({ files }))) return end(d);
     const own = files.find((f) => f.filename === CALLER_PATH);
-    const ref = own ? facts.prHead : await baseCallerCommit(ctx, String(pr.base?.ref ?? ''), run.createdAt);
-    const caller = ref ? await fileText(ctx, CALLER_PATH, ref) : null;
     const x = referencedPin(run);
+    let caller;
+    let where = 'the PR head';
+    if (own) {
+      caller = await fileText(ctx, CALLER_PATH, facts.prHead);
+    } else {
+      const copies = await baseCallerCopies(ctx, String(pr.base?.ref ?? ''));
+      const chosen = copies ? baseCallerChoice(copies, x) : null;
+      caller = chosen ? chosen.text : null;
+      where = chosen ? `the base branch at ${short(chosen.sha)}` : 'the base branch';
+    }
     const pinCompare = x ? await compareStatus(ctx, `/repos/${x.repo}/compare/main...${x.sha}`) : null;
-    d = rulePinnedOnMain({ run, caller, where: own ? 'the PR head' : `the base branch at ${short(ref)}`, ...(own ? { patch: own.patch } : {}), pinCompare });
+    d = rulePinnedOnMain({ run, caller, where, ...(own ? { patch: own.patch } : {}), pinCompare });
     if (d) return end(d);
   } else {
     if ((d = ruleDispatchRun(facts)) || (d = await reviewsNow())) return end(d);
