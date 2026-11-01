@@ -2,8 +2,11 @@
 // GitHub is stubbed through ctx.fetch; nothing leaves the machine.
 
 import { deflateRawSync } from 'node:zlib';
-import { readFileSync } from 'node:fs';
+import { readFileSync, mkdtempSync, rmSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { spawnSync } from 'node:child_process';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   parseDispatchTitle, pinOnlyPatchSha, callerPin, referencedPin, runFromApi, zipEntry, exitCode, postRun,
   ruleNotYetReviewed, rulePrRun, ruleDispatchRun, ruleNoCiChanges, ruleDispatchOnDefault, rulePinnedOnMain, ruleVerdictMatches,
@@ -428,12 +431,43 @@ console.log('\n  redline-post-verdict.yml');
   const yml = readFileSync(fileURLToPath(new URL('../../.github/workflows/redline-post-verdict.yml', import.meta.url)), 'utf8');
   const job = yml.slice(yml.indexOf('\n  post:\n'));
   const group = /\n    concurrency:\n      group: (.+)\n      cancel-in-progress: (.+)\n/.exec(job);
-  check('the post job has a concurrency group', group !== null);
+  check('the post job waits on the key job', /\n    needs: key\n/.test(job));
   check('a running post is never cancelled', group?.[2].trim() === 'false');
-  check('the group is per repository', group?.[1].includes('${{ github.repository }}'));
-  check('two pull_request runs at one head share a group', group?.[1].includes('github.event.workflow_run.head_sha'));
-  check('a dispatch shares a group with every dispatch for its PR and head', group?.[1].includes('github.event.workflow_run.display_title'));
-  check('the group is not keyed by the run id', !group?.[1].includes('workflow_run.id'));
+  check('the group is the repository and the key job\'s head, nothing else',
+    group?.[1].trim() === 'redline-post-${{ github.repository }}-${{ needs.key.outputs.head }}');
+
+  // The key step, run as the workflow runs it.
+  const lines = yml.split('\n');
+  const at = lines.findIndex((l) => l.includes('- name: Name the head the run reviewed'));
+  const runAt = lines.findIndex((l, i) => i > at && l.trim() === 'run: |');
+  const script = [];
+  for (const l of lines.slice(runAt + 1)) { if (l.trim() && !l.startsWith('          ')) break; script.push(l.slice(10)); }
+  if (spawnSync('bash', ['-c', 'true']).status !== 0) {
+    console.log('  skip the key step run: no bash here');
+  } else {
+    const d = mkdtempSync(join(tmpdir(), 'post-key-'));
+    let n = 0;
+    const key = (env) => {
+      const out = join(d, `out${n++}`);
+      const r = spawnSync('bash', ['-c', script.join('\n')], { encoding: 'utf8', env: { ...process.env, GITHUB_OUTPUT: out, RUN_ID: '77', TITLE: '', HEAD_SHA: '', ...env } });
+      if (r.status !== 0) return `exit ${r.status}: ${r.stderr}`;
+      try { return /^head=(.*)$/m.exec(readFileSync(out, 'utf8'))?.[1] ?? ''; } catch { return ''; }
+    };
+    const prKey = (head) => key({ EVENT: 'pull_request', HEAD_SHA: head });
+    const dispatchKey = (head, reread = false) => key({ EVENT: 'workflow_dispatch', HEAD_SHA: MAIN, TITLE: `Redline review ${REPO}#5 @ ${head}${reread ? ' (re-read)' : ''}` });
+    check('a pull_request run, a dispatch and a re-read at one head share one key',
+      prKey(HEAD) === HEAD && dispatchKey(HEAD) === HEAD && dispatchKey(HEAD, true) === HEAD, `${prKey(HEAD)} ${dispatchKey(HEAD)} ${dispatchKey(HEAD, true)}`);
+    check('runs at different heads get different keys, whatever the mode',
+      prKey(Y) === Y && dispatchKey(Y) === Y && prKey(HEAD) !== prKey(Y) && dispatchKey(HEAD) !== dispatchKey(Y, true));
+    check('two dispatches at one default-branch commit for different heads do not share a key', dispatchKey(HEAD) !== dispatchKey(Y));
+    check('a dispatch whose title names no head gets a key of its own',
+      key({ EVENT: 'workflow_dispatch', HEAD_SHA: MAIN, TITLE: 'Redline review by hand' }) === 'run-77'
+      && key({ EVENT: 'workflow_dispatch', HEAD_SHA: MAIN, TITLE: `Redline review ${REPO}#5 @ ${HEAD} (again)` }) === 'run-77');
+    check('a run on another event gets a key of its own', key({ EVENT: 'push', HEAD_SHA: HEAD }) === 'run-77');
+    check('a title cannot add lines to the step output',
+      key({ EVENT: 'workflow_dispatch', HEAD_SHA: MAIN, TITLE: `Redline review ${REPO}#5 @ ${HEAD}\nhead=evil` }) === 'run-77');
+    rmSync(d, { recursive: true, force: true });
+  }
 }
 
 console.log(`\n  ${pass} passed, ${fail} failed`);
