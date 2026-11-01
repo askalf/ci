@@ -11,8 +11,8 @@ Each repository's `.github/workflows/redline.yml` runs on `pull_request` and cal
 account, reads only). `review.mjs` gives the model the PR, its diff and the changed files in full (numbered, up to
 120,000 characters in all, larger ones named for `redline_read`), read-only tools over the
 checkout, and ends when the model submits a verdict. The job's status is the verdict: APPROVE
-passes, REQUEST_CHANGES fails. The finished review goes up as the `redline-verdict` artifact and
-forge posts it as `sprayberry-redline` after checking where the run came from. The reviewer's brief is
+passes, REQUEST_CHANGES fails. The finished review goes up as the `redline-verdict` artifact, and
+the post below puts it on the PR as `sprayberry-redline` after checking where the run came from. The reviewer's brief is
 `/etc/askalf/redline-prompt.md` on the runner host, named by `REDLINE_PROMPT_FILE`, never a file in
 this repository; `review.test.mjs` runs it all against a stubbed GitHub and model, with the three-line
 stand-in in `test-fixtures/`. `tools.json` is `TOOLS` as a file, pinned in the repository's
@@ -29,6 +29,26 @@ for nothing until it has merged. A `reads-as-generated` finding (how a sentence 
 wherever it is, whatever severity the model gave it, and a review that asked for changes only for
 such findings approves. `redline_search` runs in a child process killed
 after 10 seconds, so a pattern that backtracks without end cannot stall the review.
+
+## The post: `redline-post-verdict.yml` and `post.mjs`
+
+The review job runs the workflow files a pull request brings with it, so it never holds the
+reviewer token and its `verdict.json` says `posted: false`. Each repository's
+`.github/workflows/redline-post.yml` runs on `workflow_run` of its Redline workflow and calls
+`redline-post-verdict.yml` at a pinned commit, passing the repository secret
+`REDLINE_REVIEWER_TOKEN` as `reviewer-token`. A `workflow_run` job always runs the default branch's
+copy of its file, so a pull request cannot change what this job runs or where the secret goes
+until that change is reviewed and merged, and it runs on GitHub's runners, a machine no pull
+request's job has touched. `post.mjs` reads every fact it judges from the GitHub API with the
+read-only workflow token and posts only when all of them hold: the run is the PR's own Redline run
+at its current head (or the repository owner's dispatch of it on the default branch, for a head
+that run cannot vouch for), a pull_request run's PR changes no workflow or action beyond a pin bump
+of `redline.yml`, the run called `redline-review.yml` at the sha `redline.yml` pins and that sha is
+on main, the artifact's `verdict.json` names this PR and head and agrees with the run's
+conclusion, and `sprayberry-redline` has not reviewed the head yet. The last is read again just
+before the post, which is sent once and never retried. A verdict refused under these rules ends
+with a warning, a failed read or post fails the run so a re-run decides again, and
+`post.test.mjs` runs it all against a stubbed GitHub.
 
 ## Before the push: `local.mjs`
 
