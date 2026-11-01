@@ -1113,7 +1113,7 @@ console.log('\n  pin bump');
   const callers = (/\n      CALLERS: >-\n((?: {8}\S.*\n)+)/.exec(bump)?.[1] ?? '').split(/\s+/).filter(Boolean);
   const expected = ['askalf/ci', 'askalf/askalf', 'askalf/dario', 'askalf/amnesia', 'askalf/browser-bridge', 'askalf/redstamp',
     'askalf/truecopy', 'askalf/truecopy-action', 'askalf/cordon', 'askalf/plumbline',
-    'askalf/platform', 'askalf/homebrew-tap', 'askalf/pitlane', 'askalf/restore-desk',
+    'askalf/platform', 'askalf/homebrew-tap', 'askalf/pitlane-box', 'askalf/restore-desk',
     'askalf/sprayberrylabs-site', 'askalf/unscathed-site', 'askalf/ownyourstack-site', 'askalf/airprint-bridge'];
   check('the bump job knows the eighteen callers, this repository first, then platform (drift-report pins only) and the repositories that joined 2026-10-27', callers.join() === expected.join());
   check('this repo\'s caller pins askalf/ci and the same sha as redline-ref',
