@@ -28,8 +28,12 @@
 //   - The status action gets the PR number on every event that has one, and never runs dry.
 //   - The review relay is listed, fires on pull_request_review alone, and has no token or action.
 //
-// The home repository and the runner label are read from the status job's runs-on, so the same
-// check runs in a fork repository, where github.repository is the fork's.
+// The home repository is read from the status job's runs-on, so the same check runs in a fork
+// repository, where github.repository is the fork's. The status job runs on the repository's own
+// exec label or on its fleet status row (label fleet-status): a read-tier runner that holds no exec
+// slot, since the job checks out nothing and only calls the API. That label is allowed only in
+// fleet-status.yml and fleet-status-backfill.yml; every other self-hosted runs-on names the
+// repository's own exec label.
 //
 // CLI: node check.mjs [workflows dir, default .github/workflows]
 //   FS_REPO_ONLY  space-separated workflow files allowed the repository-only expression
@@ -45,6 +49,8 @@ export const CHECK_ACTION = 'askalf/ci/actions/fleet-status-check';
 export const SELF_TEST_NAME = 'Fleet status self-test';
 export const RELAY_NAME = 'Fleet review relay';
 export const DEFAULT_REPO_ONLY = ['fleet-status.yml', 'fleet-status-backfill.yml'];
+// The fleet status row's label: a read-tier runner each repository registers for these jobs alone.
+export const STATUS_LABEL = 'fleet-status';
 export const GROUP = "github.event_name == 'workflow_run' && format('fleet-status-{0}-{1}-{2}', github.event.workflow_run.event, github.event.workflow_run.head_repository.full_name, github.event.workflow_run.head_branch) || format('fleet-status-run-{0}', github.run_id)";
 
 /** A value this check cannot know: one a fork's author sets, or a context it does not supply. */
@@ -634,8 +640,10 @@ export function checkCaller(dir, opts = {}) {
   const where = homeOf(own);
   check('the status job runs on this repository\'s runners here and GitHub\'s in a fork repository', where !== null);
   const HOME = where?.home ?? 'askalf/unknown';
-  const LABEL = where?.label ?? 'unknown-exec';
-  check(`the runner label is the repository's own (${LABEL})`, LABEL === `${HOME.split('/')[1]}-exec`);
+  const LABEL = `${HOME.split('/')[1]}-exec`;
+  const statusLabel = where?.label ?? 'unknown';
+  check(`the status job's runner label is the repository's own (${statusLabel}): ${LABEL} or ${STATUS_LABEL}`,
+    statusLabel === LABEL || statusLabel === STATUS_LABEL);
   const FORKED = `contributor/${HOME.split('/')[1]}`;
   const cond = (/^    if: >-\n((?: {6}.*\n)+)/m.exec(own)?.[1] ?? '').split('\n').map((l) => l.trim()).join(' ').trim();
   check('the job has an if: to read', cond.length > 0);
@@ -737,6 +745,9 @@ export function checkCaller(dir, opts = {}) {
   const NAME = HOME.split('/')[1];
   const hostedLabel = (l) => /^(ubuntu|windows|macos)-[\w.-]+$/.test(l);
   const ourLabel = (l) => l.startsWith(`${NAME}-`);
+  // The fleet status row runs the status and backfill jobs alone, whatever else a repository lists
+  // as never running PR code: a release or deploy job keeps its exec row.
+  const allowed = (l, f) => hostedLabel(l) || l === 'self-hosted' || ourLabel(l) || (l === STATUS_LABEL && DEFAULT_REPO_ONLY.includes(f));
   const ownExprs = [];
   const repoOnly = [];
   const literal = [];
@@ -786,14 +797,14 @@ export function checkCaller(dir, opts = {}) {
       const at = `${f} ${job.id}`;
       if (job.expr === null || job.expr === UNREADABLE) {
         const labels = job.expr === null ? job.labels : [UNREADABLE];
-        for (const l of labels) if (!hostedLabel(l) && l !== 'self-hosted' && !ourLabel(l)) foreign.push(`${at}: ${l}`);
+        for (const l of labels) if (!allowed(l, f)) foreign.push(`${at}: ${l}`);
         if (!labels.every(hostedLabel) && !labels.includes(UNREADABLE)) literal.push({ at, job, onPrs });
         continue;
       }
       // Each matrix combination is its own job to Actions, so each is held to the rules alone.
       const cs = job.combos;
       const per = cs.map((c) => [...new Set(SCENARIOS.flatMap(([g, repo]) => labelsOf(job.expr, g, repo, c)))]);
-      for (const l of new Set(per.flat())) if (!hostedLabel(l) && l !== 'self-hosted' && !ourLabel(l)) foreign.push(`${at}: ${l}`);
+      for (const l of new Set(per.flat())) if (!allowed(l, f)) foreign.push(`${at}: ${l}`);
       if (per.flat().includes(UNREADABLE)) continue;
       const ours = cs.filter((_, i) => !per[i].every(hostedLabel));
       if (!ours.length) continue;

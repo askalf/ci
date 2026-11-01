@@ -113,6 +113,12 @@ console.log('\n  the fixture passes');
   const none = variant({ 'fleet-status.yml': (y) => y.replace('  cancel-in-progress: false\n', '') });
   check('no cancel-in-progress line at all passes (the default is false)', failing(checkCaller(none)).length === 0, failing(checkCaller(none)).join('\n'));
   const commented = variant({ 'fleet-status.yml': (y) => y.replace('cancel-in-progress: false', 'cancel-in-progress: false # a running status job finishes') });
+  const row = variant({ 'fleet-status.yml': (y) => y.replace('fromJSON(\'["self-hosted","example-exec"]\')', 'fromJSON(\'["self-hosted","fleet-status"]\')') });
+  check('the status job on the fleet status row passes, and every other workflow keeps the exec label', failing(checkCaller(row)).length === 0, failing(checkCaller(row)).join('\n'));
+  check('the status row label is read from the status job', homeOf(readFileSync(join(row, 'fleet-status.yml'), 'utf8'))?.label === 'fleet-status');
+  const release = variant({ 'release.yml': () => "name: release\non:\n  push:\njobs:\n  r:\n    runs-on: ${{ github.repository == 'askalf/example' && fromJSON('[\"self-hosted\",\"fleet-status\"]') || 'ubuntu-latest' }}\n    steps:\n      - run: echo\n" });
+  check('a workflow listed as repository-only still may not use the fleet status row',
+    failing(checkCaller(release, { repoOnly: ['fleet-status.yml', 'fleet-status-backfill.yml', 'release.yml'] })).some((n) => /not: release\.yml r: fleet-status/.test(n)));
   check('cancel-in-progress: false with a trailing comment passes', failing(checkCaller(commented)).length === 0, failing(checkCaller(commented)).join('\n'));
 }
 
@@ -159,6 +165,9 @@ const cases = [
   ['cancel-in-progress on pull_request runs', { [STATUS]: (y) => y.replace('cancel-in-progress: false', "cancel-in-progress: ${{ github.event_name == 'pull_request' }}") }, /no run is cancelled/],
   ['the older line that cancelled a workflow_run run (every caller moved on 2026-10-25)', { [STATUS]: (y) => y.replace('cancel-in-progress: false', "cancel-in-progress: ${{ github.event_name == 'workflow_run' }}") }, /no run is cancelled/],
   ['a second job in fleet-status.yml', { [STATUS]: (y) => `${y}  extra:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo\n` }, /runs only the status job/],
+  ['another repository\'s exec label on the status job', { [STATUS]: (y) => y.replace('fromJSON(\'["self-hosted","example-exec"]\')', 'fromJSON(\'["self-hosted","other-exec"]\')') }, /the status job's runner label is the repository's own \(other-exec\)/],
+  ['the fleet status row on a job that runs PR code', { 'ci.yml': (y) => y.replace('fromJSON(\'["self-hosted","example-exec"]\') }}\n    steps:\n      - run: echo test', 'fromJSON(\'["self-hosted","fleet-status"]\') }}\n    steps:\n      - run: echo test') }, /this repository's own \(not: ci\.yml test: fleet-status\)/],
+  ['the fleet status row as a literal label outside the status workflows', { 'ci.yml': (y) => `${y}${job('extra', "    if: github.repository == 'askalf/example'\n    runs-on: [self-hosted, fleet-status]\n")}` }, /this repository's own \(not: ci\.yml extra: fleet-status\)/],
   ['another repository\'s runner label', { 'ci.yml': (y) => y.replace('fromJSON(\'["self-hosted","example-exec"]\') }}\n    steps:\n      - run: echo test', 'fromJSON(\'["self-hosted","other-exec"]\') }}\n    steps:\n      - run: echo test') }, /this repository's own \(not: ci\.yml test: other-exec\)/],
   ['another repository\'s label in a quoted flow list', { 'ci.yml': (y) => `${y}${job('extra', "    runs-on: ['self-hosted', 'other-exec']\n")}` }, /this repository's own \(not: ci\.yml extra: other-exec\)/],
   ['another repository\'s label in a block list', { 'ci.yml': (y) => `${y}${job('extra', '    runs-on:\n      - self-hosted\n      - other-exec\n')}` }, /this repository's own \(not: ci\.yml extra: other-exec\)/],
