@@ -274,7 +274,7 @@ console.log('\n  postRun, pull_request');
   const post = w.posts()[0];
   check('as the reviewer token', post.init.headers.authorization === 'Bearer review');
   check('at the head', JSON.parse(post.init.body).commit_id === HEAD && JSON.parse(post.init.body).event === 'APPROVE');
-  check('reads with the read token only', w.calls.filter((c) => c.method === 'GET' && c.url.startsWith('https://api.github.com')).every((c) => c.init.headers.authorization === 'Bearer read'));
+  check('reads with the read token only', w.calls.filter((c) => c.method === 'GET' && new URL(c.url).host === 'api.github.com').every((c) => c.init.headers.authorization === 'Bearer read'));
   check('the storage download carries no token', !w.calls.find((c) => c.url === 'https://storage.example/zip').init.headers);
   check('exit 0', exitCode(out) === 0);
 }
@@ -492,7 +492,7 @@ console.log('\n  redline-post-verdict.yml');
     const prKey = (head) => key({ EVENT: 'pull_request', HEAD_SHA: head });
     const dispatchKey = (head, reread = false) => key({ EVENT: 'workflow_dispatch', HEAD_SHA: MAIN, TITLE: `Redline review ${REPO}#5 @ ${head}${reread ? ' (re-read)' : ''}` });
     check('a pull_request run, a dispatch and a re-read at one head share one key',
-      prKey(HEAD) === HEAD && dispatchKey(HEAD) === HEAD && dispatchKey(HEAD, true) === HEAD, `${prKey(HEAD)} ${dispatchKey(HEAD)} ${dispatchKey(HEAD, true)}`);
+      prKey(HEAD) === HEAD && dispatchKey(HEAD) === HEAD && dispatchKey(HEAD, true) === HEAD);
     check('runs at different heads get different keys, whatever the mode',
       prKey(Y) === Y && dispatchKey(Y) === Y && prKey(HEAD) !== prKey(Y) && dispatchKey(HEAD) !== dispatchKey(Y, true));
     check('two dispatches at one default-branch commit for different heads do not share a key', dispatchKey(HEAD) !== dispatchKey(Y));
