@@ -1,11 +1,11 @@
 # Redline fix: the first-party answer to a Redline REQUEST_CHANGES, as a CI job. Each repository
-# calls this from its own redline-fix.yml (workflow_dispatch; forge dispatches it with the PR, the
+# calls this from its own redline-fix.yml (workflow_dispatch; the ops tick dispatches it with the PR, the
 # head Redline reviewed and the review). The job checks out that head on the repository's own
 # non-root exec runner, lets the fix script edit and test inside it, and uploads the result as the
 # redline-fix artifact: fix.json, notes.md and, when there is a fix, fix.bundle (one commit on top
 # of the head). The job's status is the outcome: 0 for fixed, or for a description replaced with no
-# file changed (forge applies that too); 1 for anything else.
-# Nothing here pushes or comments and no token that could is on the runner: forge verifies the
+# file changed (the ops tick applies that too); 1 for anything else.
+# Nothing here pushes or comments and no token that could is on the runner: the ops tick verifies the
 # artifact (the run came from the pinned redline-fix.yml, the bundle is one fast-forward commit as
 # askalf with no attribution) and pushes it to the PR branch with the token it already holds.
 # The model is reached through FIX_ENV_FILE, which only the exec account that runs this job can
@@ -135,7 +135,7 @@ jobs:
 
       # The checkout was asked for the head sha, so this proves only that it landed nowhere else.
       # Whether the PR is still at that head is read from the API by fix.mjs before the model is
-      # called: a PR that moved is refused, and forge dispatches again at its new head.
+      # called: a PR that moved is refused, and the ops tick dispatches again at its new head.
       - name: Check the checkout is at the head
         env:
           HEAD_SHA: ${{ inputs.head }}
@@ -169,7 +169,7 @@ jobs:
           DRY_RUN: ${{ inputs.dry_run && '1' || '0' }}
         run: node .redline/scripts/redline/fix.mjs
 
-      # fix.json goes up whatever the outcome; forge reads it to know why there is no bundle.
+      # fix.json goes up whatever the outcome; the ops tick reads it to know why there is no bundle.
       - name: Upload the fix
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

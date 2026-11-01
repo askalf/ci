@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 // Rewrites a Redline caller so it calls its askalf/ci reusable workflow at one commit and has
-// the script fetched at that same commit. Three callers share the shape: redline.yml calls
-// redline-review.yml (the review), redline-fix.yml calls redline-fix-run.yml (the fix) and
-// public-text.yml calls public-text.yml (the dash check). The
+// the script fetched at that same commit. Four callers share the shape: redline.yml calls
+// redline-review.yml (the review), redline-fix.yml calls redline-fix-run.yml (the fix),
+// public-text.yml calls public-text.yml (the dash check) and redline-post.yml calls
+// redline-post-verdict.yml (the post). The
 // reusable workflow cannot learn its own commit (github.job_workflow_sha is not available to
 // expressions), so the caller passes it as the redline-ref input, and the two must always name
 // the same sha.
@@ -35,6 +36,7 @@ import { pathToFileURL } from 'node:url';
 export const REVIEW_WORKFLOW = 'askalf/ci/.github/workflows/redline-review.yml';
 export const FIX_WORKFLOW = 'askalf/ci/.github/workflows/redline-fix-run.yml';
 export const PUBLIC_TEXT_WORKFLOW = 'askalf/ci/.github/workflows/public-text.yml';
+export const POST_WORKFLOW = 'askalf/ci/.github/workflows/redline-post-verdict.yml';
 export const DRIFT_REPORT_ACTION = 'askalf/ci/actions/drift-report';
 export const CHECKOUT_RETRY_ACTION = 'askalf/ci/actions/checkout-with-retry';
 export const FLEET_STATUS_ACTION = 'askalf/ci/actions/fleet-status';
@@ -46,6 +48,7 @@ export const CALLERS = [
   { workflow: REVIEW_WORKFLOW, path: '.github/workflows/redline.yml' },
   { workflow: FIX_WORKFLOW, path: '.github/workflows/redline-fix.yml' },
   { workflow: PUBLIC_TEXT_WORKFLOW, path: '.github/workflows/public-text.yml' },
+  { workflow: POST_WORKFLOW, path: '.github/workflows/redline-post.yml' },
 ];
 const SHA = /^[0-9a-f]{40}$/;
 
@@ -95,18 +98,18 @@ export function bumpCaller(yaml, sha, note = '') {
 }
 
 /**
- * A repository's redline-fix.yml: the workflow_dispatch caller forge runs when Redline requests
+ * A repository's redline-fix.yml: the workflow_dispatch caller the ops tick runs when Redline requests
  * changes. `runnerLabel` is the repo's exec runner label (`<repo>-exec`). The caller job cannot carry runs-on itself (a job that uses a reusable
  * workflow takes no runner), so the label travels as an input.
  */
 export function fixCallerYaml(sha, runnerLabel, note = '') {
   if (!SHA.test(sha)) throw new Error(`not a full commit sha: ${sha}`);
   if (!/^[a-z0-9][a-z0-9-]{0,62}$/.test(runnerLabel)) throw new Error(`not a runner label: ${runnerLabel}`);
-  return `# Redline fix: when Redline requests changes on a pull request here, forge dispatches this run
+  return `# Redline fix: when Redline requests changes on a pull request here, the ops tick dispatches this run
 # with the PR, the head Redline reviewed and the review. The fix itself is computed by
 # askalf/ci (redline-fix-run.yml) on this repository's non-root exec runner and uploaded as
 # the redline-fix artifact. Nothing here pushes or comments, and no token that could is on the
-# runner: forge verifies the artifact and pushes the fix to the PR branch with its own token.
+# runner: the ops tick verifies the artifact and pushes the fix to the PR branch with its own token.
 name: Redline fix
 run-name: Redline fix \${{ github.repository }}#\${{ inputs.pr }} @ \${{ inputs.head }}
 
@@ -135,7 +138,7 @@ permissions:
   contents: read
   pull-requests: read
 
-# Queued, not cancelled: forge dispatches one run per review, and a cancelled run leaves no
+# Queued, not cancelled: the ops tick dispatches one run per review, and a cancelled run leaves no
 # artifact for it to read.
 concurrency:
   group: fix-\${{ github.repository }}-\${{ inputs.pr }}

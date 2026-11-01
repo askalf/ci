@@ -969,7 +969,7 @@ console.log('\n  the reusable workflow');
   check('the cleanup removes the verdict too', /run: rm -rf pr \.redline redline-verdict\s*$/.test(steps[cleanAt] ?? ''));
   check('nothing from the PR is interpolated into a run step',!/run:[^\n]*\$\{\{\s*github\.event\.pull_request\.(title|body|head\.ref)/.test(wf));
 
-  // Dispatch mode: forge dispatches the caller on the default branch with pr, head and reread.
+  // Dispatch mode: the ops tick dispatches the caller on the default branch with pr, head and reread.
   check('pr and head are optional string inputs, reread an optional boolean',
     /\n      pr:\n(?:        .*\n)*?        required: false\n        default: ''\n        type: string\n/.test(wf)
     && /\n      head:\n(?:        .*\n)*?        required: false\n        default: ''\n        type: string\n/.test(wf)
@@ -1123,11 +1123,11 @@ console.log('\n  pin bump');
   check('this repo\'s caller grants the review what it reads, actions included',
     (/\npermissions:\n((?: {2}.*\n)+)/.exec(own)?.[1] ?? '') === '  actions: read\n  contents: read\n  pull-requests: read\n');
 
-  // Forge dispatches the caller on the default branch and
-  // finds its run by this exact title, so the title and the inputs are a contract with forge.
-  check('this repo\'s caller takes forge\'s dispatch: pr, head, reread',
+  // The ops tick dispatches the caller on the default branch and
+  // finds its run by this exact title, so the title and the inputs are a contract with the ops tick.
+  check('this repo\'s caller takes the ops tick\'s dispatch: pr, head, reread',
     /\n  workflow_dispatch:\n    inputs:\n      pr:\n(?:        .*\n)*?        type: string\n      head:\n(?:        .*\n)*?        type: string\n      reread:\n(?:        .*\n)*?        default: false\n        type: boolean\n/.test(own));
-  check('the dispatch title is the one forge parses',
+  check('the dispatch title is the one the ops tick parses',
     own.includes("run-name: ${{ github.event_name == 'workflow_dispatch' && format('Redline review {0}#{1} @ {2}{3}', github.repository, inputs.pr, inputs.head, inputs.reread && ' (re-read)' || '') || github.event.pull_request.title }}\n"));
   // A concurrency group holds one pending run and a newer one cancels it, so each dispatch (head and
   // mode) gets a group of its own; a push still cancels the older pull_request run.
@@ -1213,7 +1213,7 @@ console.log('\n  pin bump');
   check('a workflow file is deep', deepReview([file('src/b.js'), file('.github/workflows/ci.yml')]));
   check('an auth path is deep', deepReview([file('src/middleware/auth.ts')]));
   check('a crypto, secret or token path is deep', deepReview([file('src/lib/crypto.js')]) && deepReview([file('lib/secrets.ts')]) && deepReview([file('src/tokens/store.js')]));
-  check('a Dockerfile or a shell script is deep', deepReview([file('deploy/Dockerfile.forge')]) && deepReview([file('tools/run.sh')]));
+  check('a Dockerfile or a shell script is deep', deepReview([file('deploy/Dockerfile.app')]) && deepReview([file('tools/run.sh')]));
   check('a rename away from a sensitive path is deep', deepReview([file('src/plain.js', { status: 'renamed', previous_filename: 'src/auth.js' })]));
   check('a file GitHub showed no patch for is deep', deepReview([file('src/big.js', { patch: undefined })]));
   check(`more than ${DEEP_LINES} changed lines is deep, at the limit is not`,

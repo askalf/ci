@@ -36,7 +36,7 @@ full commit sha of `main`, so a change here reaches it only through a reviewed b
 
 | This repository's own | What it does |
 |---|---|
-| `redline.yml`, `redline-fix.yml` | This repository's callers of the review and the fix, pinned and bumped like every other caller's. |
+| `redline.yml`, `redline-fix.yml`, `redline-post.yml` | This repository's callers of the review, the fix and the post, pinned and bumped like every other caller's. |
 | `redline-pin-bump.yml` | Hourly, moves every caller's pins to the newest `main` commit that changed what a caller runs, one pull request per repository. |
 | `redline-self-test.yml` | The Redline, public-text, drift-report, fleet-status and pin-bump tests on every pull request: a required check. |
 | `checkout-with-retry-self-test.yml` | Proves the retry action on a runner: a healthy checkout, the retry paths through a stub, and the act path under act. |
@@ -104,8 +104,8 @@ Next to the prompts the hosts hold the credential files the scripts read (`/etc/
 what a caller runs: the scripts the reusable workflows and actions fetch (their tests, test fixtures
 and READMEs aside), one of the four actions, or one of the reusable workflows. It rewrites, in every
 repository in its `CALLERS` list,
-the reusable-workflow pins in `redline.yml`, `redline-fix.yml` and `public-text.yml` where the
-repository has them, and every pin of one of the four actions in any workflow file there, through
+the reusable-workflow pins in `redline.yml`, `redline-fix.yml`, `public-text.yml` and
+`redline-post.yml` where the repository has them, and every pin of one of the four actions in any workflow file there, through
 `pin.mjs`: one commit per file on `bot/redline-pin`, one pull request per repository. Each
 repository's own gate reviews and merges the bump. This repository is in the list: its own callers
 move the same way. A repository with no pin of any kind is reported as wrong.

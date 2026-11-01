@@ -32,7 +32,7 @@ const watcher = `jobs:\n  w:\n    steps:\n      - uses: ${DRIFT_REPORT_ACTION}@$
 // The bump step reads the called workflows from its checkout, as the sparse checkout leaves them.
 function calledWorkflows(work) {
   mkdirSync(join(work, '.github', 'workflows'), { recursive: true });
-  for (const f of ['redline-review.yml', 'redline-fix-run.yml', 'public-text.yml']) {
+  for (const f of ['redline-review.yml', 'redline-fix-run.yml', 'public-text.yml', 'redline-post-verdict.yml']) {
     writeFileSync(join(work, '.github', 'workflows', f), readFileSync(fileURLToPath(new URL(`../../.github/workflows/${f}`, import.meta.url))));
   }
 }
@@ -159,6 +159,18 @@ console.log('\n  a public-text caller moves like the other two');
     bumpCaller(textCaller(OLDSHA), NEWSHA, 'main') === textCaller(NEWSHA));
   const real = (f) => readFileSync(fileURLToPath(new URL(`../../.github/workflows/${f}`, import.meta.url)), 'utf8');
   check('the caller shape grants what public-text.yml asks for', missingGrants(textCaller(NEWSHA), real('public-text.yml')).length === 0);
+}
+
+console.log('\n  a post caller moves like the others');
+{
+  const real = (f) => readFileSync(fileURLToPath(new URL(`../../.github/workflows/${f}`, import.meta.url)), 'utf8');
+  const own = real('redline-post.yml').replace(/\r\n/g, '\n');
+  const old = /uses: askalf\/ci\/\.github\/workflows\/redline-post-verdict\.yml@([0-9a-f]{40})/.exec(own)?.[1];
+  const b = bumpCaller(own, NEWSHA, 'main');
+  check('this repository\'s redline-post.yml pins the post at one sha in both lines', !!old && own.includes(`redline-ref: ${old}\n`));
+  check('bumpCaller moves its pin and its redline-ref together, and nothing else',
+    b === own.replace(/@[0-9a-f]{40}( # [^\n]*)?\n/, `@${NEWSHA} # main\n`).replace(`redline-ref: ${old}`, `redline-ref: ${NEWSHA}`), b);
+  check('the caller grants what redline-post-verdict.yml asks for', missingGrants(own, real('redline-post-verdict.yml')).length === 0);
 }
 
 console.log('\n  a watcher whose file name has a space');
