@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 // Rewrites a Redline caller so it calls its askalf/ci reusable workflow at one commit and has
-// the script fetched at that same commit. Three callers share the shape: redline.yml calls
-// redline-review.yml (the review), redline-fix.yml calls redline-fix-run.yml (the fix) and
-// public-text.yml calls public-text.yml (the dash check). The
+// the script fetched at that same commit. Four callers share the shape: redline.yml calls
+// redline-review.yml (the review), redline-fix.yml calls redline-fix-run.yml (the fix),
+// public-text.yml calls public-text.yml (the dash check) and redline-post.yml calls
+// redline-post-verdict.yml (the post). The
 // reusable workflow cannot learn its own commit (github.job_workflow_sha is not available to
 // expressions), so the caller passes it as the redline-ref input, and the two must always name
 // the same sha.
@@ -35,6 +36,7 @@ import { pathToFileURL } from 'node:url';
 export const REVIEW_WORKFLOW = 'askalf/ci/.github/workflows/redline-review.yml';
 export const FIX_WORKFLOW = 'askalf/ci/.github/workflows/redline-fix-run.yml';
 export const PUBLIC_TEXT_WORKFLOW = 'askalf/ci/.github/workflows/public-text.yml';
+export const POST_WORKFLOW = 'askalf/ci/.github/workflows/redline-post-verdict.yml';
 export const DRIFT_REPORT_ACTION = 'askalf/ci/actions/drift-report';
 export const CHECKOUT_RETRY_ACTION = 'askalf/ci/actions/checkout-with-retry';
 export const FLEET_STATUS_ACTION = 'askalf/ci/actions/fleet-status';
@@ -46,6 +48,7 @@ export const CALLERS = [
   { workflow: REVIEW_WORKFLOW, path: '.github/workflows/redline.yml' },
   { workflow: FIX_WORKFLOW, path: '.github/workflows/redline-fix.yml' },
   { workflow: PUBLIC_TEXT_WORKFLOW, path: '.github/workflows/public-text.yml' },
+  { workflow: POST_WORKFLOW, path: '.github/workflows/redline-post.yml' },
 ];
 const SHA = /^[0-9a-f]{40}$/;
 
