@@ -1,6 +1,8 @@
 # askalf/ci
 
 [![CI on pitlane](https://img.shields.io/endpoint?url=https%3A%2F%2Fpitlane.askalf.org%2Fbadge.json)](https://pitlane.askalf.org/)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/askalf/ci/badge)](https://scorecard.dev/viewer/?uri=github.com/askalf/ci)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 The gate layer of Sprayberry Labs' CI. A pull request on one of our public repositories passes three
 layers before it lands on `main`, and this repository is the middle one.
