@@ -746,8 +746,10 @@ export function checkCaller(dir, opts = {}) {
   const hostedLabel = (l) => /^(ubuntu|windows|macos)-[\w.-]+$/.test(l);
   const ourLabel = (l) => l.startsWith(`${NAME}-`);
   // The fleet status row runs the status and backfill jobs alone, whatever else a repository lists
-  // as never running PR code: a release or deploy job keeps its exec row.
-  const allowed = (l, f) => hostedLabel(l) || l === 'self-hosted' || ourLabel(l) || (l === STATUS_LABEL && DEFAULT_REPO_ONLY.includes(f));
+  // as never running PR code: a release or deploy job keeps its exec row. It is read before the
+  // name prefix, so a repository whose name is the label's first word gets no other way in.
+  const allowed = (l, f) => (l === STATUS_LABEL ? DEFAULT_REPO_ONLY.includes(f)
+    : hostedLabel(l) || l === 'self-hosted' || ourLabel(l));
   const ownExprs = [];
   const repoOnly = [];
   const literal = [];

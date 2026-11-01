@@ -2,7 +2,7 @@
 // test-fixtures/caller (a caller that passes), then over copies of it with one thing broken each.
 // Run: node scripts/fleet-status/check.test.mjs
 
-import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -119,6 +119,14 @@ console.log('\n  the fixture passes');
   const release = variant({ 'release.yml': () => "name: release\non:\n  push:\njobs:\n  r:\n    runs-on: ${{ github.repository == 'askalf/example' && fromJSON('[\"self-hosted\",\"fleet-status\"]') || 'ubuntu-latest' }}\n    steps:\n      - run: echo\n" });
   check('a workflow listed as repository-only still may not use the fleet status row',
     failing(checkCaller(release, { repoOnly: ['fleet-status.yml', 'fleet-status-backfill.yml', 'release.yml'] })).some((n) => /not: release\.yml r: fleet-status/.test(n)));
+  // A repository named fleet owns fleet-* labels by its name, but not the status row's.
+  const toFleet = (y) => y.replaceAll('askalf/example', 'askalf/fleet').replaceAll('example-exec', 'fleet-exec');
+  const renamed = Object.fromEntries(readdirSync(FIXTURE).filter((f) => toFleet(readFileSync(join(FIXTURE, f), 'utf8')) !== readFileSync(join(FIXTURE, f), 'utf8')).map((f) => [f, toFleet]));
+  const fleet = variant(renamed);
+  check('the fixture renamed to askalf/fleet passes', failing(checkCaller(fleet)).length === 0, failing(checkCaller(fleet)).join('\n'));
+  const fleetPr = variant({ ...renamed, 'ci.yml': (y) => toFleet(y).replace('fromJSON(\'["self-hosted","fleet-exec"]\') }}\n    steps:\n      - run: echo test', 'fromJSON(\'["self-hosted","fleet-status"]\') }}\n    steps:\n      - run: echo test') });
+  check('in askalf/fleet, the fleet status row on a PR-code job still fails',
+    failing(checkCaller(fleetPr)).some((n) => /not: ci\.yml test: fleet-status/.test(n)));
   check('cancel-in-progress: false with a trailing comment passes', failing(checkCaller(commented)).length === 0, failing(checkCaller(commented)).join('\n'));
 }
 
