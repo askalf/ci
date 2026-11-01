@@ -448,7 +448,7 @@ const PR_FILES = [{ filename: 'src/b.js', status: 'modified', additions: 1, dele
 // The compare of the base with the reviewed head: by default the PR's files list, each with the
 // blob the reviewed tree holds at that path (none when it holds none), as GitHub would report it.
 const blobAt = (repo, p) => { const r = spawnSync('git', ['rev-parse', '-q', '--verify', `${repo.head}:${p}`], { cwd: repo.dir, encoding: 'utf8' }); return r.status === 0 ? r.stdout.trim() : undefined; };
-function world(repo, { turns, prHead, reviewState = 'CHANGES_REQUESTED', reviewCommit, body = BODY, comments = [{ path: 'src/b.js', line: 1, body: 'Read it from the config instead.' }], dryRun = false, model = 'm', reviewUrl = REVIEW_URL, files = PR_FILES, compared = null } = {}) {
+function world(repo, { turns, prHead, reviewState = 'CHANGES_REQUESTED', reviewCommit, body = BODY, comments = [{ path: 'src/b.js', line: 1, body: 'Read it from the config instead.' }], dryRun = false, model = 'm', reviewUrl = REVIEW_URL, files = PR_FILES, compared = null, author = 'askalf' } = {}) {
   const calls = { model: [], gh: [] };
   const head = prHead ?? repo.head;
   const compare = compared ?? files.map((f) => ({ ...f, sha: blobAt(repo, f.filename) }));
@@ -464,7 +464,7 @@ function world(repo, { turns, prHead, reviewState = 'CHANGES_REQUESTED', reviewC
     }
     calls.gh.push(u.pathname);
     const p = u.pathname;
-    if (/\/pulls\/7$/.test(p)) return json({ number: 7, state: 'open', title: 'feat: add token', body: 'Adds it.', user: { login: 'askalf' }, head: { sha: head, ref: 'feat/x', repo: { full_name: 'askalf/r' } }, base: { sha: 'base0', ref: 'main', repo: { full_name: 'askalf/r' } } });
+    if (/\/pulls\/7$/.test(p)) return json({ number: 7, state: 'open', title: 'feat: add token', body: 'Adds it.', user: { login: author }, head: { sha: head, ref: 'feat/x', repo: { full_name: 'askalf/r' } }, base: { sha: 'base0', ref: 'main', repo: { full_name: 'askalf/r' } } });
     if (/\/reviews\/99$/.test(p)) return json({ id: 99, state: reviewState, commit_id: reviewCommit ?? repo.head, body, html_url: REVIEW_URL, user: { login: 'sprayberry-redline' } });
     if (/\/reviews\/99\/comments$/.test(p)) return json(u.searchParams.get('page') === '1' ? comments : []);
     if (p.endsWith('/files')) return json(u.searchParams.get('page') === '1' ? files : []);
@@ -938,6 +938,8 @@ if (!gitOk) {
       ['a review that is not CHANGES_REQUESTED', world(repo, { turns: [finish()], reviewState: 'APPROVED' }), /not CHANGES_REQUESTED/],
       ['a review at another head', world(repo, { turns: [finish()], reviewCommit: OTHER }), /not at the head/],
       ['a review with nothing to answer', world(repo, { turns: [finish()], body: '', comments: [] }), /no finding/],
+      ...['dependabot[bot]', 'dependabot', 'app/dependabot'].map((author) =>
+        [`a Dependabot pull request (${author})`, world(repo, { turns: [finish()], author }), /Dependabot pull requests are not fixed here/]),
     ];
     for (const [name, w, re] of cases) {
       const { record: r } = await runFix(w.ctx);
