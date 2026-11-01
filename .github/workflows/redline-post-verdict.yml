@@ -41,6 +41,13 @@ jobs:
     if: github.event_name == 'workflow_run' && (github.event.workflow_run.conclusion == 'success' || github.event.workflow_run.conclusion == 'failure')
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # One post at a time per repository and head, so two runs for one head never both pass the
+    # last read of the reviews and both post. A pull_request run is keyed by its head; a dispatch by
+    # its title, which names the PR and head. Not one group for the whole repository: a group holds
+    # one pending job and a newer one cancels it, which would drop the verdict of a different PR.
+    concurrency:
+      group: redline-post-${{ github.repository }}-${{ github.event.workflow_run.event == 'workflow_dispatch' && github.event.workflow_run.display_title || github.event.workflow_run.head_sha }}
+      cancel-in-progress: false
     steps:
       # github.job_workflow_sha is not available to expressions, so the caller passes the sha it
       # pins as redline-ref. It must be a full sha, so it cannot name a moving branch or tag, and a

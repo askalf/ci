@@ -2,6 +2,8 @@
 // GitHub is stubbed through ctx.fetch; nothing leaves the machine.
 
 import { deflateRawSync } from 'node:zlib';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import {
   parseDispatchTitle, pinOnlyPatchSha, callerPin, referencedPin, runFromApi, zipEntry, exitCode, postRun,
   ruleNotYetReviewed, rulePrRun, ruleDispatchRun, ruleNoCiChanges, ruleDispatchOnDefault, rulePinnedOnMain, ruleVerdictMatches,
@@ -18,6 +20,8 @@ function check(name, cond) {
 const REPO = 'askalf/demo';
 const HEAD = '47536435fb5c9540d8cb36fd26d81e101955b364';
 const MAIN = '1111111111111111111111111111111111111111';
+/** The base branch's newest commit to redline.yml from before the run. */
+const BASE_AT_RUN = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
 const X = '5305beec29bdd65ff79d5b431d8c3a25fe945bb1';
 const Y = '34b7875f46525f7899a4e6601fbca4be75443903';
 const RUN_ID = 900;
@@ -101,7 +105,8 @@ const bytes = (buf) => ({
 
 /**
  * A stub GitHub for one PR. `o` overrides any fact; `o.reviews` may be a list of review lists, one
- * per read, the last repeating.
+ * per read, the last repeating, and `o.prs` a list of PR states, one per read, the last repeating.
+ * `o.baseCommits` answers the base branch's history of redline.yml.
  */
 function world(o = {}) {
   const s = {
@@ -110,11 +115,14 @@ function world(o = {}) {
     callerAt: { main: caller(), [HEAD]: caller(), [MAIN]: caller() },
     pinCompare: 'behind', defaultCompare: 'identical', reviews: [[]], verdict: verdict(),
     artifact: { id: ART_ID, name: 'redline-verdict', expired: false, size_in_bytes: 500, workflow_run: { id: RUN_ID, head_sha: (o.run ?? prRunRaw()).head_sha } },
-    postStatus: 200, commitPulls: null, failRead: null,
+    postStatus: 200, commitPulls: null, failRead: null, prs: null,
+    baseCommits: [{ sha: BASE_AT_RUN }],
     ...o,
   };
+  s.callerAt = { [BASE_AT_RUN]: s.callerAt.main, ...s.callerAt };
   const calls = [];
   let reviewReads = 0;
+  let prReads = 0;
   const fetch = async (url, init = {}) => {
     const method = init.method ?? 'GET';
     calls.push({ url, method, init });
@@ -125,7 +133,10 @@ function world(o = {}) {
     const params = new URLSearchParams(q);
     if (p === `/repos/${REPO}/actions/runs/${RUN_ID}`) return json(200, s.run);
     if (p === `/repos/${REPO}`) return json(200, { default_branch: 'main' });
-    if (p === `/repos/${REPO}/pulls/5`) return json(200, s.pr);
+    if (p === `/repos/${REPO}/pulls/5`) return json(200, s.prs ? s.prs[Math.min(prReads++, s.prs.length - 1)] : s.pr);
+    if (p === `/repos/${REPO}/commits` && params.get('path') === CALLER_PATH) {
+      return Date.parse(params.get('until')) === Date.parse(s.run.created_at) && params.get('sha') === s.pr.base.ref ? json(200, s.baseCommits) : json(200, []);
+    }
     if (p === `/repos/${REPO}/pulls/5/files`) return json(200, params.get('page') === '1' ? s.files : []);
     if (p === `/repos/${REPO}/commits/${s.run.head_sha}/pulls`) return json(200, s.commitPulls ?? []);
     if (p === `/repos/${REPO}/contents/${CALLER_PATH}`) {
@@ -285,6 +296,46 @@ console.log('\n  postRun, pull_request');
   check('a run whose pin the base caller does not name is refused', out[0].outcome === 'refused' && w.posts().length === 0);
 }
 {
+  // The run used X; a bump to Y merged on the base branch before this job read the caller.
+  const w = world({ callerAt: { main: caller(Y), [BASE_AT_RUN]: caller(X) } });
+  const out = await postRun(w.ctx);
+  check('a pin bump merged after the run does not refuse its verdict', out[0].outcome === 'posted' && w.posts().length === 1);
+  check('the caller is read at the base commit from before the run, never the base tip',
+    w.calls.some((c) => c.url.includes(`/contents/${CALLER_PATH}?ref=${BASE_AT_RUN}`)) && !w.calls.some((c) => c.url.includes(`/contents/${CALLER_PATH}?ref=main`)));
+}
+{
+  const w = world({ callerAt: { main: caller(X), [BASE_AT_RUN]: caller(Y) } });
+  const out = await postRun(w.ctx);
+  check('a base tip that pins the run\'s sha does not stand in for the copy the run used', out[0].outcome === 'refused' && w.posts().length === 0);
+}
+{
+  const w = world({ baseCommits: [] });
+  const out = await postRun(w.ctx);
+  check('no base commit to redline.yml before the run fails the run, nothing posted', out[0].outcome === 'failed' && w.posts().length === 0);
+}
+{
+  const w = world({ failRead: /\/commits\?/ });
+  const out = await postRun(w.ctx);
+  check('an unread base history fails the run, nothing posted', out[0].outcome === 'failed' && w.posts().length === 0);
+}
+{
+  const pr = { number: 5, state: 'open', head: { sha: HEAD, repo: { full_name: REPO } }, base: { ref: 'main' }, changed_files: 1 };
+  const w = world({ prs: [pr, { ...pr, head: { sha: Y, repo: { full_name: REPO } } }] });
+  const out = await postRun(w.ctx);
+  check('a push while the artifact was read stops the post', out[0].outcome === 'skipped' && /head changed/.test(out[0].reason) && w.posts().length === 0);
+  const w2 = world({ prs: [pr, { ...pr, base: { ref: 'release' } }] });
+  const out2 = await postRun(w2.ctx);
+  check('a base changed while this one read stops the post', out2[0].outcome === 'skipped' && /base changed/.test(out2[0].reason) && w2.posts().length === 0);
+  const w3 = world({ prs: [pr, { ...pr, state: 'closed' }] });
+  const out3 = await postRun(w3.ctx);
+  check('a PR closed while this one read stops the post', out3[0].outcome === 'skipped' && /state changed/.test(out3[0].reason) && w3.posts().length === 0);
+  const w4 = world({ failRead: null });
+  const order = (await postRun(w4.ctx), w4.calls.map((c) => `${c.method} ${c.url.replace('https://api.github.com', '').split('?')[0]}`));
+  const lastPrRead = order.lastIndexOf(`GET /repos/${REPO}/pulls/5`);
+  check('the PR is read again after the artifact, just before the post',
+    lastPrRead > order.findIndex((c) => c.includes('/artifacts/')) && order[lastPrRead + 1] === `POST /repos/${REPO}/pulls/5/reviews`);
+}
+{
   const w = world({ pinCompare: 'ahead' });
   const out = await postRun(w.ctx);
   check('a pin off askalf/ci main is refused', out[0].outcome === 'refused' && w.posts().length === 0);
@@ -363,6 +414,26 @@ console.log('\n  postRun, dispatch');
   const w = world({ run: dispatchRunRaw({ display_title: `Redline review ${REPO}#5 @ ${Y}` }) });
   const out = await postRun(w.ctx);
   check('a dispatch for an older head is a skip', out[0].outcome === 'skipped' && w.posts().length === 0);
+}
+{
+  const pr = { number: 5, state: 'open', head: { sha: HEAD, repo: { full_name: REPO } }, base: { ref: 'main' }, changed_files: 1 };
+  const w = world({ run: dispatchRunRaw(), prs: [pr, { ...pr, head: { sha: Y, repo: { full_name: REPO } } }] });
+  const out = await postRun(w.ctx);
+  check('a push while a dispatched verdict was read stops the post', out[0].outcome === 'skipped' && w.posts().length === 0);
+}
+
+console.log('\n  redline-post-verdict.yml');
+{
+  // Two runs for one head finish together: their post jobs must not both pass rule 5 and both post.
+  const yml = readFileSync(fileURLToPath(new URL('../../.github/workflows/redline-post-verdict.yml', import.meta.url)), 'utf8');
+  const job = yml.slice(yml.indexOf('\n  post:\n'));
+  const group = /\n    concurrency:\n      group: (.+)\n      cancel-in-progress: (.+)\n/.exec(job);
+  check('the post job has a concurrency group', group !== null);
+  check('a running post is never cancelled', group?.[2].trim() === 'false');
+  check('the group is per repository', group?.[1].includes('${{ github.repository }}'));
+  check('two pull_request runs at one head share a group', group?.[1].includes('github.event.workflow_run.head_sha'));
+  check('a dispatch shares a group with every dispatch for its PR and head', group?.[1].includes('github.event.workflow_run.display_title'));
+  check('the group is not keyed by the run id', !group?.[1].includes('workflow_run.id'));
 }
 
 console.log(`\n  ${pass} passed, ${fail} failed`);

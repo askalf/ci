@@ -7,8 +7,8 @@
 // never a pull request's, so it may hold the token as a repository secret: a pull request cannot
 // change what this job runs, or where its secret goes, until that change has been reviewed and
 // merged. It runs on a GitHub-hosted runner, a fresh machine no pull request's job has touched.
-// Until 2026-11-01 our ops automation posted the same verdict after the same checks; it now leaves
-// the post to this job on every repository that has the caller (operator, 2026-11-01).
+// Our ops automation applies the same rules and never posts to a repository that has the caller, so
+// this job is the only poster there.
 //
 // Nothing in the artifact is taken on trust. Every fact a rule judges is read from the GitHub API
 // with the workflow's read-only token, and the verdict is posted only when every rule holds.
@@ -20,8 +20,10 @@
 //      redline.yml (its review uses line and its redline-ref, naming one sha). A PR that does could
 //      shape its own run; such a head is reviewed in dispatch mode instead.
 //   3. The run called redline-review.yml from one tooling repository at one sha X on that
-//      repository's main, and the redline.yml the run used (at the PR head when the PR changes it,
-//      else at the tip of the base branch) pins the same repository and X in both lines.
+//      repository's main, and the redline.yml the run used pins the same repository and X in both
+//      lines. That file is read at the PR head when the PR changes it, else at the base branch's
+//      newest commit to it from before the run was created, never at the base tip: a pin bump merged
+//      after the run would otherwise refuse the run's verdict for good.
 //   4. The run's redline-verdict artifact holds a verdict.json (version 1) for this repository, PR
 //      and head, with posted: false, whose event agrees with the run's conclusion (APPROVE exactly
 //      when the run succeeded).
@@ -35,8 +37,10 @@
 //   4. As above.
 //   5. sprayberry-redline has no review at the head yet; for a re-read, none since the run was created.
 //   There is no CI-change rule: the PR's own workflow files never ran in a dispatched run.
-// Rule 5 is read again just before the post, and the post itself is sent once, never retried: a
-// retry after an answer that was lost on the way back would post the review twice.
+// Rule 5 is read again just before the post, then the PR: a PR whose state, head or base changed
+// while this job read is a skip, since the facts it judged are no longer the PR's. The post itself
+// is sent once, never retried: a retry after an answer that was lost on the way back would post the
+// review twice. Two posts for one head never overlap: redline-post-verdict.yml runs one at a time.
 //
 // The outcome. A posted review, and a run that is not one to post (rules 1, 2 and 5), end with exit
 // 0. A verdict refused under rule 3 or 4 also ends with exit 0, and with a warning: no later run of
@@ -357,6 +361,20 @@ async function fileText(ctx, path, ref) {
   return Buffer.from(res.content, 'base64').toString('utf8');
 }
 
+/**
+ * The base branch's newest commit to redline.yml from before `createdAt`: the copy a pull_request
+ * run created then used, as the PR does not change it. Null when it could not be read. A commit merged
+ * after the run with an older date can only pick another
+ * copy from the branch, never one a pull request wrote.
+ */
+async function baseCallerCommit(ctx, baseRef, createdAt) {
+  if (!baseRef || Number.isNaN(Date.parse(createdAt))) return null;
+  const q = new URLSearchParams({ sha: baseRef, path: CALLER_PATH, until: createdAt, per_page: '1' });
+  const rows = await read(ctx, `/repos/${ctx.repo}/commits?${q}`);
+  const sha = Array.isArray(rows) ? String(rows[0]?.sha ?? '') : '';
+  return SHA.test(sha) ? sha : null;
+}
+
 async function compareStatus(ctx, path) {
   const res = await read(ctx, path);
   return typeof res?.status === 'string' ? res.status : null;
@@ -469,11 +487,11 @@ async function decideAndPost(ctx, run, number, mode, defaultBranch, reread) {
     const files = await prFiles(ctx, pr);
     if ((d = ruleNoCiChanges({ files }))) return end(d);
     const own = files.find((f) => f.filename === CALLER_PATH);
-    const ref = own ? facts.prHead : String(pr.base?.ref ?? '');
-    const caller = await fileText(ctx, CALLER_PATH, ref);
+    const ref = own ? facts.prHead : await baseCallerCommit(ctx, String(pr.base?.ref ?? ''), run.createdAt);
+    const caller = ref ? await fileText(ctx, CALLER_PATH, ref) : null;
     const x = referencedPin(run);
     const pinCompare = x ? await compareStatus(ctx, `/repos/${x.repo}/compare/main...${x.sha}`) : null;
-    d = rulePinnedOnMain({ run, caller, where: own ? 'the PR head' : 'the base branch', ...(own ? { patch: own.patch } : {}), pinCompare });
+    d = rulePinnedOnMain({ run, caller, where: own ? 'the PR head' : `the base branch at ${short(ref)}`, ...(own ? { patch: own.patch } : {}), pinCompare });
     if (d) return end(d);
   } else {
     if ((d = ruleDispatchRun(facts)) || (d = await reviewsNow())) return end(d);
@@ -489,9 +507,15 @@ async function decideAndPost(ctx, run, number, mode, defaultBranch, reread) {
   if (verdict.action) return end(verdict);
   d = ruleVerdictMatches({ repo: ctx.repo, pr: number, prHead: facts.prHead, run, ...verdict });
   if (d.action !== 'post') return end(d);
-  // Read again at the last moment: another post may have landed while this one read.
+  // Read again at the last moment: another post may have landed, or the PR moved, while this one read.
   const again = await reviewsNow();
   if (again) return end(again);
+  const now = await read(ctx, `/repos/${ctx.repo}/pulls/${number}`);
+  if (!now) return at('failed', `could not read #${number} again before the post`);
+  const moved = [
+    ['state', pr.state, now.state], ['head', pr.head?.sha, now.head?.sha], ['base', pr.base?.ref, now.base?.ref],
+  ].find(([, was, is]) => String(was ?? '') !== String(is ?? ''));
+  if (moved) return at('skipped', `#${number}'s ${moved[0]} changed while this run read (${String(moved[1] ?? '')} to ${String(moved[2] ?? '')})`);
   const res = await postReview(ctx, number, d.review);
   if (!res.ok) return at('failed', `the post failed: ${res.why}`);
   return at('posted', `posted ${d.review.event} at ${short(facts.prHead)}`, { url: res.url });
