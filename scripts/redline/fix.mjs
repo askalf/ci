@@ -20,6 +20,9 @@
 // Hardening, each with a reason:
 //   - The review must be a CHANGES_REQUESTED review of this PR at this head: an old review, a
 //     review on another PR, a moved head or a fork PR is refused before the model is called.
+//   - A Dependabot PR is refused there too. Its branch is in this repository, but its head brings
+//     a package version nobody here wrote, and the tests this run executes would load it beside
+//     the run's credentials (install skips package scripts; the tests still import the code).
 //   - fix_write stays inside the checkout (symlinks resolved). Under .github/ it writes only a
 //     file the pull request itself changes, and never the review's or this lane's own workflow:
 //     a workflow change runs with the PR's own permissions on the next push, which the PR's own
@@ -94,6 +97,8 @@ export { PROTECTED_ATTR, protectedFromCheckAttr };
 
 export const AUTHOR = { name: 'askalf', email: '263217947+askalf@users.noreply.github.com' };
 export const DEFAULT_MODEL = 'claude-opus-5-5';
+// Dependabot by its exact login in each API's spelling (REST, GraphQL, gh), never a substring.
+export const DEPENDABOT_AUTHOR = /^(app\/)?dependabot(\[bot\])?$/i;
 export const FIX_VERSION = 1;
 export const OUTCOMES = ['fixed', 'no_change', 'tests_failed', 'refused'];
 export const SCRIPTS = ['test', 'lint', 'typecheck', 'build'];
@@ -961,6 +966,7 @@ async function answerReview(ctx) {
   if (pr.state !== 'open') return refuse(`the pull request is ${pr.state}`);
   if (pr.head.sha !== headSha) return refuse(`the head moved to ${pr.head.sha}; dispatch again at the new head`);
   if (pr.head.repo?.full_name !== repo) return refuse('fork pull requests are not fixed here');
+  if (DEPENDABOT_AUTHOR.test(String(pr.user?.login ?? ''))) return refuse('Dependabot pull requests are not fixed here: the tests would load the new package version beside this run\'s credentials');
   const reviewRow = await gh(ctx, `/repos/${repo}/pulls/${n}/reviews/${ref.id}`);
   if (reviewRow.state !== 'CHANGES_REQUESTED') return refuse(`the review is ${reviewRow.state}, not CHANGES_REQUESTED`);
   if (reviewRow.commit_id !== headSha) return refuse(`the review is at ${reviewRow.commit_id}, not at the head`);
