@@ -1,5 +1,18 @@
 # askalf/ci
 
+[![CI on pitlane](https://img.shields.io/endpoint?url=https%3A%2F%2Fpitlane.askalf.org%2Fbadge.json)](https://pitlane.askalf.org/)
+
+The gate layer of Sprayberry Labs' CI. A pull request on one of our public repositories passes three
+layers before it lands on `main`, and this repository is the middle one.
+
+| Layer | What it does | Where it lives |
+|---|---|---|
+| Runners | Self-hosted runners we run ourselves. Their queue wait over the last 24 hours is published live: the badge above, [a page](https://pitlane.askalf.org/) and [JSON](https://pitlane.askalf.org/stats.json). | [pitlane.askalf.org](https://pitlane.askalf.org/) |
+| **Gate** | Redline, the code review every pull request has to pass. The caller runs it as a reusable workflow at one pinned commit, and the review's own check is the verdict: approve, or the job fails and the pull request does not merge. | this repository |
+| Lock | truecopy, which pins the tool definitions the reviewer and the fixer read and fails the build when their bytes change or newer detection flags them. | [truecopy-action](https://github.com/askalf/truecopy-action); `truecopy-gate.yml` here |
+
+## What is here
+
 Redline, the gating code review on Sprayberry Labs' public repositories, as reusable GitHub Actions
 workflows: the review (`redline-review.yml`, `scripts/redline/review.mjs`), the first-party fix that
 answers a review (`redline-fix-run.yml`, `scripts/redline/fix.mjs`) and the pin bump that moves every
