@@ -3,7 +3,7 @@
 # model or an AI tool (scripts/redline/public-text.mjs). The review leaves dashes to this check,
 # and a credit, which the review also blocks, is caught here in seconds, before a review round;
 # every one shows in a single run.
-# It is its own workflow, apart from the review: the forge posts a Redline verdict only when the
+# It is its own workflow, apart from the review: the review host posts a Redline verdict only when the
 # review run's conclusion agrees with it, so a failing job inside that run would hold back an
 # approval.
 # It reads the pull request through the API and checks out none of its code, so a fork PR is

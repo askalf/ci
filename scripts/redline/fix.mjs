@@ -4,15 +4,15 @@
 // and the PR with the workflow's read-only token, installs the checkout's dependencies once, and
 // lets the model read, write and run inside the checkout until it calls finish_fix. The edits
 // become one commit on top of the reviewed head, written out as a git bundle; nothing here pushes
-// or comments. Forge verifies the artifact and pushes it with the token it already holds, so no
+// or comments. The review host verifies the artifact and pushes it with the token it already holds, so no
 // token that can write ever sits on the runner.
 //
 // Output, under FIX_OUT (uploaded as the redline-fix artifact):
 //   fix.json     { version, repo, pr, base_head, new_head, outcome, commits, files, tests, turns, model, notes }
 //                outcome: fixed | no_change | tests_failed | refused. Always written, whatever happened.
-//   notes.md     the notes field: markdown for the PR comment forge posts.
+//   notes.md     the notes field: markdown for the PR comment the review host posts.
 //   description.md  the PR's new description, only when fix_describe answered a finding on it
-//                (fix.json `description: true`); forge sets it as the PR body.
+//                (fix.json `description: true`); the review host sets it as the PR body.
 //   fix.bundle   outcome fixed, not a dry run: the new commit, `git bundle create <base_head>..HEAD`.
 //   diff.patch   a dry run, or tests_failed: the staged diff instead of a commit.
 // The process exits 0 only for outcome fixed, so the job's own status says whether there is a fix.
@@ -547,12 +547,12 @@ export function maskSecrets(text, secrets) {
 
 // ---------- fix.json ----------
 
-/** fix.json exactly as forge reads it. */
+/** fix.json exactly as the review host reads it. */
 export function fixRecord({ repo, pr, headSha, newHead = null, outcome, commits = [], files = [], tests = null, turns = 0, model = '', notes = '', description = false }) {
   return { version: FIX_VERSION, repo, pr, base_head: headSha, new_head: newHead, outcome, commits, files, tests, turns, model, notes: String(notes ?? ''), description: description === true };
 }
 
-/** Why a parsed fix.json is malformed, or null. Forge applies its own checks as well. */
+/** Why a parsed fix.json is malformed, or null. The review host applies its own checks as well. */
 export function fixProblem(v) {
   if (!v || typeof v !== 'object' || Array.isArray(v)) return 'not an object';
   if (v.version !== FIX_VERSION) return `version must be ${FIX_VERSION}`;
@@ -610,7 +610,7 @@ export function saveFix(dir, record, description = null) {
 
 /**
  * The job's exit status for a record: 0 for fixed, and for a run that changed no file but replaced
- * the PR description (forge sets the description from the artifact); 1 for anything else.
+ * the PR description (the review host sets the description from the artifact); 1 for anything else.
  */
 export function exitCode(record) {
   return record.outcome === 'fixed' || (record.outcome === 'no_change' && record.description === true) ? 0 : 1;
@@ -940,7 +940,7 @@ export function onlyOrigins(fetchFn, urls) {
 export async function runFix(ctx) {
   const result = await answerReview(ctx);
   // Last gate before anything is uploaded: fix.json, notes.md and description.md are public
-  // through forge (the description becomes the PR body), so the description is checked with them.
+  // through the review host (the description becomes the PR body), so the description is checked with them.
   if (leaksSecret(`${JSON.stringify(result.record)}\n${result.description ?? ''}`, runSecrets(ctx))) {
     for (const f of ['fix.bundle', 'diff.patch']) rmSync(join(ctx.out, f), { force: true });
     return { record: fixRecord({ repo: ctx.repo, pr: ctx.pr, headSha: ctx.headSha, model: ctx.model, outcome: 'refused', turns: result.record.turns,
@@ -1092,7 +1092,7 @@ async function answerReview(ctx) {
     const installDirty = changedPaths(root, genv);
 
     const written = new Set();
-    let description = null; // fix_describe's text, set as the PR body by forge
+    let description = null; // fix_describe's text, set as the PR body by the review host
     // The fix as it would be staged now: everything changed minus what the contract leaves out.
     // A command may have staged or committed on its own, so HEAD and the index go back to the
     // reviewed head first (the working tree is kept): every check, the test gate in finalize
@@ -1322,7 +1322,7 @@ async function main() {
   // The job log of a public repository is public: no line in it carries the key or the token.
   const hidden = runSecrets(ctx);
   ctx.log = (line) => console.log(maskSecrets(line, hidden));
-  // A job killed at its timeout or cancelled still leaves forge a fix.json that says so.
+  // A job killed at its timeout or cancelled still leaves the review host a fix.json that says so.
   saveFix(out, fixRecord({ ...ctx, outcome: 'refused', notes: renderNotes({ outcome: 'refused', reason: 'The fix run ended before it finished: the job timed out or was cancelled.' }) }));
   let record;
   let description = null;

@@ -9,12 +9,12 @@
 // Posting. The finished review is written as verdict.json (REDLINE_VERDICT_FILE), which the workflow
 // uploads as the redline-verdict artifact. When the env file holds a reviewer token, the review is
 // also posted here as sprayberry-redline (posted: true). When it holds none, nothing is posted
-// (posted: false) and the forge posts it after checking where the run came from, so the reviewer
+// (posted: false) and the review host posts it after checking where the run came from, so the reviewer
 // token never has to sit on a CI runner that a pull request's own workflow files can reach.
 //
 // Hardening, each with a reason:
 //   - A verdict already posted at this head is reused, never posted twice (re-runs are free),
-//     except in a re-read (REDLINE_REREAD=1, forge's dispatch after a description-only finding
+//     except in a re-read (REDLINE_REREAD=1, the review host's dispatch after a description-only finding
 //     was answered by an edit), which reviews the head again.
 //   - A draft is not reviewed.
 //   - The head is re-read before posting; a head that moved gets no review (the newer run owns it).
@@ -452,7 +452,7 @@ export function verdictRecord({ repo, pr, headSha, event, body, comments = [], p
   return { version: VERDICT_VERSION, repo, pr, head_sha: headSha, event, body, comments, posted: posted === true };
 }
 
-/** Why a parsed verdict.json is malformed, or null. The forge applies its own checks as well. */
+/** Why a parsed verdict.json is malformed, or null. The review host applies its own checks as well. */
 export function verdictProblem(v) {
   if (!v || typeof v !== 'object' || Array.isArray(v)) return 'not an object';
   if (v.version !== VERDICT_VERSION) return `version must be ${VERDICT_VERSION}`;
@@ -1172,7 +1172,7 @@ async function main() {
   }
   const line = result.outcome === 'skipped' ? `Redline skipped: ${result.reason}`
     : result.outcome === 'dry-run' ? `Redline dry run (nothing posted): ${result.verdict}`
-      : result.outcome === 'unposted' ? `Redline verdict, left to the forge to post: ${result.verdict}`
+      : result.outcome === 'unposted' ? `Redline verdict, left to the review host to post: ${result.verdict}`
         : `Redline ${result.outcome === 'existing' ? 'already reviewed' : 'posted'}: ${result.verdict} ${result.url ?? ''}`;
   console.log(line);
   if (result.body) console.log(`\n${result.body}`);

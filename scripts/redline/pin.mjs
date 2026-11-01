@@ -95,18 +95,18 @@ export function bumpCaller(yaml, sha, note = '') {
 }
 
 /**
- * A repository's redline-fix.yml: the workflow_dispatch caller forge runs when Redline requests
+ * A repository's redline-fix.yml: the workflow_dispatch caller the review host runs when Redline requests
  * changes. `runnerLabel` is the repo's exec runner label (`<repo>-exec`). The caller job cannot carry runs-on itself (a job that uses a reusable
  * workflow takes no runner), so the label travels as an input.
  */
 export function fixCallerYaml(sha, runnerLabel, note = '') {
   if (!SHA.test(sha)) throw new Error(`not a full commit sha: ${sha}`);
   if (!/^[a-z0-9][a-z0-9-]{0,62}$/.test(runnerLabel)) throw new Error(`not a runner label: ${runnerLabel}`);
-  return `# Redline fix: when Redline requests changes on a pull request here, forge dispatches this run
+  return `# Redline fix: when Redline requests changes on a pull request here, the review host dispatches this run
 # with the PR, the head Redline reviewed and the review. The fix itself is computed by
 # askalf/ci (redline-fix-run.yml) on this repository's non-root exec runner and uploaded as
 # the redline-fix artifact. Nothing here pushes or comments, and no token that could is on the
-# runner: forge verifies the artifact and pushes the fix to the PR branch with its own token.
+# runner: the review host verifies the artifact and pushes the fix to the PR branch with its own token.
 name: Redline fix
 run-name: Redline fix \${{ github.repository }}#\${{ inputs.pr }} @ \${{ inputs.head }}
 
@@ -135,7 +135,7 @@ permissions:
   contents: read
   pull-requests: read
 
-# Queued, not cancelled: forge dispatches one run per review, and a cancelled run leaves no
+# Queued, not cancelled: the review host dispatches one run per review, and a cancelled run leaves no
 # artifact for it to read.
 concurrency:
   group: fix-\${{ github.repository }}-\${{ inputs.pr }}

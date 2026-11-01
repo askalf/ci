@@ -81,12 +81,12 @@ through the API (no checkout) and fails when an added line, the title, the descr
 message carries an em or en dash, or when the title, the description or a commit message credits a
 model or an AI tool (a co-author trailer, a "generated with" footer, a session link), naming every
 one. Credits are read in that text only, since code and docs may name these tools for other
-reasons. Context and removed lines are never read, and captured data is skipped. It is a workflow of its own because forge posts a review only when the
+reasons. Context and removed lines are never read, and captured data is skipped. It is a workflow of its own because the review host posts a review only when the
 review run's conclusion agrees with the verdict.
 
 ## The fix: `redline-fix-run.yml` and `fix.mjs`
 
-When a review requests changes, forge dispatches the repository's `.github/workflows/redline-fix.yml`
+When a review requests changes, the review host dispatches the repository's `.github/workflows/redline-fix.yml`
 (`workflow_dispatch`: `pr`, `head`, `review`, `dry_run`), which calls `redline-fix-run.yml` at the
 same pinned commit on `[self-hosted, <repo>-exec]`, the repository's non-root exec runner. The job
 checks that the checkout is exactly the reviewed head, then `fix.mjs`:
@@ -128,7 +128,7 @@ job killed at its 60-minute timeout still uploads a `fix.json` that says so. The
 `fixed`, and for `no_change` with `description: true` (the fix was a new description, which the
 caller applies); 1 for anything else. `fix-tools.json` is the fixer's `TOOLS` as a file, pinned in `truecopy.lock` like the
 reviewer's. The artifact is `redline-fix`. Nothing on the runner can push:
-forge verifies the artifact and pushes the commit to the PR branch with its own token, then
+the review host verifies the artifact and pushes the commit to the PR branch with its own token, then
 comments with the notes. The model is reached through a dario key socket named by `DARIO_SOCKET`
 in the env file, so no runner holds the key itself: the socket is the credential, and only the
 exec accounts can connect to it, never an account that runs untrusted code. `DARIO_API_KEY` in

@@ -260,7 +260,7 @@ console.log('\n  the commit subject');
   const long = commitSubject(`keep ${'the cursor '.repeat(20)}steady`);
   check(`a long subject is cut at a word under ${LIMITS.subjectChars} characters`, long.length <= LIMITS.subjectChars && !/\s$/.test(long) && long.startsWith('fix: keep the cursor'));
   check('trailing punctuation is dropped', commitSubject('reset the cursor.') === 'fix: reset the cursor');
-  check('the banned list catches the shapes forge refuses', ['co-authored', 'signed-off', 'Claude', 'GPT', 'Copilot', 'LLM'].every((w) => SUBJECT_BANNED.test(w)));
+  check('the banned list catches the shapes the review host refuses', ['co-authored', 'signed-off', 'Claude', 'GPT', 'Copilot', 'LLM'].every((w) => SUBJECT_BANNED.test(w)));
   check('an attribution trailer in a message is found', hasAttributionTrailer('fix: x\n\nCo-Authored-By: A <a@b>') && hasAttributionTrailer('x\n\nGenerated with a tool') && hasAttributionTrailer('x\nSigned-off-by: a'));
   check('a clean message has none', !hasAttributionTrailer('fix: reset the cursor\n\nThe cursor restarts at zero when the page changes.'));
 }

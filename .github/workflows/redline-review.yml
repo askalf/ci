@@ -4,20 +4,20 @@
 # credentials and its system prompt from files on the host, so no secret is stored in GitHub and
 # the reviewer's rubric sits in no public repository.
 # The finished review is uploaded as the redline-verdict artifact (verdict.json). When the host file
-# holds no reviewer token the review is not posted here: the forge posts it as sprayberry-redline
+# holds no reviewer token the review is not posted here: the review host posts it as sprayberry-redline
 # only after checking, from the GitHub API, that the run came from the pinned redline.yml at the PR's
 # current head and that the PR changes no workflow or action definitions.
 # The PR's code is checked out only to be read by the review's read-only tools; nothing from it runs.
 #
-# Dispatch mode: a caller's redline.yml also takes workflow_dispatch, and forge dispatches it on the
+# Dispatch mode: a caller's redline.yml also takes workflow_dispatch, and the review host dispatches it on the
 # default branch with the PR, the head to review and whether this is a re-read of a head already
 # reviewed. The run then executes the default branch's workflow files, not the PR's, so its verdict
-# holds even for a PR that changes CI definitions. Forge uses it for every head its pull_request run
+# holds even for a PR that changes CI definitions. The review host uses it for every head its pull_request run
 # cannot vouch for: a PR that changes CI, a verdict it refused, and a description-only re-read.
 # Fork PRs come here only in dispatch mode (operator, 2026-10-18). The pull_request path still refuses
 # a fork head before anything is fetched. On a dispatch the default branch's workflow files run, the
 # PR is read from the API, and the fork head is fetched by the repository's own pull ref, compared
-# with the sha forge named, and checked out with symlinks written as plain files. The review's tools
+# with the sha the review host named, and checked out with symlinks written as plain files. The review's tools
 # only list, read and search inside that checkout (review.mjs confines every path by its real path);
 # nothing from the head executes, and the job holds no credential that could write anywhere. A fork
 # PR whose workflows are still held at the contributor gate ("Approve and run") is not reviewed: the
@@ -109,7 +109,7 @@ jobs:
             process.exit(1);
           '
 
-      # A dispatch runs the default branch's workflow files, which is the only reason forge trusts
+      # A dispatch runs the default branch's workflow files, which is the only reason the review host trusts
       # its verdict, so it must be a workflow_dispatch on the default branch. The PR it names must be
       # open, not a draft and at the head given. A head in a fork is allowed here, and only here:
       # the step says so in its `fork` output, and only once a job of a pull_request run for that
@@ -200,7 +200,7 @@ jobs:
 
       # A fork head is fetched from this repository's own pull ref (GitHub mirrors every PR head
       # there), so nothing is read from the fork itself, and the fetched commit must be the sha
-      # forge named. The checkout writes symlinks as plain files: a link pointing out of the
+      # the review host named. The checkout writes symlinks as plain files: a link pointing out of the
       # checkout becomes text, and the review's tools refuse any path that resolves outside it
       # anyway. No hooks exist in a fresh repository, no submodule is fetched, nothing runs.
       - name: Fetch the fork head to read
