@@ -1,5 +1,7 @@
 # askalf/ci
 
+[![CI on pitlane](https://img.shields.io/endpoint?url=https%3A%2F%2Fpitlane.askalf.org%2Fbadge.json)](https://pitlane.askalf.org/)
+
 Redline, the gating code review on Sprayberry Labs' public repositories, as reusable GitHub Actions
 workflows: the review (`redline-review.yml`, `scripts/redline/review.mjs`), the first-party fix that
 answers a review (`redline-fix-run.yml`, `scripts/redline/fix.mjs`) and the pin bump that moves every
