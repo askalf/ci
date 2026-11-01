@@ -28,6 +28,8 @@ jobs:
         with:
           node-version: 22
       - run: node scripts/redline/review.test.mjs
+      # The verdict post, against a stubbed GitHub.
+      - run: node scripts/redline/post.test.mjs
       # The review before a push, against a throwaway repository and a stubbed model.
       - run: node scripts/redline/local.test.mjs
       - run: node scripts/redline/public-text.test.mjs

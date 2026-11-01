@@ -1,0 +1,107 @@
+# Redline's post: puts a finished Redline run's verdict on its pull request as sprayberry-redline.
+# Each reviewed repo calls this from its own redline-post.yml, on workflow_run of its Redline
+# workflow, and passes its REDLINE_REVIEWER_TOKEN secret as reviewer-token.
+#
+# The review job never holds that token: it runs the workflow files a pull request brings with it
+# and leaves verdict.json with posted: false. A workflow_run job always runs the default branch's
+# copy of its workflow file, never a pull request's, so a pull request cannot change what this job
+# runs or where its secret goes until that change is reviewed and merged. The post script
+# (scripts/redline/post.mjs, fetched at redline-ref) reads every fact it judges from the GitHub API
+# with the read-only workflow token and posts only when every rule holds; its header lists them.
+#
+# It runs on GitHub's runners: a fresh machine, never a self-hosted runner a pull request's job has
+# used, holds the token.
+name: Redline post
+
+on:
+  workflow_call:
+    inputs:
+      redline-ref:
+        description: >-
+          The full commit sha of askalf/ci this workflow is called at, the same sha as the
+          caller's uses pin. The post script is fetched at it. It must be a commit on main.
+        required: true
+        type: string
+    secrets:
+      reviewer-token:
+        description: The token that posts as sprayberry-redline.
+        required: true
+
+# actions: read lists and downloads the run's artifact; contents: read reads redline.yml at the
+# commit the run used; pull-requests: read reads the PR, its files and its reviews. The post itself
+# uses the reviewer token, never this one.
+permissions:
+  actions: read
+  contents: read
+  pull-requests: read
+
+jobs:
+  post:
+    # Only a run that reached a verdict. A cancelled or skipped run has none to post.
+    if: github.event_name == 'workflow_run' && (github.event.workflow_run.conclusion == 'success' || github.event.workflow_run.conclusion == 'failure')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # github.job_workflow_sha is not available to expressions, so the caller passes the sha it
+      # pins as redline-ref. It must be a full sha, so it cannot name a moving branch or tag, and a
+      # commit on main, so the script that holds the token is always one main has merged.
+      - name: Check the post ref is a full commit sha
+        env:
+          REDLINE_REF: ${{ inputs.redline-ref }}
+        run: |
+          if ! [[ "$REDLINE_REF" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::redline-ref must be the full 40-character commit sha the caller pins; got '${REDLINE_REF}'"
+            exit 1
+          fi
+
+      - name: Check the post ref is on askalf/ci main
+        env:
+          REDLINE_REF: ${{ inputs.redline-ref }}
+          GH_READ_TOKEN: ${{ github.token }}
+        # main is ahead of or identical to the ref exactly when the ref is on main. A failed read
+        # is retried, then fails the run: it is never taken as a pass.
+        run: |
+          node --input-type=module -e '
+            const ref = process.env.REDLINE_REF;
+            const url = `https://api.github.com/repos/askalf/ci/compare/${ref}...main`;
+            const headers = { authorization: `Bearer ${process.env.GH_READ_TOKEN}`, accept: "application/vnd.github+json" };
+            let status = "";
+            for (let attempt = 1; attempt <= 3 && !status; attempt++) {
+              try {
+                const res = await fetch(url, { headers });
+                if (res.ok) status = String((await res.json()).status ?? "");
+                else console.log(`attempt ${attempt}: HTTP ${res.status}`);
+              } catch (e) { console.log(`attempt ${attempt}: ${e.message}`); }
+              if (!status && attempt < 3) await new Promise((r) => setTimeout(r, attempt * 5000));
+            }
+            if (status === "ahead" || status === "identical") { console.log(`redline-ref ${ref} is on main`); process.exit(0); }
+            console.log(status
+              ? `::error::redline-ref ${ref} is not a commit on askalf/ci main (${status})`
+              : `::error::could not compare redline-ref ${ref} with askalf/ci main`);
+            process.exit(1);
+          '
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+
+      - name: Fetch the post script from askalf/ci
+        uses: askalf/ci/actions/checkout-with-retry@5305beec29bdd65ff79d5b431d8c3a25fe945bb1 # main 2026-11-01, askalf/ci#141
+        with:
+          repository: askalf/ci
+          ref: ${{ inputs.redline-ref }}
+          path: .redline
+          sparse-checkout: scripts/redline
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      # Exit 0 when the verdict was posted, was not one to post, or was refused (with a warning:
+      # our ops automation hands a refused head to a reviewer). Exit 1 when a read or the post
+      # failed, so a re-run of this run decides again.
+      - name: Post the verdict
+        env:
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          GH_READ_TOKEN: ${{ github.token }}
+          REDLINE_REVIEWER_TOKEN: ${{ secrets.reviewer-token }}
+        run: node .redline/scripts/redline/post.mjs
