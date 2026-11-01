@@ -32,8 +32,8 @@
 // repository, where github.repository is the fork's. The status job runs on the repository's own
 // exec label or on its fleet status row (label fleet-status): a read-tier runner that holds no exec
 // slot, since the job checks out nothing and only calls the API. That label is allowed only in
-// fleet-status.yml and fleet-status-backfill.yml; every other self-hosted runs-on names the
-// repository's own exec label.
+// fleet-status.yml and fleet-status-backfill.yml; every other self-hosted runs-on names only labels
+// the repository owns (<repo>-exec, <repo>-build and the like, each starting with its name).
 //
 // CLI: node check.mjs [workflows dir, default .github/workflows]
 //   FS_REPO_ONLY  space-separated workflow files allowed the repository-only expression
