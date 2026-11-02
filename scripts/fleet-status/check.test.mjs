@@ -161,7 +161,9 @@ console.log('\n  each break is caught');
 const STATUS = 'fleet-status.yml';
 const cases = [
   ['a pull_request workflow missing from the refresh list', { 'lint.yml': () => onPr('lint') }, /are all listed \(missing: lint\)/],
-  ['a fork pull_request let into the job', { [STATUS]: (y) => y.replace("github.event.pull_request.head.repo.full_name == github.repository)", 'true)') }, /fork's pull_request event does not run/],
+  ['a fork pull_request let into the job', { [STATUS]: (y) => y.replace("github.event.pull_request.head.repo.full_name == github.repository &&\n", "true &&\n") }, /fork's pull_request event does not run/],
+  ['any label event let in', { [STATUS]: (y) => y.replace("(!contains(fromJSON('[\"labeled\",\"unlabeled\"]'), github.event.action) ||", "(true ||") }, /any other label added or removed does not run it/],
+  ['the verified label kept out', { [STATUS]: (y) => y.replace("github.event.label.name == 'verified'))", "github.event.label.name == 'checked'))") }, /the verified label added or removed runs it/],
   ['any comment let in', { [STATUS]: (y) => y.replace("(startsWith(github.event.comment.body, '## Verification at') ||", "(true ||") }, /any other comment does not run it/],
   ['a checkout step in the status job', { [STATUS]: (y) => y.replace('    steps:\n', '    steps:\n      - uses: actions/checkout@0000000000000000000000000000000000000000\n') }, /no other action/],
   ['a run step in the status job', { [STATUS]: (y) => `${y}      - run: node x.mjs\n` }, /has no run step/],

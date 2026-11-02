@@ -7,7 +7,7 @@
 //     pull_request_target, runs one status job, groups and cancels only workflow_run runs, and its
 //     job if: keeps a fork's pull_request and pull_request_review events out (they carry a read-only
 //     token and the PR merge ref's workflow) while letting a fork's finished CI, review relay and
-//     verification comments in.
+//     verification comments in, and runs on a label event only for the one label the lanes read.
 //   - The status job runs actions/fleet-status of askalf/ci at a full commit sha and nothing else:
 //     no checkout, no run step. That is what lets a fork's events run it with a write token.
 //   - The self-test runs on pull_request (and a dispatch) alone, and runs fleet-status-check: on
@@ -667,6 +667,13 @@ export function checkCaller(dir, opts = {}) {
   check('a fork\'s pull_request event does not run the job', !onPr('pull_request', FORKED));
   check('a fork\'s pull_request_review event does not run the job', !onPr('pull_request_review', FORKED));
   check('a same-repo pull_request and review run it', onPr('pull_request', HOME) && onPr('pull_request_review', HOME));
+  // The lanes read one label, `verified` (fleet-status.mjs), so only that label changing runs the
+  // job; every other label event is a status run that posts nothing new, and a Dependabot PR fires
+  // two as it opens. A label the lanes come to read is added here and in the callers' if:.
+  const onLabel = (action, name) => runs({ event_name: 'pull_request', event: { action, label: { name }, pull_request: { head: { repo: { full_name: HOME } } } } });
+  check('the verified label added or removed runs it', onLabel('labeled', 'verified') && onLabel('unlabeled', 'verified'));
+  check('any other label added or removed does not run it (the lanes read none)',
+    !onLabel('labeled', 'dependencies') && !onLabel('unlabeled', 'dependencies') && !onLabel('labeled', ''));
   check('a verification comment on a PR runs it, fork or not; one on an issue does not',
     onComment('## Verification at abc1234\n\nPassed.')
     && !runs({ event_name: 'issue_comment', event: { issue: {}, comment: { body: '## Verification at abc1234' } } }));
