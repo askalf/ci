@@ -31,7 +31,7 @@ the job `if:` that keeps a fork's own `pull_request` events out.
 jobs:
   status:
     if: >-
-      ...                      # the fork and comment rules; fleet-status-check reads them
+      ...                      # the fork, comment and label rules; fleet-status-check reads them
     runs-on: ${{ github.repository == 'askalf/<repo>' && fromJSON('["self-hosted","fleet-status"]') || 'ubuntu-latest' }}
     permissions:
       contents: read
