@@ -20,9 +20,10 @@ import { bumpCaller, fixCallerYaml, REVIEW_WORKFLOW, FIX_WORKFLOW, PUBLIC_TEXT_W
 
 let pass = 0;
 let fail = 0;
-function check(name, cond) {
+// `detail` is printed under a failure only, to say what the check saw.
+function check(name, cond, detail) {
   if (cond) { console.log(`  ok   ${name}`); pass++; }
-  else { console.log(`  FAIL ${name}`); fail++; }
+  else { console.log(`  FAIL ${name}${detail === undefined ? '' : `\n       ${detail}`}`); fail++; }
 }
 async function throws(fn) { try { await fn(); return null; } catch (e) { return e; } }
 const SHA = /^[0-9a-f]{40}$/;
