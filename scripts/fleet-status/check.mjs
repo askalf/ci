@@ -10,7 +10,8 @@
 //     verification comments in.
 //   - The status job runs actions/fleet-status of askalf/ci at a full commit sha and nothing else:
 //     no checkout, no run step. That is what lets a fork's events run it with a write token.
-//   - The self-test runs on pull_request (and a dispatch) alone, and runs fleet-status-check.
+//   - The self-test runs on pull_request (and a dispatch) alone, and runs fleet-status-check: on
+//     every PR that changes a workflow, or on every PR where it is a required check.
 //   - The backfill, where there is one, is a dispatch that runs actions/fleet-status over every open PR.
 //   - Every runs-on, read per job in each form YAML allows (expression, flow list, block list,
 //     bare label, labels: mapping), names only GitHub's labels, self-hosted, or this repository's
@@ -490,6 +491,14 @@ export const SELF_TEST_TRIGGERS = [
   '      - .github/workflows/**',
 ];
 
+/**
+ * The self-test's triggers where it is a required check: the same events with no paths filter.
+ * A required check that never reports holds the merge, and a paths filter means it never reports
+ * on a PR that changes no workflow, so a repository that requires it runs it on every PR. The
+ * check itself still runs in full every time: nothing in the job may skip it.
+ */
+export const SELF_TEST_TRIGGERS_EVERY_PR = SELF_TEST_TRIGGERS.slice(0, 3);
+
 /** The grants the status and backfill jobs hold, exactly: what the action reads, and statuses. */
 export const STATUS_PERMISSIONS = ['contents: read', 'pull-requests: read', 'issues: read', 'checks: read', 'statuses: write'];
 
@@ -712,7 +721,10 @@ export function checkCaller(dir, opts = {}) {
     check('the self-test runs on pull_request, and a dispatch, alone', /^\s+pull_request:/m.test(on)
       && !/\b(pull_request_target|pull_request_review|issue_comment|workflow_run|push|schedule)\b/.test(on));
     // Every PR that opens, updates or reopens with a workflow change runs it; no path is left out.
-    check('the self-test runs on every PR that changes a workflow', triggerLines(self.y).join('\n') === SELF_TEST_TRIGGERS.join('\n'));
+    // Dropping the paths filter runs it on every PR, which a required check needs.
+    const selfTriggers = triggerLines(self.y).join('\n');
+    check('the self-test runs on every PR that changes a workflow, or on every PR',
+      selfTriggers === SELF_TEST_TRIGGERS.join('\n') || selfTriggers === SELF_TEST_TRIGGERS_EVERY_PR.join('\n'));
     check('the self-test job is named self-test', jobs(self.y).join() === 'self-test');
     check(`the self-test runs ${CHECK_ACTION} at a full commit sha`, usesOf(self.y).some((u) => new RegExp(`^${CHECK_ACTION}@[0-9a-f]{40}$`).test(u)));
     check('the self-test token reads contents alone', /^    permissions:\n      contents: read\n(?! {6})/m.test(self.y) && /^permissions: \{\}$/m.test(self.y));
