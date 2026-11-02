@@ -56,7 +56,10 @@ jobs:
     # Schedule and dispatch only, so only our own code runs here: on ci-exec, a pin bump
     # reaches the callers while GitHub's hosted queue is down.
     runs-on: [self-hosted, ci-exec]
-    timeout-minutes: 10
+    # A dispatch without wait-for-quiet bumps every caller in one run, about 70 s each (measured
+    # 2026-11-02: nine callers in 9.5 minutes), so 19 callers need about 22 minutes. Ten minutes
+    # cancelled such a run partway through the list.
+    timeout-minutes: 30
     # A fork repository has no ci-exec runners and no bump to make: the job runs here only.
     if: github.repository == 'askalf/ci'
     permissions:
