@@ -1,6 +1,7 @@
-# Runs the two fleet-status actions from this checkout as a caller would, so the composite wiring
-# (node, the script path under the action, the inputs as environment) is proven on a runner and
-# not only in the unit tests, which redline-self-test.yml's `test` job runs.
+# Runs the two fleet-status actions from this checkout as a caller would, so their wiring (for
+# fleet-status, the runner's own Node running main.mjs, its import of the script and the inputs
+# as INPUT_ variables; for fleet-status-check, the composite's node and script path) is proven on a
+# runner and not only in the unit tests, which redline-self-test.yml's `test` job runs.
 #
 # `check` runs fleet-status-check over the fixture caller in scripts/fleet-status/test-fixtures.
 # `status` runs fleet-status on this pull request as a dry run: it reads the PR, its reviews, its
