@@ -14,7 +14,7 @@ import {
   commitSubject, hasAttributionTrailer, neutraliseRefs, cleanNotes, summariseTests, renderNotes, fixRecord, fixProblem, saveFix, exitCode,
   failingTests, FAILING_NAMES_MAX, runSecrets, leaksSecret, maskSecrets, berryInstall, runAccount, asRunAccount, proxyEnv,
   runAccountUidProblem, TOOLS, FINISH_REQUIRED, askForFinish, checkFinish, runLoop, buildBrief, childEnv, onlyOrigins, runFix,
-  LIMITS, OUTCOMES, AUTHOR, FIX_VERSION, DEFAULT_MODEL, SUBJECT_BANNED, EFFORT_LEVELS, fixEffort, priorRounds,
+  LIMITS, OUTCOMES, AUTHOR, FIX_VERSION, DEFAULT_MODEL, SUBJECT_BANNED, EFFORT_LEVELS, fixEffort, priorRounds, REVIEW_PAGES_MAX,
 } from './fix.mjs';
 import { bumpCaller, fixCallerYaml, REVIEW_WORKFLOW, FIX_WORKFLOW, PUBLIC_TEXT_WORKFLOW, POST_WORKFLOW, CALLERS } from './pin.mjs';
 
@@ -449,7 +449,7 @@ const PR_FILES = [{ filename: 'src/b.js', status: 'modified', additions: 1, dele
 // The compare of the base with the reviewed head: by default the PR's files list, each with the
 // blob the reviewed tree holds at that path (none when it holds none), as GitHub would report it.
 const blobAt = (repo, p) => { const r = spawnSync('git', ['rev-parse', '-q', '--verify', `${repo.head}:${p}`], { cwd: repo.dir, encoding: 'utf8' }); return r.status === 0 ? r.stdout.trim() : undefined; };
-function world(repo, { turns, prHead, reviewState = 'CHANGES_REQUESTED', reviewCommit, body = BODY, comments = [{ path: 'src/b.js', line: 1, body: 'Read it from the config instead.' }], dryRun = false, model = 'm', reviewUrl = REVIEW_URL, files = PR_FILES, compared = null, author = 'askalf', effort = '', priorReviews = [] } = {}) {
+function world(repo, { turns, prHead, reviewState = 'CHANGES_REQUESTED', reviewCommit, body = BODY, comments = [{ path: 'src/b.js', line: 1, body: 'Read it from the config instead.' }], dryRun = false, model = 'm', reviewUrl = REVIEW_URL, files = PR_FILES, compared = null, author = 'askalf', effort = '', priorReviews = [], reviewPages = null } = {}) {
   const calls = { model: [], gh: [] };
   const head = prHead ?? repo.head;
   const compare = compared ?? files.map((f) => ({ ...f, sha: blobAt(repo, f.filename) }));
@@ -468,7 +468,13 @@ function world(repo, { turns, prHead, reviewState = 'CHANGES_REQUESTED', reviewC
     if (/\/pulls\/7$/.test(p)) return json({ number: 7, state: 'open', title: 'feat: add token', body: 'Adds it.', user: { login: author }, head: { sha: head, ref: 'feat/x', repo: { full_name: 'askalf/r' } }, base: { sha: 'base0', ref: 'main', repo: { full_name: 'askalf/r' } } });
     if (/\/reviews\/99$/.test(p)) return json({ id: 99, state: reviewState, commit_id: reviewCommit ?? repo.head, body, html_url: REVIEW_URL, user: { login: 'sprayberry-redline' } });
     if (/\/reviews\/99\/comments$/.test(p)) return json(u.searchParams.get('page') === '1' ? comments : []);
-    if (/\/pulls\/7\/reviews$/.test(p)) return json(u.searchParams.get('page') === '1' ? [...priorReviews, { id: 99, state: reviewState, user: { login: 'sprayberry-redline' } }] : []);
+    // The review list, oldest first: one page holding the earlier reviews and this one, or the
+    // pages a test lays out itself.
+    if (/\/pulls\/7\/reviews$/.test(p)) {
+      const page = Number(u.searchParams.get('page'));
+      if (reviewPages) return json(reviewPages[page - 1] ?? []);
+      return json(page === 1 ? [...priorReviews, { id: 99, state: reviewState, user: { login: 'sprayberry-redline' } }] : []);
+    }
     if (p.endsWith('/files')) return json(u.searchParams.get('page') === '1' ? files : []);
     // Served for any head: a checkout that is not at the reviewed head is refused after this read.
     if (/\/compare\/base0\.\.\.[0-9a-f]{40}$/.test(p)) return json({ files: compare });
@@ -555,6 +561,20 @@ if (!gitOk) {
     ({ record: r } = await runFix(w.ctx));
     check('a setting above high stays on a later round', r.outcome === 'fixed' && levels(w) === 'max,max,max,max');
     check('the record keeps its shape: no effort field in fix.json', fixProblem(r) === null && !('effort' in r));
+    // Review ids only need to grow with time, so the earlier pages use ids below this one's 99.
+    const comment = (id) => ({ id, state: 'COMMENTED', user: { login: 'sprayberry-redline' } });
+    const fullPage = (start) => Array.from({ length: 100 }, (_, i) => comment(start + i));
+    const pagesRead = (w) => w.calls.gh.filter((p) => /\/pulls\/7\/reviews$/.test(p)).length;
+    const current = { id: 99, state: 'CHANGES_REQUESTED', user: { login: 'sprayberry-redline' } };
+    w = world(makeRepo(), { turns, effort: 'medium', reviewPages: [fullPage(-1000), fullPage(-900), fullPage(-800), [{ id: -5, state: 'CHANGES_REQUESTED', user: { login: 'sprayberry-redline' } }, current]] });
+    ({ record: r } = await runFix(w.ctx));
+    check('an earlier change request on page four is a round: high', r.outcome === 'fixed' && levels(w) === 'high,high,high,high' && pagesRead(w) === 4);
+    w = world(makeRepo(), { turns, effort: 'medium', reviewPages: [fullPage(-1000), [comment(-1), current]] });
+    ({ record: r } = await runFix(w.ctx));
+    check('the scan stops at the page holding this review: two pages, still the setting', r.outcome === 'fixed' && levels(w) === 'medium,medium,medium,medium' && pagesRead(w) === 2);
+    w = world(makeRepo(), { turns, effort: 'medium', reviewPages: Array.from({ length: REVIEW_PAGES_MAX + 2 }, (_, k) => fullPage(-100_000 + k * 100)) });
+    ({ record: r } = await runFix(w.ctx));
+    check('past the page cap with this review unseen: taken as a later round, high', r.outcome === 'fixed' && levels(w) === 'high,high,high,high' && pagesRead(w) === REVIEW_PAGES_MAX);
   }
 
   console.log('\n  runFix: a workflow file the PR changes');

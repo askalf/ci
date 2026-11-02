@@ -127,6 +127,28 @@ export function priorRounds(reviews, current) {
   return (Array.isArray(reviews) ? reviews : []).filter((r) => r && r.state === 'CHANGES_REQUESTED'
     && r.user?.login === who && Number.isInteger(r.id) && r.id < current.id).length;
 }
+
+/** Pages of 100 reviews read before the round is taken as unknown. */
+export const REVIEW_PAGES_MAX = 30;
+
+/**
+ * The rounds before the review being answered, read from the pull request's reviews page by page.
+ * GitHub lists them oldest first, so the scan ends at the page that holds the review being
+ * answered, or at the last page. It never stops at a fixed count: a change request on page four
+ * is an earlier round like one on page one. Past maxPages with the answered review not yet seen,
+ * the count is unknown and `capped` is true; the caller then treats the run as a later round, so
+ * the cap can only cost effort, never quality.
+ */
+export async function reviewRounds(ctx, repo, n, current, maxPages = REVIEW_PAGES_MAX) {
+  let rounds = 0;
+  for (let page = 1; page <= maxPages; page++) {
+    const rows = await gh(ctx, `/repos/${repo}/pulls/${n}/reviews?per_page=100&page=${page}`);
+    const list = Array.isArray(rows) ? rows : [];
+    rounds += priorRounds(list, current);
+    if (list.length < 100 || list.some((r) => r?.id === current?.id)) return { rounds, capped: false };
+  }
+  return { rounds, capped: true };
+}
 // Dependabot by its exact login in each API's spelling (REST, GraphQL, gh), never a substring.
 export const DEPENDABOT_AUTHOR = /^(app\/)?dependabot(\[bot\])?$/i;
 export const FIX_VERSION = 1;
@@ -1009,9 +1031,11 @@ async function answerReview(ctx) {
   // Read only when FIX_EFFORT is set: without it no request names an effort and nothing is fetched.
   let effort;
   if (ctx.effort) {
-    const rounds = priorRounds(await ghAll(ctx, `/repos/${repo}/pulls/${n}/reviews`, 3), reviewRow);
-    effort = fixEffort(ctx.effort, rounds);
-    ctx.log?.(`  effort ${effort ?? 'unset'}: round ${rounds + 1} on this pull request`);
+    const { rounds, capped } = await reviewRounds(ctx, repo, n, reviewRow);
+    effort = fixEffort(ctx.effort, capped ? Infinity : rounds);
+    ctx.log?.(capped
+      ? `  effort ${effort}: more than ${REVIEW_PAGES_MAX * 100} reviews before this one, so it is taken as a later round`
+      : `  effort ${effort ?? 'unset'}: round ${rounds + 1} on this pull request`);
   }
 
   let runAs;
