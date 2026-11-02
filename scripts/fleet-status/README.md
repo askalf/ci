@@ -10,7 +10,7 @@ statuses on every pull request head, and a merge waits on both:
 
 | piece | what it is |
 |---|---|
-| `actions/fleet-status` | runs `fleet-status.mjs`: reads the PR through the REST API and posts what differs from the head's newest statuses, then reads again and corrects a stale overwrite (three passes at most). `all-open: true` does every open same-repo PR, the backfill. |
+| `actions/fleet-status` | runs `fleet-status.mjs` on the runner's own Node (a JavaScript action, no setup-node): reads the PR through the REST API in two parallel rounds and posts what differs from the head's newest statuses, then reads again and corrects a stale overwrite (three passes at most). `all-open: true` does every open same-repo PR, the backfill. |
 | `actions/fleet-status-check` | runs `check.mjs` over a caller's `.github/workflows`, as that repository's `self-test` job. |
 | `fleet-status.test.mjs` | the lane rules, and the CLI against a stubbed GitHub. |
 | `check.test.mjs` | the checker over `test-fixtures/caller`, a caller that passes, and over copies with one thing broken each. |

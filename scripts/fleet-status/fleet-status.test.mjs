@@ -293,7 +293,16 @@ console.log('\n  required CI is the verification where the base branch requires 
     const pageOf = (u) => Number(new URL(u).searchParams.get('page') ?? 1);
     const slice = (rows, u) => rows.slice((pageOf(u) - 1) * 100, pageOf(u) * 100);
     const json = (body, status = 200) => new Response(JSON.stringify(body), { status });
+    // Every request waits a moment, so requests made together overlap and the peak counts them.
+    let inflight = 0, peak = 0, gets = 0, posting = 0, postPeak = 0;
     globalThis.fetch = async (url, init = {}) => {
+      const post = init.method === 'POST';
+      inflight++; peak = Math.max(peak, inflight);
+      if (post) { posting++; postPeak = Math.max(postPeak, posting); } else gets++;
+      await new Promise((r) => setTimeout(r, 5));
+      try { return await answer(url, init); } finally { inflight--; if (post) posting--; }
+    };
+    const answer = async (url, init) => {
       const p = new URL(url).pathname;
       if (init.method === 'POST') { posted.push({ path: p, ...JSON.parse(init.body) }); return json({}, 201); }
       if (p.endsWith('/files')) return json(slice(fx.files, url));
@@ -306,16 +315,19 @@ console.log('\n  required CI is the verification where the base branch requires 
       if (/[/]pulls[/][0-9]+$/.test(p)) return json(fx.pr);
       return json({ message: 'unexpected ' + p }, 404);
     };
-    process.on('exit', () => process.stdout.write('POSTED ' + JSON.stringify(posted) + '\\n'));
+    process.on('exit', () => process.stdout.write('POSTED ' + JSON.stringify(posted) + '\\nPEAK ' + peak + '\\nGETS ' + gets + '\\nPOSTPEAK ' + postPeak + '\\n'));
   `;
-  const run = (fixture, ...args) => {
-    const r = spawnSync(process.execPath, ['--import', `data:text/javascript,${encodeURIComponent(stub)}`, script, ...args], {
-      env: { ...process.env, GITHUB_TOKEN: 't', REPO: 'o/r', PR: '7', FLEET_STATUS_FIXTURE: JSON.stringify(fixture) },
-      encoding: 'utf8',
-    });
+  const spawn = (file, env, args) => {
+    const r = spawnSync(process.execPath, ['--import', `data:text/javascript,${encodeURIComponent(stub)}`, file, ...args], { env, encoding: 'utf8' });
     const posted = JSON.parse(/^POSTED (.*)$/m.exec(r.stdout)?.[1] ?? '[]');
-    return { status: r.status, out: r.stdout + r.stderr, posted, lane: (c) => new RegExp(`^${c}\\s+(\\S+)\\s+(.*)$`, 'm').exec(r.stdout)?.slice(1) ?? [] };
+    const count = (k) => Number(new RegExp(`^${k} (\\d+)$`, 'm').exec(r.stdout)?.[1] ?? -1);
+    return {
+      status: r.status, out: r.stdout + r.stderr, posted, peak: count('PEAK'), gets: count('GETS'), postPeak: count('POSTPEAK'),
+      lane: (c) => new RegExp(`^${c}\\s+(\\S+)\\s+(.*)$`, 'm').exec(r.stdout)?.slice(1) ?? [],
+    };
   };
+  const run = (fixture, ...args) =>
+    spawn(script, { ...process.env, GITHUB_TOKEN: 't', REPO: 'o/r', PR: '7', FLEET_STATUS_FIXTURE: JSON.stringify(fixture) }, args);
   const pr = (over = {}) => ({
     state: 'open', number: 7, html_url: 'https://x/pull/7',
     head: { sha: HEAD, ref: 'feat/x', repo: { full_name: 'o/r' } }, base: { ref: 'main' },
@@ -398,6 +410,37 @@ console.log('\n  required CI is the verification where the base branch requires 
   const fork = run(fixture({ pr: pr({ head: { sha: HEAD, ref: 'feat/x', repo: { full_name: 'else/r' } } }) }));
   check('a fork PR is computed: with no required checks its label and comment do not verify it',
     fork.status === 0 && fork.lane(CONTEXTS.verify).join(' ') === "pending an outside contributor's PR: the operator verifies and merges");
+
+  // A status job's time is its round trips: a pass reads in two rounds of four requests at once
+  // (what the PR number names, then what its base branch and head name) and posts its lanes together.
+  check('a pass reads in two rounds of four requests at once', quiet.peak === 4 && quiet.gets === 8);
+  const twoPasses = run(fixture({ statuses: [[], settled] }));
+  check('a run that posts reads one pass, posts both lanes at once, and reads one pass again',
+    twoPasses.status === 0 && twoPasses.posted.length === 2 && twoPasses.postPeak === 2 && twoPasses.gets === 16);
+  const verifiedByCi = [
+    want(CONTEXTS.verify, 'success', `Required CI passed at ${HEAD.slice(0, 7)}`),
+    want(CONTEXTS.review, 'pending', `Waiting on Redline at ${HEAD.slice(0, 7)}`),
+  ];
+  const settledByCi = run(fixture({ rules: requireTest, checkRuns: passingRun, statuses: [verifiedByCi] }));
+  check('required checks add no read: one statuses read serves the checks and the lanes',
+    settledByCi.status === 0 && settledByCi.lane(CONTEXTS.verify)[0] === 'success' && settledByCi.posted.length === 0 && settledByCi.gets === 8);
+
+  // The action's entry: the runner hands inputs over as INPUT_<NAME> with the hyphens kept, and an
+  // empty target-url links the run.
+  const entry = fileURLToPath(new URL('../../actions/fleet-status/main.mjs', import.meta.url));
+  const action = (fx, inputs = {}) => spawn(entry, {
+    ...process.env, GITHUB_REPOSITORY: 'o/r', GITHUB_SERVER_URL: 'https://github.example', GITHUB_RUN_ID: '42',
+    INPUT_TOKEN: 't', INPUT_PR: '7', 'INPUT_HEAD-REPO': '', 'INPUT_HEAD-BRANCH': '', 'INPUT_ALL-OPEN': 'false',
+    'INPUT_DRY-RUN': 'false', 'INPUT_TARGET-URL': '', FLEET_STATUS_FIXTURE: JSON.stringify(fx), ...inputs,
+  }, []);
+  const viaAction = action(fixture({ statuses: [[], settled] }));
+  check('action: posts both lanes, each linking the run',
+    viaAction.status === 0 && viaAction.posted.length === 2 && viaAction.posted.every((s) => s.target_url === 'https://github.example/o/r/actions/runs/42'));
+  const linked = action(fixture({ statuses: [[], settled] }), { 'INPUT_TARGET-URL': ' https://t.example/x ' });
+  check('action: a target-url input is where each status links', linked.posted.length === 2 && linked.posted.every((s) => s.target_url === 'https://t.example/x'));
+  const dry = action(fixture(), { 'INPUT_DRY-RUN': 'true' });
+  check('action: dry-run prints the lanes and posts nothing', dry.status === 0 && dry.posted.length === 0 && dry.lane(CONTEXTS.verify)[0] === 'success');
+  check('action: no pr and no head is a usage error', action(fixture(), { INPUT_PR: '' }).status === 2);
 }
 
 {
