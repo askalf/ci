@@ -14,7 +14,7 @@ import {
   commitSubject, hasAttributionTrailer, neutraliseRefs, cleanNotes, summariseTests, renderNotes, fixRecord, fixProblem, saveFix, exitCode,
   failingTests, FAILING_NAMES_MAX, runSecrets, leaksSecret, maskSecrets, berryInstall, runAccount, asRunAccount, proxyEnv,
   runAccountUidProblem, TOOLS, FINISH_REQUIRED, askForFinish, checkFinish, runLoop, buildBrief, childEnv, onlyOrigins, runFix,
-  LIMITS, OUTCOMES, AUTHOR, FIX_VERSION, DEFAULT_MODEL, SUBJECT_BANNED,
+  LIMITS, OUTCOMES, AUTHOR, FIX_VERSION, DEFAULT_MODEL, SUBJECT_BANNED, EFFORT_LEVELS, fixEffort, priorRounds,
 } from './fix.mjs';
 import { bumpCaller, fixCallerYaml, REVIEW_WORKFLOW, FIX_WORKFLOW, PUBLIC_TEXT_WORKFLOW, POST_WORKFLOW, CALLERS } from './pin.mjs';
 
@@ -448,7 +448,7 @@ const PR_FILES = [{ filename: 'src/b.js', status: 'modified', additions: 1, dele
 // The compare of the base with the reviewed head: by default the PR's files list, each with the
 // blob the reviewed tree holds at that path (none when it holds none), as GitHub would report it.
 const blobAt = (repo, p) => { const r = spawnSync('git', ['rev-parse', '-q', '--verify', `${repo.head}:${p}`], { cwd: repo.dir, encoding: 'utf8' }); return r.status === 0 ? r.stdout.trim() : undefined; };
-function world(repo, { turns, prHead, reviewState = 'CHANGES_REQUESTED', reviewCommit, body = BODY, comments = [{ path: 'src/b.js', line: 1, body: 'Read it from the config instead.' }], dryRun = false, model = 'm', reviewUrl = REVIEW_URL, files = PR_FILES, compared = null, author = 'askalf' } = {}) {
+function world(repo, { turns, prHead, reviewState = 'CHANGES_REQUESTED', reviewCommit, body = BODY, comments = [{ path: 'src/b.js', line: 1, body: 'Read it from the config instead.' }], dryRun = false, model = 'm', reviewUrl = REVIEW_URL, files = PR_FILES, compared = null, author = 'askalf', effort = '', priorReviews = [] } = {}) {
   const calls = { model: [], gh: [] };
   const head = prHead ?? repo.head;
   const compare = compared ?? files.map((f) => ({ ...f, sha: blobAt(repo, f.filename) }));
@@ -467,6 +467,7 @@ function world(repo, { turns, prHead, reviewState = 'CHANGES_REQUESTED', reviewC
     if (/\/pulls\/7$/.test(p)) return json({ number: 7, state: 'open', title: 'feat: add token', body: 'Adds it.', user: { login: author }, head: { sha: head, ref: 'feat/x', repo: { full_name: 'askalf/r' } }, base: { sha: 'base0', ref: 'main', repo: { full_name: 'askalf/r' } } });
     if (/\/reviews\/99$/.test(p)) return json({ id: 99, state: reviewState, commit_id: reviewCommit ?? repo.head, body, html_url: REVIEW_URL, user: { login: 'sprayberry-redline' } });
     if (/\/reviews\/99\/comments$/.test(p)) return json(u.searchParams.get('page') === '1' ? comments : []);
+    if (/\/pulls\/7\/reviews$/.test(p)) return json(u.searchParams.get('page') === '1' ? [...priorReviews, { id: 99, state: reviewState, user: { login: 'sprayberry-redline' } }] : []);
     if (p.endsWith('/files')) return json(u.searchParams.get('page') === '1' ? files : []);
     // Served for any head: a checkout that is not at the reviewed head is refused after this read.
     if (/\/compare\/base0\.\.\.[0-9a-f]{40}$/.test(p)) return json({ files: compare });
@@ -474,13 +475,28 @@ function world(repo, { turns, prHead, reviewState = 'CHANGES_REQUESTED', reviewC
   };
   const out = join(repo.dir, '..', `redline-fix-out-${Math.random().toString(36).slice(2)}`);
   let t = 0;
-  const ctx = { repo: 'askalf/r', pr: 7, headSha: repo.head, reviewUrl, checkout: repo.dir, out, readToken: 'read', darioUrl: 'http://dario/', darioKey: 'k', model, system: 'sys',
+  const ctx = { repo: 'askalf/r', pr: 7, headSha: repo.head, reviewUrl, checkout: repo.dir, out, readToken: 'read', darioUrl: 'http://dario/', darioKey: 'k', model, effort, system: 'sys',
     fetch, sleep: async () => {}, now: () => (t += 1000), log: () => {}, dryRun };
   return { ctx, calls, out };
 }
 const tool = (name, input) => ({ content: [{ type: 'tool_use', id: `${name}-${Math.random()}`, name, input }] });
 const finish = (input) => tool('finish_fix', { outcome: 'fixed', subject: 'read the token from the config', summary: 'Reads the token from the config in `src/b.js` instead of the environment.', tests_run: 'node test.mjs, exit 0', ...input });
 const FIXED_B = 'import { read } from "./config.js";\nexport const token = read();\nconst y = 2;\n';
+
+console.log('\n  FIX_EFFORT: the level per round');
+{
+  check('the levels are the wire values, lowest first', EFFORT_LEVELS.join() === 'low,medium,high,xhigh,max');
+  check('unset, empty or not a level: no effort', fixEffort('', 0) === undefined && fixEffort(undefined, 0) === undefined && fixEffort('turbo', 0) === undefined && fixEffort('client', 1) === undefined);
+  check('the first round runs at the setting, any case', fixEffort('medium', 0) === 'medium' && fixEffort(' LOW ', 0) === 'low');
+  check('a later round runs at high when the setting is lower', fixEffort('low', 1) === 'high' && fixEffort('medium', 3) === 'high');
+  check('a later round keeps a setting at or above high', fixEffort('high', 2) === 'high' && fixEffort('xhigh', 1) === 'xhigh' && fixEffort('max', 1) === 'max');
+  const me = { id: 99, user: { login: 'sprayberry-redline' } };
+  const r = (id, state = 'CHANGES_REQUESTED', login = 'sprayberry-redline') => ({ id, state, user: { login } });
+  check('no earlier review: round one', priorRounds([me], me) === 0 && priorRounds([], me) === 0 && priorRounds(null, me) === 0);
+  check('earlier change requests by the same reviewer count', priorRounds([r(10), r(50), me], me) === 2);
+  check('approvals, comments, other reviewers and later reviews do not', priorRounds([r(10, 'APPROVED'), r(11, 'COMMENTED'), r(12, 'CHANGES_REQUESTED', 'someone'), r(120), me], me) === 0);
+  check('a review with no author or id counts nothing', priorRounds([r(10)], { id: 99 }) === 0 && priorRounds([r(10)], { user: { login: 'sprayberry-redline' } }) === 0);
+}
 
 if (!gitOk) {
   console.log('\n  skip the end-to-end tests: no git here');
@@ -515,6 +531,29 @@ if (!gitOk) {
     rmSync(clone, { recursive: true, force: true });
     rmSync(w.out, { recursive: true, force: true });
     rmSync(repo.dir, { recursive: true, force: true });
+  }
+
+  console.log('\n  runFix: FIX_EFFORT on the wire');
+  {
+    const turns = [tool('fix_read', { path: 'src/b.js' }), tool('fix_write', { path: 'src/b.js', content: FIXED_B }), tool('fix_run', { command: 'node test.mjs' }), finish()];
+    const levels = (w) => w.calls.model.map((b) => b.output_config?.effort ?? 'none').join();
+    const listed = (w) => w.calls.gh.some((p) => /\/pulls\/7\/reviews$/.test(p));
+    let w = world(makeRepo(), { turns });
+    let { record: r } = await runFix(w.ctx);
+    check('unset: no request names an effort and the review list is not read', r.outcome === 'fixed' && levels(w) === 'none,none,none,none' && !listed(w));
+    w = world(makeRepo(), { turns, effort: 'medium' });
+    ({ record: r } = await runFix(w.ctx));
+    check('first round: every request names the setting', r.outcome === 'fixed' && levels(w) === 'medium,medium,medium,medium' && listed(w));
+    w = world(makeRepo(), { turns, effort: 'medium', priorReviews: [{ id: 50, state: 'CHANGES_REQUESTED', user: { login: 'sprayberry-redline' } }] });
+    ({ record: r } = await runFix(w.ctx));
+    check('second round after a change request: every request names high', r.outcome === 'fixed' && levels(w) === 'high,high,high,high');
+    w = world(makeRepo(), { turns, effort: 'medium', priorReviews: [{ id: 50, state: 'APPROVED', user: { login: 'sprayberry-redline' } }, { id: 51, state: 'CHANGES_REQUESTED', user: { login: 'someone' } }] });
+    ({ record: r } = await runFix(w.ctx));
+    check('an approval or another reviewer is not a round: still the setting', r.outcome === 'fixed' && levels(w) === 'medium,medium,medium,medium');
+    w = world(makeRepo(), { turns, effort: 'max', priorReviews: [{ id: 50, state: 'CHANGES_REQUESTED', user: { login: 'sprayberry-redline' } }] });
+    ({ record: r } = await runFix(w.ctx));
+    check('a setting above high stays on a later round', r.outcome === 'fixed' && levels(w) === 'max,max,max,max');
+    check('the record keeps its shape: no effort field in fix.json', fixProblem(r) === null && !('effort' in r));
   }
 
   console.log('\n  runFix: a workflow file the PR changes');

@@ -98,6 +98,11 @@ definition, whatever it says.
 Next to the prompts the hosts hold the credential files the scripts read (`/etc/askalf/redline.env`,
 `/etc/askalf/fix-exec.env`): no secret is stored in GitHub.
 
+`fix-exec.env` may also set `FIX_EFFORT` (`low`, `medium`, `high`, `xhigh` or `max`). The first fix
+round on a pull request then sends that level as `output_config.effort`; a later round, which runs only
+because the reviewer requested changes again, sends `high` or the setting when that is higher. So the
+cheaper level is tried once and the next review is its check. Unset, no request names an effort.
+
 ## The pin bump
 
 `redline-pin-bump.yml` runs hourly and on dispatch, and picks the newest `main` commit that changed

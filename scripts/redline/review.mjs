@@ -728,8 +728,10 @@ export function darioAccess(secrets) {
  * dario derives the Codex prompt_cache_key from metadata.user_id; without it, every review with
  * the same system prompt and tools shares one key, so concurrent reviews overflow the cache
  * routing and each turn lands where the earlier turns are not cached.
+ *
+ * `effort`, when set, goes out as `output_config.effort`; reviews send none.
  */
-export async function callModelWith(ctx, { system, messages, tools, toolChoice, maxTokens = LIMITS.maxTokens, timeoutMs = LIMITS.modelTimeoutMs, deadline = Infinity, conversation = '' }) {
+export async function callModelWith(ctx, { system, messages, tools, toolChoice, maxTokens = LIMITS.maxTokens, timeoutMs = LIMITS.modelTimeoutMs, deadline = Infinity, conversation = '', effort = '' }) {
   const res = await withRetry(ctx, 'model', (leftMs) => ctx.fetch(`${ctx.darioUrl.replace(/\/+$/, '')}/v1/messages`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', ...(ctx.darioKey ? { 'x-api-key': ctx.darioKey } : {}), 'anthropic-version': '2023-06-01' },
@@ -737,6 +739,8 @@ export async function callModelWith(ctx, { system, messages, tools, toolChoice, 
       model: ctx.model, max_tokens: maxTokens, system, messages, tools,
       ...(toolChoice ? { tool_choice: toolChoice } : {}),
       ...(conversation ? { metadata: { user_id: conversation } } : {}),
+      // Only when the caller names one: an absent field leaves the level to dario and the key.
+      ...(effort ? { output_config: { effort } } : {}),
     }),
     signal: AbortSignal.timeout(Math.max(1, Math.floor(Math.min(timeoutMs, leftMs)))),
   }), deadline);

@@ -81,7 +81,8 @@
 //   FIX_OUT=<dir> [DRY_RUN=1] node fix.mjs
 // The env file holds DARIO_SOCKET (dario's key socket for the fix lane's named key) or
 // DARIO_API_KEY (that key itself), and optionally DARIO_URL
-// (default http://127.0.0.1:3456) and FIX_MODEL (default claude-opus-5-5). FIX_PROMPT_FILE names the
+// (default http://127.0.0.1:3456), FIX_MODEL (default claude-opus-5-5) and FIX_EFFORT (unset by
+// default; see fixEffort for the rounds it applies to). FIX_PROMPT_FILE names the
 // system prompt, installed on the runner host: this repository is public and carries no prompt, so
 // there is no bundled fallback, and a variable that is unset, a file that cannot be read or an empty
 // file ends the run.
@@ -97,6 +98,34 @@ export { PROTECTED_ATTR, protectedFromCheckAttr };
 
 export const AUTHOR = { name: 'askalf', email: '263217947+askalf@users.noreply.github.com' };
 export const DEFAULT_MODEL = 'claude-opus-5-5';
+
+/** The levels FIX_EFFORT may name, lowest first: the wire values of `output_config.effort`. */
+export const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'];
+
+/**
+ * The effort one fix round runs at. FIX_EFFORT names the level for the first round on a pull
+ * request. A later round exists only because the reviewer requested changes again after an
+ * earlier fix, so it runs at `high`, or at FIX_EFFORT when that is higher: the cheaper level is
+ * tried once and the review that follows is its check. Unset or not a level: undefined, and the
+ * request carries no effort field, exactly as before.
+ */
+export function fixEffort(setting, rounds) {
+  const s = String(setting ?? '').trim().toLowerCase();
+  if (!EFFORT_LEVELS.includes(s)) return undefined;
+  if (!(rounds > 0)) return s;
+  return EFFORT_LEVELS.indexOf(s) >= EFFORT_LEVELS.indexOf('high') ? s : 'high';
+}
+
+/**
+ * The rounds before this one: earlier change requests on the pull request from the reviewer who
+ * wrote the review being answered. Review ids grow with time, so earlier means a smaller id.
+ */
+export function priorRounds(reviews, current) {
+  const who = current?.user?.login;
+  if (!who || !Number.isInteger(current?.id)) return 0;
+  return (Array.isArray(reviews) ? reviews : []).filter((r) => r && r.state === 'CHANGES_REQUESTED'
+    && r.user?.login === who && Number.isInteger(r.id) && r.id < current.id).length;
+}
 // Dependabot by its exact login in each API's spelling (REST, GraphQL, gh), never a substring.
 export const DEPENDABOT_AUTHOR = /^(app\/)?dependabot(\[bot\])?$/i;
 export const FIX_VERSION = 1;
@@ -976,6 +1005,13 @@ async function answerReview(ctx) {
   const review = parseReviewBody(reviewRow.body);
   const items = inlineItems(comments);
   if (!review.findings.length && !items.length) return refuse('the review has no finding to answer');
+  // Read only when FIX_EFFORT is set: without it no request names an effort and nothing is fetched.
+  let effort;
+  if (ctx.effort) {
+    const rounds = priorRounds(await ghAll(ctx, `/repos/${repo}/pulls/${n}/reviews`, 3), reviewRow);
+    effort = fixEffort(ctx.effort, rounds);
+    ctx.log?.(`  effort ${effort ?? 'unset'}: round ${rounds + 1} on this pull request`);
+  }
 
   let runAs;
   try { runAs = runAccount(ctx.runAs); } catch (e) { return refuse(e.message); }
@@ -1206,7 +1242,7 @@ async function answerReview(ctx) {
     let calls = 0;
     try {
       loop = await runLoop({
-        call: (messages, toolChoice) => (calls++, callModelWith(ctx, { system: ctx.system, messages, tools: TOOLS, toolChoice, maxTokens: LIMITS.maxTokens, timeoutMs: LIMITS.modelTimeoutMs, deadline })),
+        call: (messages, toolChoice) => (calls++, callModelWith(ctx, { system: ctx.system, messages, tools: TOOLS, toolChoice, maxTokens: LIMITS.maxTokens, timeoutMs: LIMITS.modelTimeoutMs, deadline, effort })),
         tool: async (name, input) => tool(name, input), finalize, now: ctx.now, started, log: ctx.log, canForce: !rejectsForcedToolChoice(ctx.model),
       }, brief);
     } catch (e) {
@@ -1306,9 +1342,14 @@ async function main() {
   if (dario.error) { console.error(`::error::${dario.error}`); process.exit(2); }
   if (dario.warning) console.log(`::warning::${dario.warning}`);
   const { darioUrl, darioKey, darioSocket } = dario;
+  const effortSetting = String(secrets.FIX_EFFORT ?? '').trim().toLowerCase();
+  if (effortSetting && !EFFORT_LEVELS.includes(effortSetting)) {
+    console.log(`::warning::FIX_EFFORT is not one of ${EFFORT_LEVELS.join(', ')}; the fix runs with no effort field`);
+  }
   const ctx = {
     repo: need('REPO'), pr: Number(need('PR')), headSha: need('HEAD_SHA'), reviewUrl: need('REVIEW_URL'), checkout: need('CHECKOUT'), out,
     readToken: need('GH_READ_TOKEN'), darioUrl, darioKey, model: secrets.FIX_MODEL || DEFAULT_MODEL,
+    effort: EFFORT_LEVELS.includes(effortSetting) ? effortSetting : '',
     system,
     fetch: onlyOrigins(withDarioSocket(globalThis.fetch, darioUrl, darioSocket), ['https://api.github.com', darioUrl]),
     sleep: (ms) => new Promise((r) => setTimeout(r, ms)), now: () => Date.now(),
