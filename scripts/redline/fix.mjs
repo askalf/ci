@@ -1034,8 +1034,8 @@ async function answerReview(ctx) {
     const { rounds, capped } = await reviewRounds(ctx, repo, n, reviewRow);
     effort = fixEffort(ctx.effort, capped ? Infinity : rounds);
     ctx.log?.(capped
-      ? `  effort ${effort}: more than ${REVIEW_PAGES_MAX * 100} reviews before this one, so it is taken as a later round`
-      : `  effort ${effort ?? 'unset'}: round ${rounds + 1} on this pull request`);
+      ? `  effort ${effort}: more than ${REVIEW_PAGES_MAX * 100} reviews before this one, so it is taken as a later change request`
+      : `  effort ${effort ?? 'unset'}: change request ${rounds + 1} from this reviewer on this pull request`);
   }
 
   let runAs;
