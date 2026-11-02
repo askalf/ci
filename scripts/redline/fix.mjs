@@ -103,11 +103,12 @@ export const DEFAULT_MODEL = 'claude-opus-5-5';
 export const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'];
 
 /**
- * The effort one fix round runs at. FIX_EFFORT names the level for the first round on a pull
- * request. A later round exists only because the reviewer requested changes again after an
- * earlier fix, so it runs at `high`, or at FIX_EFFORT when that is higher: the cheaper level is
- * tried once and the review that follows is its check. Unset or not a level: undefined, and the
- * request carries no effort field, exactly as before.
+ * The effort one fix round runs at. A round is counted from the reviewer's change requests on the
+ * pull request (priorRounds), not from fix runs: one with no earlier change request runs at
+ * FIX_EFFORT, and one after an earlier change request runs at `high`, or at FIX_EFFORT when that
+ * is higher. An earlier change request does not prove that a fix ran for it, or at what level; the
+ * author may have answered it by hand, and then the first fix run is already at `high`. Unset or
+ * not a level: undefined, and the request carries no effort field, exactly as before.
  */
 export function fixEffort(setting, rounds) {
   const s = String(setting ?? '').trim().toLowerCase();
