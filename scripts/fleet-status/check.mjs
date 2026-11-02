@@ -528,9 +528,12 @@ export function triggerLines(y) {
   return out;
 }
 
+/** `s` as a pattern that matches it literally: every character a RegExp reads as syntax is escaped. */
+const reEscape = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
 /** The keys of a job at two-space job indentation, in order, from its line to the next job or the end. */
 export function jobKeysOf(y, id) {
-  const m = new RegExp(`^ {2}${id.replace(/[.]/g, '\\.')}:\\n((?:(?! {2}\\S).*\\n?)*)`, 'm').exec(y);
+  const m = new RegExp(`^ {2}${reEscape(id)}:\\n((?:(?! {2}\\S).*\\n?)*)`, 'm').exec(y);
   return m ? [...m[1].matchAll(/^ {4}([\w-]+):/gm)].map((k) => k[1]) : [];
 }
 
@@ -541,7 +544,7 @@ export function jobKeysOf(y, id) {
 export function onlyStep(y, action, inputs) {
   const at = y.lastIndexOf('\n    steps:\n');
   if (at < 0) return false;
-  const m = new RegExp(`^ {6}- uses: ${action.replace(/[.]/g, '\\.')}@[0-9a-f]{40}(?: #[^\\n]*)?\\n {8}with:\\n((?: {10}[\\w-]+: [^\\n]*\\n)+)\\s*$`)
+  const m = new RegExp(`^ {6}- uses: ${reEscape(action)}@[0-9a-f]{40}(?: #[^\\n]*)?\\n {8}with:\\n((?: {10}[\\w-]+: [^\\n]*\\n)+)\\s*$`)
     .exec(y.slice(at + '\n    steps:\n'.length));
   if (!m) return false;
   const keys = [...m[1].matchAll(/^ {10}([\w-]+):/gm)].map((k) => k[1]);
@@ -582,7 +585,7 @@ export const usesOf = (y) => [...y.matchAll(/^\s+(?:- )?uses:\s*(\S+)/gim)].map(
 
 /** The block under the step that uses `action`, through its last more-indented line. */
 function stepWith(y, action) {
-  const at = new RegExp(`^(\\s+)(?:- )?uses: ${action.replace(/[.]/g, '\\.')}@[0-9a-f]{40}\\b.*\\n((?:\\1  .*\\n|\\s*\\n)*)`, 'm').exec(y);
+  const at = new RegExp(`^(\\s+)(?:- )?uses: ${reEscape(action)}@[0-9a-f]{40}\\b.*\\n((?:\\1  .*\\n|\\s*\\n)*)`, 'm').exec(y);
   return at ? at[2] : null;
 }
 
@@ -638,7 +641,7 @@ export function checkCaller(dir, opts = {}) {
   const cancel = uncomment(/\n  cancel-in-progress: (.+)\n/.exec(own)?.[1] ?? '').trim();
   const cancelExpr = /^\$\{\{ (.+) \}\}$/.exec(cancel)?.[1] ?? null;
   check('workflow_run runs share a group per PR branch and triggering event; every other run has its own', group === GROUP);
-  let cancels = true;
+  let cancels;
   try {
     cancels = cancel === '' || cancel === 'false' ? false
       : cancelExpr === null ? true
@@ -740,7 +743,7 @@ export function checkCaller(dir, opts = {}) {
     // and the pinned check, with no key but the inputs the check takes.
     check('the self-test job has only runs-on, timeout-minutes, permissions and steps', jobKeysOf(self.y, 'self-test').join() === 'runs-on,timeout-minutes,permissions,steps');
     const selfSteps = self.y.slice(self.y.lastIndexOf('\n    steps:\n') + '\n    steps:\n'.length);
-    const pin = (a) => `${a.replace(/[.]/g, '\\.')}@[0-9a-f]{40}(?: #[^\\n]*)?\\n`;
+    const pin = (a) => `${reEscape(a)}@[0-9a-f]{40}(?: #[^\\n]*)?\\n`;
     check('the self-test\'s steps are the checkout and the pinned check alone, with no if: or other key',
       self.y.includes('\n    steps:\n') && new RegExp(`^ {6}- uses: ${pin('askalf/ci/actions/checkout-with-retry')} {8}with:\\n {10}persist-credentials: false\\n\\n? {6}- uses: ${pin(CHECK_ACTION)}(?: {8}with:\\n(?: {10}(?:min-own-exprs: '?[0-9]+'?|repo-only: [^\\n]+)\\n){1,2})?\\s*$`).test(selfSteps));
   }

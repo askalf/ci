@@ -19,7 +19,7 @@
 // at a pinned commit of this repository, and for a fork PR it must never check out or execute the
 // PR's code.
 //
-// CLI (the action's step):
+// CLI (main(); the action runs it through actions/fleet-status/main.mjs):
 //   GITHUB_TOKEN=... REPO=owner/name PR=<number> node fleet-status.mjs [--dry-run]
 //   GITHUB_TOKEN=... REPO=owner/name HEAD_REPO=fork/name HEAD_BRANCH=<ref> node fleet-status.mjs
 //   GITHUB_TOKEN=... REPO=owner/name ALL_OPEN=true node fleet-status.mjs
@@ -229,24 +229,47 @@ function ghAll(path, token) {
   return collectPages(async (n) => (await gh(`${path}${path.includes('?') ? '&' : '?'}per_page=100&page=${n}`, token)).json());
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  const { GITHUB_TOKEN: token, REPO: repo, PR: prArg, HEAD_REPO: headRepo, HEAD_BRANCH: headBranch, TARGET_URL: targetUrl } = process.env;
-  const dryRun = process.argv.includes('--dry-run') || process.env.DRY_RUN === 'true';
-  const allOpen = process.env.ALL_OPEN === 'true';
+/**
+ * The CLI, and the action's step through actions/fleet-status/main.mjs. `env` holds GITHUB_TOKEN,
+ * REPO and one of PR, HEAD_REPO with HEAD_BRANCH, or ALL_OPEN=true; DRY_RUN=true and TARGET_URL are
+ * optional. Resolves to the exit code; a GitHub error rejects.
+ * @param {Record<string, string|undefined>} env
+ * @param {string[]} args
+ */
+export async function main(env = process.env, args = process.argv.slice(2)) {
+  const { GITHUB_TOKEN: token, REPO: repo, PR: prArg, HEAD_REPO: headRepo, HEAD_BRANCH: headBranch, TARGET_URL: targetUrl } = env;
+  const dryRun = args.includes('--dry-run') || env.DRY_RUN === 'true';
+  const allOpen = env.ALL_OPEN === 'true';
   const fromFork = Boolean(headRepo && headBranch && headRepo !== repo);
   if (!token || !repo || (!allOpen && !fromFork && !/^\d+$/.test(prArg ?? ''))) {
     console.error('usage: GITHUB_TOKEN=... REPO=owner/name (PR=<number> | HEAD_REPO=fork/name HEAD_BRANCH=<ref> | ALL_OPEN=true) node fleet-status.mjs [--dry-run]');
-    process.exit(2);
+    return 2;
   }
 
-  /** Everything the lanes depend on, read fresh. Null when the PR is closed. */
+  /**
+   * Everything the lanes depend on, read fresh, and the head's statuses as listed (newest first).
+   * Null when the PR is closed. The reads go in two parallel rounds, one per thing they need: the
+   * PR number, then the PR's base branch and head. A status job's time is mostly these round trips.
+   */
   async function readFacts(pr) {
-    const p = await (await gh(`/repos/${repo}/pulls/${pr}`, token)).json();
-    if (p.state !== 'open') { console.log(`#${pr} is ${p.state}; nothing to report`); return null; }
-    const [files, reviews, comments] = await Promise.all([
+    const [p, files, reviews, comments] = await Promise.all([
+      gh(`/repos/${repo}/pulls/${pr}`, token).then((r) => r.json()),
       ghAll(`/repos/${repo}/pulls/${pr}/files`, token),
       ghAll(`/repos/${repo}/pulls/${pr}/reviews`, token),
       ghAll(`/repos/${repo}/issues/${pr}/comments`, token),
+    ]);
+    if (p.state !== 'open') { console.log(`#${pr} is ${p.state}; nothing to report`); return null; }
+    // Settled, not all: a failed read is judged where it is used, and never cuts the others short.
+    // The check runs are read before it is known whether any check is required; a fleet branch
+    // requires its own lanes, so they are nearly always needed, and waiting for the rules first
+    // would add a round trip.
+    const base = encodeURIComponent(p.base.ref);
+    const [rulesRead, branchRead, statusesRead, runsRead] = await Promise.allSettled([
+      gh(`/repos/${repo}/rules/branches/${base}?per_page=100`, token).then((r) => r.json()),
+      gh(`/repos/${repo}/branches/${base}`, token).then((r) => r.json()),
+      ghAll(`/repos/${repo}/commits/${p.head.sha}/statuses`, token),
+      collectPages(async (n) =>
+        (await (await gh(`/repos/${repo}/commits/${p.head.sha}/check-runs?per_page=100&page=${n}`, token)).json()).check_runs ?? []),
     ]);
     // Unreadable rules or checks count as pending, as the dispatcher waits on them; neither can
     // turn fleet/verify green. A branch requires checks two ways, and both count: rulesets, and
@@ -257,9 +280,9 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     // is read only when there are no checks.
     let required = null;
     try {
-      const base = encodeURIComponent(p.base.ref);
-      const rules = await (await gh(`/repos/${repo}/rules/branches/${base}?per_page=100`, token)).json();
-      const branch = await (await gh(`/repos/${repo}/branches/${base}`, token)).json();
+      if (rulesRead.status === 'rejected' || branchRead.status === 'rejected') throw new Error('unreadable');
+      const rules = rulesRead.value;
+      const branch = branchRead.value;
       if (!Array.isArray(rules) || typeof branch?.protected !== 'boolean' || (branch.protected && !branch.protection)) throw new Error('unreadable');
       const appOf = (id) => (typeof id === 'number' && id !== -1 ? id : null);
       const rsc = branch.protection?.enabled && branch.protection.required_status_checks?.enforcement_level !== 'off'
@@ -274,18 +297,17 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     } catch { required = null; }
     let requiredCi = required === null ? 'pending' : 'none';
     if (required?.length) {
-      try {
-        const statuses = (await ghAll(`/repos/${repo}/commits/${p.head.sha}/statuses`, token)).reverse()
-          .map((s) => ({ name: s.context, state: s.state }));
-        const runs = await collectPages(async (n) =>
-          (await (await gh(`/repos/${repo}/commits/${p.head.sha}/check-runs?per_page=100&page=${n}`, token)).json()).check_runs ?? []);
-        const checks = runs.sort((a, b) => a.id - b.id)
+      if (statusesRead.status === 'rejected' || runsRead.status === 'rejected') requiredCi = 'pending';
+      else {
+        const statuses = [...statusesRead.value].reverse().map((s) => ({ name: s.context, state: s.state }));
+        const checks = [...runsRead.value].sort((a, b) => a.id - b.id)
           .map((c) => ({ name: c.name, state: c.status === 'completed' ? (c.conclusion ?? '') : c.status, app: c.app?.id ?? null }));
         requiredCi = requiredCiState(required, checks, statuses);
-      } catch { requiredCi = 'pending'; }
+      }
     }
     return {
       url: p.html_url,
+      statuses: statusesRead,
       facts: {
         head: p.head.sha,
         headRef: p.head.ref,
@@ -313,7 +335,8 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   // Post, then read everything again and correct what differs. Another run can read older data
   // and post after this one; the run that acts last re-reads after its own writes, so what stays
   // on the head matches data at least as new as anything posted. Three passes bound a busy PR;
-  // the next event covers anything after that.
+  // the next event covers anything after that. What the head shows is the statuses list read with
+  // the facts; a write between that read and this run's post is what the next pass corrects.
   for (const pr of prs) {
     if (prs.length > 1) console.log(`#${pr}`);
     for (let pass = 1; pass <= 3; pass++) {
@@ -322,17 +345,21 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       const want = laneStatuses(read.facts);
       if (pass === 1) for (const s of want) console.log(`${s.context.padEnd(18)} ${s.state.padEnd(8)} ${s.description}`);
       if (dryRun) break;
-      const have = latestByContext(await ghAll(`/repos/${repo}/commits/${read.facts.head}/statuses`, token));
-      const todo = statusesToPost(want, have);
+      if (read.statuses.status === 'rejected') throw read.statuses.reason;
+      const todo = statusesToPost(want, latestByContext(read.statuses.value));
       if (!todo.length) break;
       if (pass > 1) console.log(`pass ${pass}: correcting ${todo.map((s) => s.context).join(', ')}`);
-      for (const s of todo) {
-        await gh(`/repos/${repo}/statuses/${read.facts.head}`, token, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ ...s, target_url: targetUrl || read.url }),
-        });
-      }
+      // One context each, so the order of the posts does not matter.
+      await Promise.all(todo.map((s) => gh(`/repos/${repo}/statuses/${read.facts.head}`, token, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ ...s, target_url: targetUrl || read.url }),
+      })));
     }
   }
+  return 0;
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  process.exitCode = await main();
 }
