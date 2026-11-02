@@ -560,5 +560,23 @@ if (spawnSync('bash', ['-c', 'true']).status !== 0 || process.platform === 'win3
   rmSync(d, { recursive: true, force: true });
 }
 
+// The job's limit against the CALLERS list. A dispatch without wait-for-quiet bumps every caller
+// in one run, so the limit must cover them all at the measured rate. It was set when the list was
+// short and was not raised as the list grew, until a forced run was cancelled partway through.
+{
+  const PER_CALLER_S = 70; // measured 2026-11-02: nine callers in 9.5 minutes
+  const HEADROOM = 1.25;
+  const block = bump.match(/^ {6}CALLERS: >-\n((?: {8}\S.*\n)+)/m);
+  const callers = block ? block[1].trim().split(/\s+/) : [];
+  const jobAt = lines.findIndex((l) => l === '  bump:');
+  const limitLine = jobAt < 0 ? null : lines.slice(jobAt + 1).find((l) => /^ {4}timeout-minutes: \d+\s*$/.test(l));
+  const limitS = limitLine ? Number(limitLine.trim().split(/\s+/)[1]) * 60 : 0;
+  check('the CALLERS list and the bump job limit are read from the workflow',
+    callers.length > 0 && callers.every((c) => /^askalf\/[\w.-]+$/.test(c)) && limitS > 0, `callers=${callers.length} limit=${limitS}s`);
+  const needS = Math.ceil(callers.length * PER_CALLER_S * HEADROOM);
+  check(`a forced run fits the limit: ${callers.length} callers at ${PER_CALLER_S} s each with ${HEADROOM}x room need ${needS} s of ${limitS} s`,
+    needS <= limitS, `raise timeout-minutes on the bump job to at least ${Math.ceil(needS / 60)}`);
+}
+
 console.log(`\n  ${pass} pass, ${fail} fail`);
 if (fail > 0) process.exit(1);
