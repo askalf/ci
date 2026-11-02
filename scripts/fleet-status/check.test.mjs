@@ -271,6 +271,11 @@ for (const [name, edits, expect] of cases) {
   const names = caught(edits);
   check(`${name}: caught`, names.some((n) => expect.test(n)), names.join('\n') || '(nothing failed)');
 }
+check('a self-test with no paths filter, which runs on every PR, passes',
+  failing(checkCaller(variant({ 'fleet-status-self-test.yml': (y) => y.replace('    paths:\n      - .github/workflows/**\n', '') }))).length === 0);
+check('a self-test that runs on every PR but only when it opens is caught',
+  caught({ 'fleet-status-self-test.yml': (y) => y.replace('    types: [opened, synchronize, reopened, ready_for_review]\n    paths:\n      - .github/workflows/**\n', '    types: [opened]\n') })
+    .some((n) => /self-test runs on every PR that changes a workflow/.test(n)));
 check('too few own-code expressions for the floor', caught({}, { minOwn: 4 }).some((n) => /at least 4/.test(n)));
 check('a repository-only expression on a listed file is allowed',
   failing(checkCaller(variant({ 'pulse.yml': () => "name: pulse\non:\n  schedule:\n    - cron: '0 * * * *'\njobs:\n  p:\n    runs-on: ${{ github.repository == 'askalf/example' && fromJSON('[\"self-hosted\",\"example-exec\"]') || 'ubuntu-latest' }}\n    steps:\n      - run: echo\n" }), { repoOnly: ['fleet-status.yml', 'fleet-status-backfill.yml', 'pulse.yml'] })).length === 0);
