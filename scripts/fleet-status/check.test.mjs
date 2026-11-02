@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { checkCaller, condOf, evalExpr, evalIf, homeOf, jobsOf, misfits, Other, uncomment, UNKNOWN, workflowRunList, yamlGaps } from './check.mjs';
+import { checkCaller, condOf, evalExpr, evalIf, homeOf, jobsOf, misfits, onlyStep, Other, uncomment, UNKNOWN, workflowRunList, yamlGaps } from './check.mjs';
 
 let pass = 0;
 let fail = 0;
@@ -101,6 +101,22 @@ check('a list must name every pull_request workflow', misfits(['review'], [['rev
 check('a list must name a pull_request_target workflow too', misfits(['review'], [['review', onPr('review')], ['triage', onTarget('triage')]]).join() === 'triage');
 check('a push workflow, or a commented-out trigger, need not be listed', misfits([], [['deploy', onPush('deploy')]]).length === 0);
 check('a list is read from the yaml', String(workflowRunList("on:\n  workflow_run:\n    workflows: [\"ci\", 'review']\n    types: [completed]\n")) === 'ci,review');
+
+console.log('\n  an action path is matched literally');
+{
+  /** A last job whose one step uses `path` at a full sha, with one input. */
+  const stepOf = (path) => `jobs:\n  s:\n    steps:\n      - uses: ${path}@${'0'.repeat(40)}\n        with:\n          x: '1'\n`;
+  const literal = (path) => { try { return onlyStep(stepOf(path), path, ['x']); } catch { return 'threw'; } };
+  const nearMiss = (seen, path) => { try { return onlyStep(stepOf(seen), path, ['x']); } catch { return 'threw'; } };
+  check('a path holding a quantifier matches itself and not what the quantifier would read',
+    literal('owner/repo/actions/a+b') === true && nearMiss('owner/repo/actions/aaab', 'owner/repo/actions/a+b') === false);
+  check('a path holding brackets matches itself and not the class they would form',
+    literal('owner/repo/actions/[x]') === true && nearMiss('owner/repo/actions/x', 'owner/repo/actions/[x]') === false);
+  check('a path holding a backslash matches itself and not the escape it would form',
+    literal('owner/repo/actions/a\\d') === true && nearMiss('owner/repo/actions/a1', 'owner/repo/actions/a\\d') === false);
+  check('a path holding an unbalanced parenthesis matches itself instead of throwing',
+    literal('owner/repo/actions/a(b') === true && nearMiss('owner/repo/actions/ab', 'owner/repo/actions/a(b') === false);
+}
 
 console.log('\n  the fixture passes');
 {
