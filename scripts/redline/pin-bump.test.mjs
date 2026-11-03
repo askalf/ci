@@ -578,5 +578,22 @@ if (spawnSync('bash', ['-c', 'true']).status !== 0 || process.platform === 'win3
     needS <= limitS, `raise timeout-minutes on the bump job to at least ${Math.ceil(needS / 60)}`);
 }
 
+console.log('\n  the token: the pin bump App, the fine-grained token until the App is set up');
+{
+  const steps = bump.split(/\n      - /).slice(1);
+  const named = (n) => steps.find((x) => x.startsWith(`name: ${n}\n`)) ?? '';
+  const mint = named("Mint the pin bump App's token");
+  check('the App step runs only once its client id is set, before the token check',
+    mint.includes("if: vars.REDLINE_PIN_BUMP_CLIENT_ID != ''\n") && steps.indexOf(mint) >= 0 && steps.indexOf(mint) < steps.indexOf(named('Check for the token')));
+  check('it is create-github-app-token pinned by full sha, with the client id and the key from settings',
+    /\n {8}uses: actions\/create-github-app-token@[0-9a-f]{40} # v\d/.test(mint) && mint.includes('client-id: ${{ vars.REDLINE_PIN_BUMP_CLIENT_ID }}\n')
+    && mint.includes('private-key: ${{ secrets.REDLINE_PIN_BUMP_APP_KEY }}\n') && mint.includes('owner: ${{ github.repository_owner }}\n'));
+  const perms = [...mint.matchAll(/\n {10}permission-([a-z-]+): (\w+)/g)].map((m) => `${m[1]}=${m[2]}`);
+  check('its token is narrowed to the three permissions the bump writes with', perms.join(' ') === 'contents=write pull-requests=write workflows=write', perms.join(' '));
+  const uses = [...bump.matchAll(/^ +(?:TOKEN|GH_TOKEN): (\$\{\{.*\}\})$/gm)].map((m) => m[1]);
+  check('the guard and the bump both take the App token, else the fine-grained one, and nothing else writes with it',
+    uses.length === 2 && uses.every((u) => u === '${{ steps.app.outputs.token || secrets.REDLINE_PIN_BUMP_TOKEN }}') && (bump.match(/secrets\.REDLINE_PIN_BUMP_TOKEN/g) ?? []).length === 2, uses.join(' | '));
+}
+
 console.log(`\n  ${pass} pass, ${fail} fail`);
 if (fail > 0) process.exit(1);
