@@ -24,9 +24,28 @@ on:
         type: string
       redline-ref:
         description: >-
-          The full commit sha of askalf/ci this workflow is called at, the same sha as the
+          The full commit sha of ci-repo this workflow is called at, the same sha as the
           caller's uses pin. The fix script is fetched at it. It must be a commit on main.
         required: true
+        type: string
+      ci-repo:
+        description: >-
+          The repository this workflow and its script come from, as owner/name: askalf/ci, or a
+          fork that runs its own copy. The script is fetched from it at redline-ref.
+        required: false
+        default: askalf/ci
+        type: string
+      env-file:
+        description: >-
+          The host file with the fix lane's model endpoint and settings, readable by the exec account only. An absolute path on the runner host.
+        required: false
+        default: /etc/askalf/fix-exec.env
+        type: string
+      prompt-file:
+        description: >-
+          The host file with the fixer's brief. An absolute path on the runner host; it is never committed.
+        required: false
+        default: /etc/askalf/fix-prompt.md
         type: string
       pr:
         description: Pull request number.
@@ -89,16 +108,19 @@ jobs:
             exit 1
           fi
 
-      - name: Check the review ref is on askalf/ci main
+      - name: Check the review ref is on main of ci-repo
         env:
           REDLINE_REF: ${{ inputs.redline-ref }}
+          CI_REPO: ${{ inputs.ci-repo }}
           GH_READ_TOKEN: ${{ github.token }}
         # main is ahead of or identical to the ref exactly when the ref is on main. A failed read
         # is retried, then fails the job: it is never taken as a pass.
         run: |
           node --input-type=module -e '
             const ref = process.env.REDLINE_REF;
-            const url = `https://api.github.com/repos/askalf/ci/compare/${ref}...main`;
+            const repo = process.env.CI_REPO;
+            if (!/^[A-Za-z0-9-]+[/][A-Za-z0-9._-]+$/.test(repo)) { console.log(`::error::ci-repo must be owner/name; got ${JSON.stringify(repo)}`); process.exit(1); }
+            const url = `https://api.github.com/repos/${repo}/compare/${ref}...main`;
             const headers = { authorization: `Bearer ${process.env.GH_READ_TOKEN}`, accept: "application/vnd.github+json" };
             let status = "";
             for (let attempt = 1; attempt <= 3 && !status; attempt++) {
@@ -111,15 +133,15 @@ jobs:
             }
             if (status === "ahead" || status === "identical") { console.log(`redline-ref ${ref} is on main`); process.exit(0); }
             console.log(status
-              ? `::error::redline-ref ${ref} is not a commit on askalf/ci main (${status})`
-              : `::error::could not compare redline-ref ${ref} with askalf/ci main`);
+              ? `::error::redline-ref ${ref} is not a commit on ${repo} main (${status})`
+              : `::error::could not compare redline-ref ${ref} with ${repo} main`);
             process.exit(1);
           '
 
-      - name: Fetch the fix script from askalf/ci
+      - name: Fetch the fix script from ci-repo
         uses: askalf/ci/actions/checkout-with-retry@70c075925d61e135043fd7525f3dc313f281a9e1 # main 2026-11-02, askalf/ci#166
         with:
-          repository: askalf/ci
+          repository: ${{ inputs.ci-repo }}
           ref: ${{ inputs.redline-ref }}
           path: .redline
           sparse-checkout: scripts/redline
@@ -161,10 +183,11 @@ jobs:
           CHECKOUT: ${{ github.workspace }}/pr
           GH_READ_TOKEN: ${{ github.token }}
           # Readable by the exec account only; never by an account that runs untrusted code.
-          FIX_ENV_FILE: /etc/askalf/fix-exec.env
+          REDLINE_CI_REPO: ${{ inputs.ci-repo }}
+          FIX_ENV_FILE: ${{ inputs.env-file }}
           # The fixer's brief, on the host next to the env file with the same owner and mode, never
           # in a public repository. The script reads it from this file and has no bundled fallback.
-          FIX_PROMPT_FILE: /etc/askalf/fix-prompt.md
+          FIX_PROMPT_FILE: ${{ inputs.prompt-file }}
           FIX_OUT: ${{ github.workspace }}/fix-out
           DRY_RUN: ${{ inputs.dry_run && '1' || '0' }}
         run: node .redline/scripts/redline/fix.mjs

@@ -73,7 +73,18 @@ import { request as httpRequest } from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { ACTIONS, CALLERS } from './pin.mjs';
 
-export const REVIEWER_LOGIN = 'sprayberry-redline';
+/**
+ * The account whose posted reviews are Redline's, lowercased: sprayberry-redline, or the login a
+ * fork's callers pass as reviewer-login (REDLINE_REVIEWER_LOGIN). A GitHub login, or an App's
+ * `<name>[bot]`; anything else is refused when the module loads.
+ */
+export function reviewerLogin(value) {
+  if (value === undefined || value === '') return 'sprayberry-redline';
+  if (!/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})(?:\[bot\])?$/.test(value)) throw new Error(`REDLINE_REVIEWER_LOGIN must be a GitHub login; got ${JSON.stringify(value)}`);
+  return value.toLowerCase();
+}
+export const REVIEWER_LOGIN = reviewerLogin(process.env.REDLINE_REVIEWER_LOGIN);
+const isReviewer = (r) => String(r?.user?.login ?? '').toLowerCase() === REVIEWER_LOGIN;
 
 // The review is public text on a public repository. It talks about the change and never about the
 // reviewer's own machinery. Until 2026-09-26 every review opened with a "fleet code reviewer /
@@ -416,7 +427,7 @@ export function renderBody(review, verdict, headSha, notes = []) {
 export function verdictAtHead(reviews, headSha) {
   let v = null;
   for (const r of reviews) {
-    if ((r.user?.login ?? '') !== REVIEWER_LOGIN || r.commit_id !== headSha) continue;
+    if (!isReviewer(r) || r.commit_id !== headSha) continue;
     if (r.state === 'APPROVED' || r.state === 'CHANGES_REQUESTED') v = r;
   }
   return v;
@@ -431,7 +442,7 @@ const EARLIER_HEADING = 'Earlier reviews of this PR that asked for changes (post
  * when there is nothing. The bodies are the reviewer's own posted text, still given as data. Pure.
  */
 export function earlierReviewsSection(reviews, headSha) {
-  const asked = (reviews ?? []).filter((r) => (r.user?.login ?? '') === REVIEWER_LOGIN
+  const asked = (reviews ?? []).filter((r) => isReviewer(r)
     && r.state === 'CHANGES_REQUESTED' && r.commit_id && r.commit_id !== headSha && String(r.body ?? '').trim());
   if (!asked.length) return '';
   const cap = LIMITS.earlierReviewChars;

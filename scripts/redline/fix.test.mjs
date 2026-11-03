@@ -1467,8 +1467,8 @@ console.log('\n  the reusable workflow');
   const at = (name) => steps.findIndex((s) => s.startsWith(`name: ${name}\n`));
   const guardAt = at('Check the review ref is a full commit sha');
   const inputsAt = at('Check the head and the review link');
-  const mainAt = at('Check the review ref is on askalf/ci main');
-  const fetchAt = at('Fetch the fix script from askalf/ci');
+  const mainAt = at('Check the review ref is on main of ci-repo');
+  const fetchAt = at('Fetch the fix script from ci-repo');
   const prAt = at('Check out the PR head to fix');
   const headAt = at('Check the checkout is at the head');
   const nodeAt = steps.findIndex((s) => s.startsWith('uses: actions/setup-node@'));
@@ -1480,8 +1480,10 @@ console.log('\n  the reusable workflow');
     fetchAt === 3 && prAt === 4 && headAt === 5 && nodeAt === 6 && fixAt === 7 && uploadAt === 8 && cleanAt === 9 && steps.length === 10);
   check('the script is fetched at redline-ref, not job_workflow_sha or a branch',
     steps[fetchAt].includes('ref: ${{ inputs.redline-ref }}') && steps[fetchAt].includes('sparse-checkout: scripts/redline') && !/ref: \$\{\{ github\.job_workflow_sha/.test(wf) && !/ref: main\b/.test(wf));
-  check('the script comes from askalf/ci, the on-main check compares against it, and nothing names the old home',
-    steps[fetchAt].includes('repository: askalf/ci\n') && steps[mainAt].includes('repos/askalf/ci/compare/') && !wf.includes('askalf/askalf'));
+  check('the script comes from ci-repo, the on-main check compares against it, and nothing names the old home',
+    steps[fetchAt].includes('repository: ${{ inputs.ci-repo }}\n') && steps[mainAt].includes('repos/${repo}/compare/') && steps[mainAt].includes('CI_REPO: ${{ inputs.ci-repo }}\n') && !wf.includes('askalf/askalf'));
+  const def = (name, value) => new RegExp(`\\n      ${name}:\\n(?:        .*\\n)*?        required: false\\n        default: ${value.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')}\\n        type: string\\n`).test(wf);
+  check('the fork inputs default to what every caller runs today', def('ci-repo', 'askalf/ci') && def('env-file', '/etc/askalf/fix-exec.env') && def('prompt-file', '/etc/askalf/fix-prompt.md'));
   check('the PR is checked out at the head input, into pr/', steps[prAt].includes('ref: ${{ inputs.head }}') && steps[prAt].includes('path: pr\n'));
   check('no input is interpolated into a run step: everything goes through env', steps.every((s) => !s.includes('run:') || !/\$\{\{\s*inputs\./.test(s.slice(s.indexOf('run:')))));
   check('the head check compares the checkout with HEAD_SHA from env and fails', steps[headAt].includes('HEAD_SHA: ${{ inputs.head }}') && /git -C pr rev-parse HEAD/.test(steps[headAt]) && /exit 1/.test(steps[headAt]));
@@ -1508,8 +1510,8 @@ console.log('\n  the reusable workflow');
   check('third-party actions are pinned by sha', [...wf.matchAll(/uses: ([^\s]+)/g)].every((m) => /@[0-9a-f]{40}$/.test(m[1])) && (wf.match(/uses: /g) ?? []).length === 4);
   const fix = steps[fixAt] ?? '';
   check('the fix step runs the fetched script with the contract env', fix.includes('run: node .redline/scripts/redline/fix.mjs') && fix.includes('CHECKOUT: ${{ github.workspace }}/pr') && fix.includes('FIX_OUT: ${{ github.workspace }}/fix-out')
-    && fix.includes('FIX_ENV_FILE: /etc/askalf/fix-exec.env') && fix.includes('GH_READ_TOKEN: ${{ github.token }}') && fix.includes('REVIEW_URL: ${{ inputs.review }}') && fix.includes("DRY_RUN: ${{ inputs.dry_run && '1' || '0' }}"));
-  check('the fix step names the host prompt file, and no prompt is fetched with the script', fix.includes('FIX_PROMPT_FILE: /etc/askalf/fix-prompt.md') && !/prompt/.test(steps[fetchAt]));
+    && fix.includes('FIX_ENV_FILE: ${{ inputs.env-file }}') && fix.includes('REDLINE_CI_REPO: ${{ inputs.ci-repo }}') && fix.includes('GH_READ_TOKEN: ${{ github.token }}') && fix.includes('REVIEW_URL: ${{ inputs.review }}') && fix.includes("DRY_RUN: ${{ inputs.dry_run && '1' || '0' }}"));
+  check('the fix step names the host prompt file, and no prompt is fetched with the script', fix.includes('FIX_PROMPT_FILE: ${{ inputs.prompt-file }}') && !/\/etc\/askalf/.test(wf.replace(/^        default: .*$/gm, '')) && !/prompt/.test(steps[fetchAt]));
   check('no secret from GitHub reaches the fix step', !/secrets\./.test(wf));
   const upload = steps[uploadAt] ?? '';
   check('the upload runs whatever the outcome, as redline-fix from fix-out, short-lived, overwriting',

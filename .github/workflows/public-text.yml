@@ -15,9 +15,16 @@ on:
     inputs:
       redline-ref:
         description: >-
-          The full commit sha of askalf/ci this workflow is called at, the same sha as the
+          The full commit sha of ci-repo this workflow is called at, the same sha as the
           caller's uses pin. The check script is fetched at it.
         required: true
+        type: string
+      ci-repo:
+        description: >-
+          The repository this workflow and its script come from, as owner/name: askalf/ci, or a
+          fork that runs its own copy. The script is fetched from it at redline-ref.
+        required: false
+        default: askalf/ci
         type: string
 
 permissions:
@@ -33,16 +40,21 @@ jobs:
       - name: Check the ref is a full commit sha
         env:
           REDLINE_REF: ${{ inputs.redline-ref }}
+          CI_REPO: ${{ inputs.ci-repo }}
         run: |
           if ! [[ "$REDLINE_REF" =~ ^[0-9a-f]{40}$ ]]; then
             echo "::error::redline-ref must be the full 40-character commit sha the caller pins; got '${REDLINE_REF}'"
             exit 1
           fi
+          if ! [[ "$CI_REPO" =~ ^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$ ]]; then
+            echo "::error::ci-repo must be owner/name; got '${CI_REPO}'"
+            exit 1
+          fi
 
-      - name: Fetch the check script from askalf/ci
+      - name: Fetch the check script from ci-repo
         uses: askalf/ci/actions/checkout-with-retry@70c075925d61e135043fd7525f3dc313f281a9e1 # main 2026-11-02, askalf/ci#166
         with:
-          repository: askalf/ci
+          repository: ${{ inputs.ci-repo }}
           ref: ${{ inputs.redline-ref }}
           path: .redline
           sparse-checkout: scripts/redline

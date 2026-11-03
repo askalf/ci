@@ -13,6 +13,13 @@ names the commit's date and the pull request it came from.
 
 ## November 2026
 
+- The values that named askalf in the reusable workflows are inputs with today's values as their
+  defaults, so every caller runs as before: `env-file` and `prompt-file` (review and fix),
+  `reviewer-login` (review and post) and `ci-repo` (review, post, fix and public-text), which the
+  on-main check, the script checkout and the poster's trust check all follow. The pin bump takes a
+  fork's callers from the repository variable `REDLINE_CALLERS` and its runner labels from
+  `REDLINE_PIN_BUMP_RUNS_ON`. A `REDLINE_CI_REPO` or `REDLINE_REVIEWER_LOGIN` that is not a
+  repository or a login stops the script when it loads.
 - The fleet-status action runs on the runner's own Node and reads its statuses in two parallel
   rounds (#161), runs on a label event only for the `verified` label (#159), and accepts a
   self-test that runs on every pull request (#157).

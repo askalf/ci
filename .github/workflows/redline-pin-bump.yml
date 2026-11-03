@@ -55,14 +55,16 @@ jobs:
   bump:
     # Schedule and dispatch only, so only our own code runs here: on ci-exec, a pin bump
     # reaches the callers while GitHub's hosted queue is down.
-    runs-on: [self-hosted, ci-exec]
+    # REDLINE_PIN_BUMP_RUNS_ON (a JSON label list) moves it, for a fork with no ci-exec rows.
+    runs-on: ${{ vars.REDLINE_PIN_BUMP_RUNS_ON && fromJSON(vars.REDLINE_PIN_BUMP_RUNS_ON) || fromJSON('["self-hosted","ci-exec"]') }}
     # A dispatch without wait-for-quiet bumps every caller in one run, about 70 s each (measured
     # 2026-11-02: nine callers in 9.5 minutes; ten minutes cancelled that run partway through the
     # list). So the limit has to cover every caller in CALLERS at that rate, with room to spare;
     # scripts/redline/pin-bump.test.mjs fails when a longer CALLERS list outgrows it.
     timeout-minutes: 30
-    # A fork repository has no ci-exec runners and no bump to make: the job runs here only.
-    if: github.repository == 'askalf/ci'
+    # A fork bumps its own callers once it names them in the repository variable REDLINE_CALLERS
+    # (space-separated owner/name); without it the job runs here only.
+    if: github.repository == 'askalf/ci' || vars.REDLINE_CALLERS != ''
     permissions:
       contents: read
     env:
@@ -74,6 +76,10 @@ jobs:
         askalf/platform askalf/homebrew-tap askalf/pitlane-box askalf/restore-desk
         askalf/sprayberrylabs-site askalf/unscathed-site askalf/ownyourstack-site askalf/airprint-bridge
         askalf/pitlane
+      # A fork's own list (repository variable REDLINE_CALLERS) replaces CALLERS when it is set.
+      CALLERS_OVERRIDE: ${{ vars.REDLINE_CALLERS }}
+      # The repository whose pins the bump moves: this one, askalf/ci here, a fork in a fork (pin.mjs).
+      REDLINE_CI_REPO: ${{ github.repository }}
       # A bot-shaped branch opened by askalf: the fleet lanes treat it as a bot PR.
       BRANCH: bot/redline-pin
       # The review caller is in every repo but platform; the fix caller only where the fix lane is
@@ -448,6 +454,7 @@ jobs:
           # review caller beside a fix caller that was bumped) does.
           opened="$(mktemp)"
           failed=0
+          [ -z "${CALLERS_OVERRIDE:-}" ] || CALLERS="$CALLERS_OVERRIDE"
           for repo in $CALLERS; do
             if [ "${CAP:-0}" -gt 0 ] && [ "$(wc -l < "$opened")" -ge "$CAP" ]; then
               echo "== ${repo}: left for the next run (this run opened or updated ${CAP} bump PRs)"

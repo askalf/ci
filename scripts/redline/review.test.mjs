@@ -263,6 +263,36 @@ console.log('\n  public voice: no machinery narration in the review');
   check('metaPhrase returns null on clean text', metaPhrase('Fixes the off-by-one in the pager.') === null);
 }
 
+console.log('\n  a fork: ci-repo and reviewer-login');
+{
+  const { ciRepo } = await import('./pin.mjs');
+  const throws = (f, v) => { try { f(v); return false; } catch { return true; } };
+  check('ci-repo is askalf/ci by default and a fork\'s owner/name as given', ciRepo(undefined) === 'askalf/ci' && ciRepo('') === 'askalf/ci' && ciRepo('some-one/ci.fork') === 'some-one/ci.fork');
+  check('a ci-repo that is not owner/name is refused', ['askalf', 'a/b/c', '../ci', 'a b/c', 'x/', '/ci', 'a/b\nc'].every((v) => throws(ciRepo, v)));
+  const { reviewerLogin } = reviewModule;
+  check('reviewer-login is sprayberry-redline by default, lowercased, an App bot allowed', reviewerLogin(undefined) === 'sprayberry-redline' && reviewerLogin('Fork-Reviewer') === 'fork-reviewer' && reviewerLogin('my-app[bot]') === 'my-app[bot]');
+  check('a reviewer-login that is no GitHub login is refused', ['-x', 'a b', 'x/y', 'a'.repeat(40), 'x[bot]y', 'x\ny'].every((v) => throws(reviewerLogin, v)));
+  // The module constants follow the env, read in a fresh process as the workflows set it.
+  const probe = (env) => spawnSync(process.execPath, ['--input-type=module', '-e', [
+    `const p = await import(${JSON.stringify(new URL('./pin.mjs', import.meta.url).href)});`,
+    `const r = await import(${JSON.stringify(new URL('./review.mjs', import.meta.url).href)});`,
+    `const s = await import(${JSON.stringify(new URL('./post.mjs', import.meta.url).href)});`,
+    'console.log(JSON.stringify({ paths: [...p.CALLERS.map((c) => c.workflow), ...p.ACTIONS], login: r.REVIEWER_LOGIN, tooling: s.TOOLING_REPOS }));',
+  ].join('\n')], { env: { ...process.env, REDLINE_CI_REPO: '', REDLINE_REVIEWER_LOGIN: '', ...env }, encoding: 'utf8' });
+  const fork = probe({ REDLINE_CI_REPO: 'someone/ci', REDLINE_REVIEWER_LOGIN: 'Fork-Bot' });
+  const got = fork.status === 0 ? JSON.parse(fork.stdout) : null;
+  check('in a fork every pinned workflow and action is the fork\'s, and the poster trusts the fork alone',
+    got !== null && got.paths.length === 8 && got.paths.every((p) => p.startsWith('someone/ci/')) && JSON.stringify(got.tooling) === '["someone/ci"]' && got.login === 'fork-bot');
+  const ours = probe({});
+  const today = ours.status === 0 ? JSON.parse(ours.stdout) : null;
+  check('unset, it is today\'s: askalf/ci, sprayberry-redline, and askalf/askalf still accepted', today !== null && today.paths.every((p) => p.startsWith('askalf/ci/'))
+    && JSON.stringify(today.tooling) === '["askalf/ci","askalf/askalf"]' && today.login === 'sprayberry-redline');
+  const bad = probe({ REDLINE_CI_REPO: 'nope' });
+  check('a malformed REDLINE_CI_REPO stops the script when it loads', bad.status !== 0 && /REDLINE_CI_REPO must be owner\/name/.test(bad.stderr));
+  const H = 'c'.repeat(40);
+  check('a review by the reviewer counts whatever the case of its login', verdictAtHead([{ user: { login: 'Sprayberry-Redline' }, commit_id: H, state: 'APPROVED', body: 'x' }], H)?.state === 'APPROVED');
+}
+
 console.log('\n  verdictAtHead');
 {
   const r = (login, state, commit_id) => ({ user: { login }, state, commit_id, html_url: `u-${state}` });
@@ -921,15 +951,24 @@ console.log('\n  the reusable workflow');
   check('redline-ref is a required string input', /\n      redline-ref:\n(?:        .*\n)*?        required: true\n        type: string\n/.test(wf));
   const steps = wf.split(/\n      - /).slice(1);
   const stepNamed = (name) => steps.findIndex((s) => s.startsWith(`name: ${name}\n`));
-  const fetchAt = stepNamed('Fetch the review script from askalf/ci');
+  const fetchAt = stepNamed('Fetch the review script from ci-repo');
   check('the script is fetched at redline-ref, not job_workflow_sha or a branch',
     fetchAt >= 0 && steps[fetchAt].includes('ref: ${{ inputs.redline-ref }}') && !/ref: \$\{\{ github\.job_workflow_sha/.test(wf) && !/ref: main\b/.test(wf));
-  check('the script comes from askalf/ci, and nothing names the old home', steps[fetchAt].includes('repository: askalf/ci\n') && !wf.includes('askalf/askalf'));
+  check('the script comes from ci-repo, and nothing names the old home', steps[fetchAt].includes('repository: ${{ inputs.ci-repo }}\n') && !wf.includes('askalf/askalf'));
   const guardAt = stepNamed('Check the review ref is a full commit sha');
   check('the sha guard is the first step', guardAt === 0);
-  const mainAt = stepNamed('Check the review ref is on askalf/ci main');
+  const mainAt = stepNamed('Check the review ref is on main of ci-repo');
   check('the on-main check runs before the fetch', mainAt > guardAt && mainAt < fetchAt);
-  check('the on-main check compares against askalf/ci', (steps[mainAt] ?? '').includes('repos/askalf/ci/compare/'));
+  check('the on-main check compares against ci-repo, which it reads from env', (steps[mainAt] ?? '').includes('repos/${repo}/compare/') && (steps[mainAt] ?? '').includes('CI_REPO: ${{ inputs.ci-repo }}\n'));
+  const def = (name, value) => new RegExp(`\\n      ${name}:\\n(?:        .*\\n)*?        required: false\\n        default: ${value.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')}\\n        type: string\\n`).test(wf);
+  check('the fork inputs default to what every caller runs today', def('ci-repo', 'askalf/ci') && def('reviewer-login', 'sprayberry-redline')
+    && def('env-file', '/etc/askalf/redline.env') && def('prompt-file', '/etc/askalf/redline-prompt.md'));
+  check('no host path is fixed outside those defaults', !/\/etc\/askalf/.test(wf.replace(/^        default: .*$/gm, '')));
+  // The on-main check's own node, with a ci-repo that is not owner/name: refused before any request.
+  const onMain = /node --input-type=module -e '\n([\s\S]*?)\n {10}'\n/.exec(steps[mainAt] ?? '')?.[1] ?? '';
+  const mainRun = (repo) => spawnSync(process.execPath, ['--input-type=module', '-e', onMain], { env: { ...process.env, REDLINE_REF: HEAD, CI_REPO: repo, GH_READ_TOKEN: 'x' }, encoding: 'utf8' });
+  const refused = ['', 'askalf', 'a/b/c', '../ci', 'evil/ci?x=1'].map(mainRun);
+  check('the on-main check refuses a ci-repo that is not owner/name, before any request', onMain.includes('fetch(url') && refused.every((r) => r.status === 1 && /ci-repo must be owner\/name/.test(r.stdout) && !/attempt/.test(r.stdout)));
   check('the ref reaches the guards through env, not interpolated into run',
     steps.every((s) => !s.includes('run:') || !s.slice(s.indexOf('run:')).includes('${{ inputs.redline-ref')));
   // The guard's own shell, run against good and bad refs.
@@ -955,12 +994,15 @@ console.log('\n  the reusable workflow');
     wf.includes('/actions/runs?head_sha=') && wf.includes('/actions/runs/${w.id}/jobs?') && permBlock.includes('  actions: read\n'));
   check('third-party actions are pinned by sha', [...wf.matchAll(/uses: ([^\s]+)/g)].every((m) => /@[0-9a-f]{40}$/.test(m[1])));
   const reviewAt = stepNamed('Review');
+  check('the review step takes the endpoint, the rubric, the reviewer and the repository from the inputs',
+    ['REDLINE_CI_REPO: ${{ inputs.ci-repo }}', 'REDLINE_REVIEWER_LOGIN: ${{ inputs.reviewer-login }}', 'REDLINE_ENV_FILE: ${{ inputs.env-file }}', 'REDLINE_PROMPT_FILE: ${{ inputs.prompt-file }}']
+      .every((l) => (steps[reviewAt] ?? '').includes(`          ${l}\n`)));
   const uploadAt = stepNamed('Upload the verdict');
   const cleanAt = stepNamed('Remove the checkouts');
   const upload = steps[uploadAt] ?? '';
   check('the review step names the verdict file in the workspace', (steps[reviewAt] ?? '').includes('REDLINE_VERDICT_FILE: ${{ github.workspace }}/redline-verdict/verdict.json'));
-  check('the review step names the host prompt file, and no prompt is fetched with the script',
-    (steps[reviewAt] ?? '').includes('REDLINE_PROMPT_FILE: /etc/askalf/redline-prompt.md') && !/prompt/.test(steps[fetchAt]));
+  check('the review step names the host prompt file (prompt-file), and no prompt is fetched with the script',
+    (steps[reviewAt] ?? '').includes('REDLINE_PROMPT_FILE: ${{ inputs.prompt-file }}') && !/prompt/.test(steps[fetchAt]));
   check('the verdict is uploaded after the review, before the cleanup', reviewAt >= 0 && uploadAt === reviewAt + 1 && cleanAt === uploadAt + 1);
   check('the upload runs on pass or fail, only when there is a file', upload.includes("if: always() && hashFiles('redline-verdict/verdict.json') != ''"));
   check('the upload is the pinned upload-artifact, as redline-verdict, short-lived',
