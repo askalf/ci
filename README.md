@@ -242,6 +242,14 @@ not a required check. What holds a pull request back is the review it posts: an 
 reviewer account satisfies the required review, and a request for changes stops the merge until a
 new head is approved. The approval is the model's; no person signs off on each merge.
 
+The review job stays unrequired on purpose. A pull request that changes a workflow runs its own
+workflow files, so it could make a check of that name pass; that is why the poster refuses such a
+head and only a dispatch on the default branch reviews it, and a dispatch run reports on the
+default branch, not on the pull request. Requiring the job would add nothing those heads cannot
+fake, and a transient failure of the pull_request run would hold a merge the posted review had
+already approved. Actions here must be pinned to a full commit sha (the repository's
+`sha_pinning_required` setting), so no workflow run can resolve a moving tag.
+
 ## Tests
 
 `redline-self-test.yml` runs the tests on every pull request, and it is a required check; a
