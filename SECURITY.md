@@ -63,7 +63,7 @@ What an adopter should know about the review itself.
   the credential file included. We treat write access to a calling repository as trusted. A fork's
   pull request is different: it is reviewed only on a dispatch, after the contributor gate, and
   none of its code runs.
-- **Known item: the pin bump's token.** `redline-pin-bump.yml` uses `REDLINE_PIN_BUMP_TOKEN`, a
-  long-lived fine-grained token with Contents, Pull requests and Workflows write on every
-  repository in `CALLERS`. Moving it to a GitHub App with short-lived installation tokens is
-  planned.
+- **The pin bump's token.** `redline-pin-bump.yml` writes to the repositories in `CALLERS` with
+  a GitHub App's installation token, narrowed to Contents, Pull requests and Workflows write,
+  minted per run, valid for an hour and revoked when the job ends. The long-lived fine-grained
+  token it replaced is revoked.

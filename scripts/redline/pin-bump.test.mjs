@@ -578,7 +578,7 @@ if (spawnSync('bash', ['-c', 'true']).status !== 0 || process.platform === 'win3
     needS <= limitS, `raise timeout-minutes on the bump job to at least ${Math.ceil(needS / 60)}`);
 }
 
-console.log('\n  the token: the pin bump App, the fine-grained token until the App is set up');
+console.log('\n  the token: the pin bump App, and no long-lived token');
 {
   const steps = bump.split(/\n      - /).slice(1);
   const named = (n) => steps.find((x) => x.startsWith(`name: ${n}\n`)) ?? '';
@@ -591,8 +591,8 @@ console.log('\n  the token: the pin bump App, the fine-grained token until the A
   const perms = [...mint.matchAll(/\n {10}permission-([a-z-]+): (\w+)/g)].map((m) => `${m[1]}=${m[2]}`);
   check('its token is narrowed to the three permissions the bump writes with', perms.join(' ') === 'contents=write pull-requests=write workflows=write', perms.join(' '));
   const uses = [...bump.matchAll(/^ +(?:TOKEN|GH_TOKEN): (\$\{\{.*\}\})$/gm)].map((m) => m[1]);
-  check('the guard and the bump both take the App token, else the fine-grained one, and nothing else writes with it',
-    uses.length === 2 && uses.every((u) => u === '${{ steps.app.outputs.token || secrets.REDLINE_PIN_BUMP_TOKEN }}') && (bump.match(/secrets\.REDLINE_PIN_BUMP_TOKEN/g) ?? []).length === 2, uses.join(' | '));
+  check('the guard and the bump both take the App token and nothing else: no fine-grained token remains',
+    uses.length === 2 && uses.every((u) => u === '${{ steps.app.outputs.token }}') && !/REDLINE_PIN_BUMP_TOKEN/.test(bump), uses.join(' | '));
 }
 
 console.log(`\n  ${pass} pass, ${fail} fail`);

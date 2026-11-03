@@ -74,7 +74,8 @@ own `ci-repo` to all four. `uses:` takes no expression, so a fork's callers also
 there. In the fork itself, the pin bump (`redline-pin-bump.yml`) runs once the repository variable
 `REDLINE_CALLERS` lists its callers (space-separated owner/name; without it the bump runs in
 askalf/ci only), on the runner labels in `REDLINE_PIN_BUMP_RUNS_ON` (a JSON list, default
-`["self-hosted","ci-exec"]`), with its own `REDLINE_PIN_BUMP_TOKEN` secret. One value is still
+`["self-hosted","ci-exec"]`), with a GitHub App of its own installed on its callers: its client id in the
+variable `REDLINE_PIN_BUMP_CLIENT_ID` and its private key in the secret `REDLINE_PIN_BUMP_APP_KEY`. One value is still
 fixed: the fleet statuses (`actions/fleet-status`) count `sprayberry-redline`'s reviews.
 
 ## Words used here
@@ -199,9 +200,12 @@ at the end. A repository found with every pin at the commit is noted with its `.
 tree in a cache entry for that commit, and later runs read only that tree id until a workflow there
 changes.
 
-The job needs `REDLINE_PIN_BUMP_TOKEN`, a fine-grained token with Contents, Pull requests and
-Workflows read and write on every repository in the list (Workflows because the pins live in
-`.github/workflows/`); without it the job says so and stops, green.
+The job writes with the pin bump's GitHub App, installed on every repository in the list with
+Contents, Pull requests and Workflows read and write (Workflows because the pins live in
+`.github/workflows/`). Each run mints a token of those three that lasts an hour and is revoked
+when the job ends; no long-lived token writes to the callers. Without the App's client id (variable
+`REDLINE_PIN_BUMP_CLIENT_ID`) the job says so and stops, green; with a missing or wrong private key
+(secret `REDLINE_PIN_BUMP_APP_KEY`) it fails.
 
 ## The drift report
 
