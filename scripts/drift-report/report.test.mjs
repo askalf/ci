@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { fileURLToPath } from 'node:url';
 import { readConfig, report, stamp, pickPr, pickIssues, pushEnv, prBody, parseEntries, parseLines, gitPath, BODY_LIMIT, BODY_RESERVE } from './report.mjs';
 import { actionPins, bumpActionPins, countActionPins, DRIFT_REPORT_ACTION } from '../redline/pin.mjs';
 
@@ -522,7 +523,7 @@ console.log('\n  action pin');
 
   // The bump workflow decides which watcher files to rewrite with pin.mjs --action-pins, so it
   // finds exactly the pins pin.mjs --action rewrites, however the uses: line is spaced.
-  const pinMjs = new URL('../redline/pin.mjs', import.meta.url).pathname;
+  const pinMjs = fileURLToPath(new URL('../redline/pin.mjs', import.meta.url));
   const cli = (input, ...args) => spawnSync(process.execPath, [pinMjs, ...args], { input, encoding: 'utf8' });
   const listed = cli(spaced, '--action-pins');
   check('pin.mjs --action-pins prints the sha of a pin spaced uses:   <action>@<sha>', listed.status === 0 && listed.stdout === `${'7'.repeat(40)}\n`);

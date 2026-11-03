@@ -39,3 +39,31 @@ Anything that breaks a boundary this repository draws:
   a quality report, not a security one, and belongs in a normal issue
 - What a calling repository does with the permissions it grants the called workflow
 - Findings that need write access to this repository already
+
+## Threat model
+
+What an adopter should know about the review itself.
+
+- **What the reviewer reads.** The pull request's diff, title, description and commit messages,
+  the files of the checked-out head, and earlier reviews of the same pull request. Earlier reviews
+  and the context the workflow gathers are handed to the model as data, never as instructions.
+- **What it can do.** Four tools, listed in `scripts/redline/tools.json` and pinned with
+  truecopy: list, read and search inside the checkout (every path confined to it by its real
+  path), and submit the verdict. None of them writes, runs code from the pull request or reaches
+  the network.
+- **What a finding must carry.** Every finding has to quote text that is in the diff, the pull
+  request text or a commit message; a submitted review whose quote is not there is refused and
+  sent back to the model, so it is never posted. Text in a pull request that tries to steer the review has to get past that rule and the
+  read-only tools.
+- **Where the credential lives.** The model endpoint's key is in a file on the self-hosted runner
+  host, readable by the account that runs the `redline` runner. It never goes through GitHub.
+- **Residual risk: same-repository branches.** A pull request opened from a branch of the calling
+  repository runs that branch's version of the caller workflow on the `redline` runner, so anyone
+  who can push a branch there can run steps on that runner and read what its account can read,
+  the credential file included. We treat write access to a calling repository as trusted. A fork's
+  pull request is different: it is reviewed only on a dispatch, after the contributor gate, and
+  none of its code runs.
+- **Known item: the pin bump's token.** `redline-pin-bump.yml` uses `REDLINE_PIN_BUMP_TOKEN`, a
+  long-lived fine-grained token with Contents, Pull requests and Workflows write on every
+  repository in `CALLERS`. Moving it to a GitHub App with short-lived installation tokens is
+  planned.
