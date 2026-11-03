@@ -11,11 +11,11 @@
 #
 # Writing to other repos needs a token GITHUB_TOKEN cannot be. It is the pin bump's GitHub App
 # (askalf-pin-bump), installed on the repos in CALLERS with Contents, Pull requests and Workflows
-# read/write: each run mints a token of those three that lasts an hour. The repository variable
-# REDLINE_PIN_BUMP_CLIENT_ID (the App's client id) is the switch: once it is set the run uses the
-# App, and fails, bumping nothing, if the App's private key (secret REDLINE_PIN_BUMP_APP_KEY) is
-# missing or wrong, so the key goes in first. While the variable is unset the run uses
-# REDLINE_PIN_BUMP_TOKEN, a fine-grained token owned by askalf with the same three on the same repos. Workflows is needed because the pin lives in .github/workflows/, and GitHub
+# read/write: each run mints a token of those three that lasts an hour and is revoked when the job
+# ends. The repository variable REDLINE_PIN_BUMP_CLIENT_ID (the App's client id) and the secret
+# REDLINE_PIN_BUMP_APP_KEY (its private key) set it up; without the variable the job says so and
+# stops, green, and with a missing or wrong key it fails, bumping nothing. No long-lived token
+# writes anywhere. Workflows is needed because the pin lives in .github/workflows/, and GitHub
 # refuses a change to a workflow file from a token without it. A PR opened with GITHUB_TOKEN would
 # also start no CI, so no required check would report.
 # Without the secret the job says so and stops, green.
@@ -131,9 +131,8 @@ jobs:
       CONVERGED: .redline-pin-bump/converged.tsv
     steps:
       # The App's token, narrowed to the three permissions the bump writes with. Without the
-      # variable the step is skipped and the token is the fine-grained one, as before the App. With
-      # it, a mint that fails (no key, a wrong key, the App not installed) fails the job: it never
-      # falls back to the fine-grained token, so a broken App shows instead of hiding.
+      # variable the step is skipped and the guard stops the job; a mint that fails (no key, a wrong
+      # key, the App not installed) fails the job, so a broken App shows.
       - name: Mint the pin bump App's token
         id: app
         if: vars.REDLINE_PIN_BUMP_CLIENT_ID != ''
@@ -149,14 +148,13 @@ jobs:
       - name: Check for the token
         id: guard
         env:
-          TOKEN: ${{ steps.app.outputs.token || secrets.REDLINE_PIN_BUMP_TOKEN }}
-          FROM: ${{ steps.app.outputs.token && 'the pin bump App' || 'REDLINE_PIN_BUMP_TOKEN' }}
+          TOKEN: ${{ steps.app.outputs.token }}
         run: |
           if [ -z "$TOKEN" ]; then
-            echo "::notice::Neither the pin bump App nor REDLINE_PIN_BUMP_TOKEN is set; no bump PRs opened. Bump the redline-review.yml and redline-fix-run.yml pins in each caller by hand."
+            echo "::notice::The pin bump App is not set up (repository variable REDLINE_PIN_BUMP_CLIENT_ID); no bump PRs opened. Bump the redline-review.yml and redline-fix-run.yml pins in each caller by hand."
             echo "ok=false" >> "$GITHUB_OUTPUT"
           else
-            echo "token: $FROM"
+            echo "token: the pin bump App"
             echo "ok=true" >> "$GITHUB_OUTPUT"
           fi
 
@@ -268,7 +266,7 @@ jobs:
         id: bump
         if: steps.pick.outputs.ok == 'true'
         env:
-          GH_TOKEN: ${{ steps.app.outputs.token || secrets.REDLINE_PIN_BUMP_TOKEN }}
+          GH_TOKEN: ${{ steps.app.outputs.token }}
           SHA: ${{ steps.pick.outputs.sha }}
           CAP: ${{ steps.pick.outputs.cap }}
           SOURCE: ${{ github.repository }}
