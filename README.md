@@ -7,6 +7,30 @@
 The gate every fix lands through: the reusable workflows and composite actions a pull request on
 one of our public repositories has to pass before it lands.
 
+**Redline, the review at its center, is an AI code review.** A model reads each ready pull request
+with read-only tools and either approves it or requests changes, and every finding has to quote the
+diff, the pull request text or a commit message it is about. The models are set on the runner host;
+the defaults in [`scripts/redline/review.mjs`](scripts/redline/review.mjs) are `claude-fable-5-1`,
+with `claude-opus-5-5` as the fallback and for pull requests that only move Redline pins.
+
+**Who this is for.** The askalf repositories call it today. Another repository can adopt it by
+forking this one: [Who can use this](#who-can-use-this) lists what a fork needs and what it changes.
+
+A calling repository's `.github/workflows/redline.yml`, in short ([Calling it](#calling-it) has the
+details):
+
+```yaml
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+permissions: { actions: read, contents: read, pull-requests: read }
+jobs:
+  review:
+    if: github.event.pull_request.draft == false && github.event.pull_request.head.repo.full_name == github.repository
+    uses: askalf/ci/.github/workflows/redline-review.yml@<sha>
+    with: { redline-ref: <sha>, runner-label: redline }
+```
+
 ## Where this sits
 
 One CI setup in four layers, and this repository is the gate.
@@ -15,8 +39,45 @@ One CI setup in four layers, and this repository is the gate.
 |---|---|---|
 | **ci-wizard measures it** | A read-only audit of a repository's GitHub Actions: where the time goes and what to fix first, with the cause confirmed in the workflow file before a finding names it. A fix is measured the same way before and after it lands here. | [askalf/ci-wizard](https://github.com/askalf/ci-wizard) |
 | **pitlane runs it, as the lab** | Self-hosted, ephemeral, non-root runners we run ourselves, one job each, where ci-wizard's method is proven. Every job's queue wait (from GitHub creating it to a runner starting it) and its run time are measured, and the last 24 hours are published live; queue wait against two targets, a median under 5 s and a p90 under 30 s. The badge above shows both medians. | [the proof page](https://pitlane.askalf.org/), its [JSON](https://pitlane.askalf.org/stats.json) and the runner code, [askalf/pitlane](https://github.com/askalf/pitlane) |
-| **This repository gates it** | Redline, the code review every pull request has to pass. The caller runs it as a reusable workflow at one pinned commit, the review's own check is the verdict (approve, or the job fails and the pull request does not merge), and the finished review is posted on the pull request. Beside it: the public-text check, the fleet statuses a merge waits on, and shared steps such as a checkout that retries. | here |
+| **This repository gates it** | Redline, the AI code review every pull request has to pass. The caller runs it as a reusable workflow at one pinned commit, and the finished review is posted on the pull request as an approval or a request for changes. That posted review is what a merge waits on: a ruleset that requires an approving review lets the pull request merge only once its latest push is approved ([what this repository's ruleset requires](#what-holds-a-merge)). Beside it: the public-text check, the fleet statuses a merge waits on, and shared steps such as a checkout that retries. | here |
 | **truecopy-action is the integrity gate inside it** | The gate that fails the build on a tampered skill. [@askalf/truecopy](https://www.npmjs.com/package/@askalf/truecopy) pins the exact bytes of each vetted tool definition in `truecopy.lock`, and the action fails the job when those bytes change or newer detection flags them. Here it pins the tools the reviewer and the fixer read. | [askalf/truecopy-action](https://github.com/askalf/truecopy-action); [`truecopy-gate.yml`](#the-truecopy-gate) here |
+
+## Who can use this
+
+Today these workflows are built for the askalf repositories, and a few values in them name ours.
+An outside repository adopts Redline by forking this one, changing those values, and providing:
+
+| What it needs | Why | Here |
+|---|---|---|
+| A self-hosted runner with the label the caller passes (`redline` above) | The review runs there and reads the prompt and credential files on that host | [pitlane](https://github.com/askalf/pitlane) rows |
+| A model endpoint | `review.mjs` sends its turns as Anthropic Messages API requests (`/v1/messages`) to `DARIO_URL` (default `http://127.0.0.1:3456`), with `DARIO_API_KEY` or a key socket | [dario](https://github.com/askalf/dario) |
+| The prompt file | The reviewer's rubric is never committed: `REDLINE_PROMPT_FILE` names it on the host | [The prompts live on the host](#the-prompts-live-on-the-host) |
+| The credential file | `REDLINE_ENV_FILE` holds the endpoint's address and key and the model settings | the same section |
+| A reviewer account and its token | The review is posted as that account by `redline-post-verdict.yml`, on a GitHub-hosted runner, with the caller's `REDLINE_REVIEWER_TOKEN` secret | `sprayberry-redline` |
+| The post caller | The calling repository's `redline-post.yml` passes that secret | [Calling it](#calling-it) |
+| A ruleset that requires an approving review | The posted approval is what lets a pull request merge | [What holds a merge](#what-holds-a-merge) |
+
+The values a fork changes:
+
+| Where | What names ours |
+|---|---|
+| [`.github/workflows/redline-review.yml`](.github/workflows/redline-review.yml) | `REDLINE_ENV_FILE: /etc/askalf/redline.env` and `REDLINE_PROMPT_FILE: /etc/askalf/redline-prompt.md` |
+| the same file, the step "Check the review ref is on askalf/ci main" and the script checkout after it | `askalf/ci`, whose `main` the review script must come from |
+| [`scripts/redline/review.mjs`](scripts/redline/review.mjs) | `REVIEWER_LOGIN = 'sprayberry-redline'`, the account whose reviews count as Redline's |
+| [`.github/workflows/redline-pin-bump.yml`](.github/workflows/redline-pin-bump.yml) | `CALLERS`, the repositories the pin bump rewrites |
+| [`.github/workflows/redline-fix-run.yml`](.github/workflows/redline-fix-run.yml) | `/etc/askalf/fix-exec.env` and `/etc/askalf/fix-prompt.md`, for the fix lane |
+
+## Words used here
+
+- **Caller:** a repository's workflow that calls one of these reusable workflows at a pinned commit.
+- **Fleet:** the askalf repositories that call these workflows. The fleet statuses are the
+  `fleet/verify` and `fleet/review` commit statuses a merge there waits on.
+- **Exec runner:** the self-hosted runner a repository's build and test jobs run on, and the fix
+  lane with them. The `redline` runner only reads pull requests.
+- **Ops tick:** the scheduled job on our runner host that dispatches the fix lane and the
+  dispatch-mode reviews, and pushes a verified fix to the pull request branch. It is not in this
+  repository.
+- **Pin bump:** the hourly pull request in each caller that moves its pins to a newer commit here.
 
 ## What is here
 
@@ -27,7 +88,7 @@ full commit sha of `main`, so a change here reaches it only through a reviewed b
 
 | Called by other repositories | What it does |
 |---|---|
-| [`redline-review.yml`](.github/workflows/redline-review.yml) | Redline, the gating review: `scripts/redline/review.mjs` reads the pull request with read-only tools on the caller's self-hosted runner, and the job's result is the verdict: APPROVE passes, REQUEST_CHANGES fails. |
+| [`redline-review.yml`](.github/workflows/redline-review.yml) | Redline, the AI review: `scripts/redline/review.mjs` reads the pull request with read-only tools on the caller's self-hosted runner and returns APPROVE or REQUEST_CHANGES; the job passes or fails with it, and the caller's post workflow posts the verdict as a review. |
 | [`redline-fix-run.yml`](.github/workflows/redline-fix-run.yml) | The first-party answer to a REQUEST_CHANGES: `scripts/redline/fix.mjs` edits and tests the reviewed head on the caller's exec runner and uploads the fix as an artifact. Nothing in the job pushes or comments. |
 | [`public-text.yml`](.github/workflows/public-text.yml) | Fails a pull request that adds an em or en dash, or whose title, description or a commit message credits a model or an AI tool. It reads the pull request through the API and checks out none of its code. |
 | [`actions/checkout-with-retry`](actions/checkout-with-retry/action.yml) | `actions/checkout` as up to three steps, so a job that starts before its runner's credential is in place still checks out. |
@@ -161,6 +222,15 @@ workspace, so the action's first step is one that runs under act only, and a `pa
 (`.github/dependabot.yml`), and `checkout-with-retry-self-test.yml` runs the action from the checkout
 on every pull request that changes it. It replaces the standalone `askalf/checkout-with-retry`, now
 archived.
+
+## What holds a merge
+
+This repository's ruleset on `main` requires one approving review of the latest push, resolved
+review threads, a linear history, and four checks: `test` (the Redline self-test), `verify pinned
+reviewer surface` (the truecopy gate) and the two CodeQL `analyze` jobs. The review job itself is
+not a required check. What holds a pull request back is the review it posts: an approval from the
+reviewer account satisfies the required review, and a request for changes stops the merge until a
+new head is approved. The approval is the model's; no person signs off on each merge.
 
 ## Tests
 

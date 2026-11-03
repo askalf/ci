@@ -19,16 +19,13 @@ version CI uses).
 ```bash
 git clone https://github.com/askalf/ci.git
 cd ci
-node scripts/redline/review.test.mjs
-node scripts/redline/local.test.mjs
-node scripts/redline/public-text.test.mjs
-node scripts/redline/fix.test.mjs
-node scripts/redline/pin-bump.test.mjs
-node scripts/drift-report/report.test.mjs
-node scripts/fleet-status/fleet-status.test.mjs
-node scripts/fleet-status/check.test.mjs
-node scripts/redline/dump-tools.mjs --check
+node test-all.mjs
 ```
+
+`test-all.mjs` runs every test the `test` check runs, in the same list as
+`.github/workflows/redline-self-test.yml`: the review, post, local, public-text, drift-report,
+fleet-status, check, pin-bump and fix tests, and the `tools.json` drift check. Each file also runs
+on its own, for example `node scripts/redline/post.test.mjs`.
 
 The model and GitHub are stubbed in every test: no credential, no network. The run-account tests
 in `fix.test.mjs` need a second account to `sudo` to and skip where there is none; CI provides one.
@@ -42,14 +39,14 @@ in `fix.test.mjs` need a second account to `sudo` to and skip where there is non
 4. A tool added to or changed in `review.mjs` or `fix.mjs` is also a change to `tools.json` or
    `fix-tools.json`: `node scripts/redline/dump-tools.mjs` rewrites them, and `--check` fails CI
    when they drift.
-5. Run the tests above before pushing.
+5. Run `node test-all.mjs` before pushing.
 6. Open a pull request against `main`.
 
 ## What CI requires
 
 Every pull request must pass these checks to merge:
 
-- `test`: the tests above, on Node **22**
+- `test`: the tests `test-all.mjs` runs, on Node **22**
 - `verify pinned reviewer surface`: the tool definitions the reviewer and the fixer read are pinned
   with truecopy, and the build fails when their bytes change
 - **CodeQL** static analysis of the scripts and the workflows
