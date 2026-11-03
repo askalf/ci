@@ -120,7 +120,7 @@ export function fixCallerYaml(sha, runnerLabel, note = '') {
   if (!/^[a-z0-9][a-z0-9-]{0,62}$/.test(runnerLabel)) throw new Error(`not a runner label: ${runnerLabel}`);
   return `# Redline fix: when Redline requests changes on a pull request here, the ops tick dispatches this run
 # with the PR, the head Redline reviewed and the review. The fix itself is computed by
-# askalf/ci (redline-fix-run.yml) on this repository's non-root exec runner and uploaded as
+# ${CI_REPO} (redline-fix-run.yml) on this repository's non-root exec runner and uploaded as
 # the redline-fix artifact. Nothing here pushes or comments, and no token that could is on the
 # runner: the ops tick verifies the artifact and pushes the fix to the PR branch with its own token.
 name: Redline fix
@@ -162,7 +162,7 @@ jobs:
     # Pinned so a change to the fix workflow reaches this repo only through a reviewed bump here.
     uses: ${FIX_WORKFLOW}@${sha}${note ? ` # ${note}` : ''}
     with:
-      redline-ref: ${sha}
+      redline-ref: ${sha}${CI_REPO === 'askalf/ci' ? '' : `\n      # The fork the uses line pins: its main is where redline-ref must be, and its scripts run.\n      ci-repo: ${CI_REPO}`}
       # ${runnerLabel} is this repository's ephemeral exec runner: its own non-root account, one job
       # per registration, no credential but the fix lane's own model key.
       runner-label: ${runnerLabel}

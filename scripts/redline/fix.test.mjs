@@ -1542,6 +1542,15 @@ console.log('\n  the caller');
   check('the caller job has no runs-on of its own', !/runs-on/.test(y));
   check('no em dash', !/[\u2013\u2014]/.test(y));
   check('a bad sha or label is refused', (await throws(() => fixCallerYaml('main', 'dario-exec'))) && (await throws(() => fixCallerYaml(NEW, 'Dario Exec'))));
+  check('with askalf/ci the caller passes no ci-repo: the input\'s default is askalf/ci', !/ci-repo:/.test(y));
+  // In a fork (REDLINE_CI_REPO set, as the pin bump sets it) the generated caller pins the fork and passes it as ci-repo,
+  // so the run checks the ref against the fork's main and fetches the fork's script.
+  const forked = spawnSync(process.execPath, ['--input-type=module', '-e',
+    `const p = await import(${JSON.stringify(new URL('./pin.mjs', import.meta.url).href)}); process.stdout.write(p.fixCallerYaml(${JSON.stringify(NEW)}, 'app-exec'));`],
+    { env: { ...process.env, REDLINE_CI_REPO: 'someone/ci' }, encoding: 'utf8' });
+  const fy = forked.status === 0 ? forked.stdout : '';
+  check('in a fork the caller pins the fork and passes the same repository as ci-repo',
+    fy.includes(`    uses: someone/ci/.github/workflows/redline-fix-run.yml@${NEW}\n`) && fy.includes(`      redline-ref: ${NEW}\n`) && fy.includes('      ci-repo: someone/ci\n') && !fy.includes('askalf/ci'));
 }
 
 console.log('\n  pin bump, both callers');
