@@ -1,19 +1,20 @@
 # askalf/ci
 
-[![CI on pitlane](https://img.shields.io/endpoint?url=https%3A%2F%2Fpitlane.askalf.org%2Fbadge.json)](https://pitlane.askalf.org/)
+[![CI measured](https://img.shields.io/endpoint?url=https%3A%2F%2Fpitlane.askalf.org%2Fbadge.json)](https://pitlane.askalf.org/)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/askalf/ci/badge)](https://scorecard.dev/viewer/?uri=github.com/askalf/ci)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-The gate layer of Sprayberry Labs' CI: the reusable workflows and composite actions a pull request
-on one of our public repositories has to pass before it lands.
+The gate every fix lands through: the reusable workflows and composite actions a pull request on
+one of our public repositories has to pass before it lands.
 
 ## Where this sits
 
-One CI setup in three layers, and this repository is the middle one.
+One CI setup in four layers, and this repository is the gate.
 
 | Layer | What it does | Where it lives |
 |---|---|---|
-| **pitlane runs it** | Self-hosted, ephemeral, non-root runners we run ourselves, one job each. Every job's queue wait, from GitHub creating it to a runner starting it, is measured, and the last 24 hours are published live against two targets: a median under 5 s and a p90 under 30 s. The badge above is that median. | [the proof page](https://pitlane.askalf.org/), its [JSON](https://pitlane.askalf.org/stats.json) and the runner code, [askalf/pitlane](https://github.com/askalf/pitlane) |
+| **ci-wizard measures it** | A read-only audit of a repository's GitHub Actions: where the time goes and what to fix first, with the cause confirmed in the workflow file before a finding names it. A fix is measured the same way before and after it lands here. | [askalf/ci-wizard](https://github.com/askalf/ci-wizard) |
+| **pitlane runs it, as the lab** | Self-hosted, ephemeral, non-root runners we run ourselves, one job each, where ci-wizard's method is proven. Every job's queue wait (from GitHub creating it to a runner starting it) and its run time are measured, and the last 24 hours are published live; queue wait against two targets, a median under 5 s and a p90 under 30 s. The badge above shows both medians. | [the proof page](https://pitlane.askalf.org/), its [JSON](https://pitlane.askalf.org/stats.json) and the runner code, [askalf/pitlane](https://github.com/askalf/pitlane) |
 | **This repository gates it** | Redline, the code review every pull request has to pass. The caller runs it as a reusable workflow at one pinned commit, the review's own check is the verdict (approve, or the job fails and the pull request does not merge), and the finished review is posted on the pull request. Beside it: the public-text check, the fleet statuses a merge waits on, and shared steps such as a checkout that retries. | here |
 | **truecopy-action is the integrity gate inside it** | The gate that fails the build on a tampered skill. [@askalf/truecopy](https://www.npmjs.com/package/@askalf/truecopy) pins the exact bytes of each vetted tool definition in `truecopy.lock`, and the action fails the job when those bytes change or newer detection flags them. Here it pins the tools the reviewer and the fixer read. | [askalf/truecopy-action](https://github.com/askalf/truecopy-action); [`truecopy-gate.yml`](#the-truecopy-gate) here |
 
