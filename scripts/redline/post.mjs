@@ -57,13 +57,15 @@ import { inflateRawSync } from 'node:zlib';
 import { appendFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { gh, verdictProblem, REVIEWER_LOGIN } from './review.mjs';
+import { CI_REPO } from './pin.mjs';
 
 export const CALLER_PATH = '.github/workflows/redline.yml';
 /**
- * The repositories whose redline-review.yml a caller may run. askalf/askalf is accepted while a
- * caller still pins it. Every check is made against the repository the run named, never a fixed one.
+ * The repositories whose redline-review.yml a caller may run: ci-repo (pin.mjs CI_REPO), and for
+ * askalf/ci also askalf/askalf, accepted while a caller still pins it. Every check is made against
+ * the repository the run named, never a fixed one.
  */
-export const TOOLING_REPOS = ['askalf/ci', 'askalf/askalf'];
+export const TOOLING_REPOS = CI_REPO === 'askalf/ci' ? ['askalf/ci', 'askalf/askalf'] : [CI_REPO];
 export const REVIEW_WORKFLOW_FILE = '.github/workflows/redline-review.yml';
 export const VERDICT_ARTIFACT = 'redline-verdict';
 export const VERDICT_FILE = 'verdict.json';

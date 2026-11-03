@@ -44,8 +44,10 @@ One CI setup in four layers, and this repository is the gate.
 
 ## Who can use this
 
-Today these workflows are built for the askalf repositories, and a few values in them name ours.
-An outside repository adopts Redline by forking this one, changing those values, and providing:
+These workflows are built for the askalf repositories, and the values in them that name ours are
+inputs with ours as the defaults. An outside repository can call them as they are and pass its own
+values in `with:`, or fork this repository and point its callers at the fork with `ci-repo`.
+Either way it provides:
 
 | What it needs | Why | Here |
 |---|---|---|
@@ -57,15 +59,23 @@ An outside repository adopts Redline by forking this one, changing those values,
 | The post caller | The calling repository's `redline-post.yml` passes that secret | [Calling it](#calling-it) |
 | A ruleset that requires an approving review | The posted approval is what lets a pull request merge | [What holds a merge](#what-holds-a-merge) |
 
-The values a fork changes:
+The inputs, each optional, with the value every askalf caller runs:
 
-| Where | What names ours |
-|---|---|
-| [`.github/workflows/redline-review.yml`](.github/workflows/redline-review.yml) | `REDLINE_ENV_FILE: /etc/askalf/redline.env` and `REDLINE_PROMPT_FILE: /etc/askalf/redline-prompt.md` |
-| the same file, the step "Check the review ref is on askalf/ci main" and the script checkout after it | `askalf/ci`, whose `main` the review script must come from |
-| [`scripts/redline/review.mjs`](scripts/redline/review.mjs) | `REVIEWER_LOGIN = 'sprayberry-redline'`, the account whose reviews count as Redline's |
-| [`.github/workflows/redline-pin-bump.yml`](.github/workflows/redline-pin-bump.yml) | `CALLERS`, the repositories the pin bump rewrites |
-| [`.github/workflows/redline-fix-run.yml`](.github/workflows/redline-fix-run.yml) | `/etc/askalf/fix-exec.env` and `/etc/askalf/fix-prompt.md`, for the fix lane |
+| Input | Reusable workflows | Default | What it is |
+|---|---|---|---|
+| `env-file` | redline-review.yml | `/etc/askalf/redline.env` | the host file with the endpoint's address and key and the model settings |
+| `prompt-file` | redline-review.yml | `/etc/askalf/redline-prompt.md` | the host file with the reviewer's rubric |
+| `env-file`, `prompt-file` | redline-fix-run.yml | `/etc/askalf/fix-exec.env`, `/etc/askalf/fix-prompt.md` | the same two for the fix lane |
+| `reviewer-login` | redline-review.yml, redline-post-verdict.yml | `sprayberry-redline` | the account whose posted reviews are Redline's: the one the post caller's token posts as |
+| `ci-repo` | redline-review.yml, redline-post-verdict.yml, redline-fix-run.yml, public-text.yml | `askalf/ci` | where the scripts are fetched from; `redline-ref` must be a commit on its `main`, and the poster trusts a review run only if it called this repository's `redline-review.yml` |
+
+A caller passes the same `reviewer-login` to the review and to the post, and a fork passes its
+own `ci-repo` to all four. `uses:` takes no expression, so a fork's callers also name the fork
+there. In the fork itself, the pin bump (`redline-pin-bump.yml`) runs once the repository variable
+`REDLINE_CALLERS` lists its callers (space-separated owner/name; without it the bump runs in
+askalf/ci only), on the runner labels in `REDLINE_PIN_BUMP_RUNS_ON` (a JSON list, default
+`["self-hosted","ci-exec"]`), with its own `REDLINE_PIN_BUMP_TOKEN` secret. One value is still
+fixed: the fleet statuses (`actions/fleet-status`) count `sprayberry-redline`'s reviews.
 
 ## Words used here
 

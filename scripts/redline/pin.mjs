@@ -33,14 +33,27 @@
 import { readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 
-export const REVIEW_WORKFLOW = 'askalf/ci/.github/workflows/redline-review.yml';
-export const FIX_WORKFLOW = 'askalf/ci/.github/workflows/redline-fix-run.yml';
-export const PUBLIC_TEXT_WORKFLOW = 'askalf/ci/.github/workflows/public-text.yml';
-export const POST_WORKFLOW = 'askalf/ci/.github/workflows/redline-post-verdict.yml';
-export const DRIFT_REPORT_ACTION = 'askalf/ci/actions/drift-report';
-export const CHECKOUT_RETRY_ACTION = 'askalf/ci/actions/checkout-with-retry';
-export const FLEET_STATUS_ACTION = 'askalf/ci/actions/fleet-status';
-export const FLEET_STATUS_CHECK_ACTION = 'askalf/ci/actions/fleet-status-check';
+/**
+ * The repository these workflows and actions come from, owner/name: askalf/ci, or a fork's own
+ * (REDLINE_CI_REPO, which each reusable workflow sets from its ci-repo input and the pin bump from
+ * the repository it runs in). Every path below is built from it, so the post check, the pin bump
+ * and the review's pin-only test all trust that one repository. A value that is not owner/name is
+ * refused when the module loads: no check ever falls back to a guess.
+ */
+export function ciRepo(value) {
+  if (value === undefined || value === '') return 'askalf/ci';
+  if (!/^[A-Za-z0-9-]+\/[A-Za-z0-9._-]+$/.test(value)) throw new Error(`REDLINE_CI_REPO must be owner/name; got ${JSON.stringify(value)}`);
+  return value;
+}
+export const CI_REPO = ciRepo(process.env.REDLINE_CI_REPO);
+export const REVIEW_WORKFLOW = `${CI_REPO}/.github/workflows/redline-review.yml`;
+export const FIX_WORKFLOW = `${CI_REPO}/.github/workflows/redline-fix-run.yml`;
+export const PUBLIC_TEXT_WORKFLOW = `${CI_REPO}/.github/workflows/public-text.yml`;
+export const POST_WORKFLOW = `${CI_REPO}/.github/workflows/redline-post-verdict.yml`;
+export const DRIFT_REPORT_ACTION = `${CI_REPO}/actions/drift-report`;
+export const CHECKOUT_RETRY_ACTION = `${CI_REPO}/actions/checkout-with-retry`;
+export const FLEET_STATUS_ACTION = `${CI_REPO}/actions/fleet-status`;
+export const FLEET_STATUS_CHECK_ACTION = `${CI_REPO}/actions/fleet-status-check`;
 /** Every action of this repository a workflow pins as a step; `--action` moves them all. */
 export const ACTIONS = [DRIFT_REPORT_ACTION, CHECKOUT_RETRY_ACTION, FLEET_STATUS_ACTION, FLEET_STATUS_CHECK_ACTION];
 /** Every reusable workflow a caller pins, and the caller file that pins it. */
@@ -107,7 +120,7 @@ export function fixCallerYaml(sha, runnerLabel, note = '') {
   if (!/^[a-z0-9][a-z0-9-]{0,62}$/.test(runnerLabel)) throw new Error(`not a runner label: ${runnerLabel}`);
   return `# Redline fix: when Redline requests changes on a pull request here, the ops tick dispatches this run
 # with the PR, the head Redline reviewed and the review. The fix itself is computed by
-# askalf/ci (redline-fix-run.yml) on this repository's non-root exec runner and uploaded as
+# ${CI_REPO} (redline-fix-run.yml) on this repository's non-root exec runner and uploaded as
 # the redline-fix artifact. Nothing here pushes or comments, and no token that could is on the
 # runner: the ops tick verifies the artifact and pushes the fix to the PR branch with its own token.
 name: Redline fix
@@ -149,7 +162,7 @@ jobs:
     # Pinned so a change to the fix workflow reaches this repo only through a reviewed bump here.
     uses: ${FIX_WORKFLOW}@${sha}${note ? ` # ${note}` : ''}
     with:
-      redline-ref: ${sha}
+      redline-ref: ${sha}${CI_REPO === 'askalf/ci' ? '' : `\n      # The fork the uses line pins: its main is where redline-ref must be, and its scripts run.\n      ci-repo: ${CI_REPO}`}
       # ${runnerLabel} is this repository's ephemeral exec runner: its own non-root account, one job
       # per registration, no credential but the fix lane's own model key.
       runner-label: ${runnerLabel}
