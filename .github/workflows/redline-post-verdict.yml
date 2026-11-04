@@ -55,7 +55,10 @@ jobs:
   # title, `Redline review <owner>/<name>#<pr> @ <head>[ (re-read)]`, the same for a re-read. Any
   # other run gets a key of its own: the post script names no head for it and posts nothing.
   key:
-    if: github.event_name == 'workflow_run' && (github.event.workflow_run.conclusion == 'success' || github.event.workflow_run.conclusion == 'failure')
+    # Not on a private repository: the reviewer account has no access to one, so there is nothing to
+    # post, and on GitHub's runners a private repository's job spends the owner's minutes or, once
+    # they are gone, fails at once.
+    if: github.event_name == 'workflow_run' && !github.event.repository.private && (github.event.workflow_run.conclusion == 'success' || github.event.workflow_run.conclusion == 'failure')
     runs-on: ubuntu-latest
     timeout-minutes: 2
     permissions: {}
@@ -83,7 +86,7 @@ jobs:
   post:
     needs: key
     # Only a run that reached a verdict. A cancelled or skipped run has none to post.
-    if: github.event_name == 'workflow_run' && (github.event.workflow_run.conclusion == 'success' || github.event.workflow_run.conclusion == 'failure')
+    if: github.event_name == 'workflow_run' && !github.event.repository.private && (github.event.workflow_run.conclusion == 'success' || github.event.workflow_run.conclusion == 'failure')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     # One post at a time per repository and reviewed head, whatever mode the run was in, so two
