@@ -281,7 +281,7 @@ jobs:
           if [ -n "$pr" ]; then note="${note}, ${SOURCE}#${pr}"; fi
           pattern="uses: ${SOURCE}/.github/workflows/(redline-review|redline-fix-run|public-text|redline-post-verdict).yml@[0-9a-f]{40}"
           title="ci: bump Redline to ${SOURCE}@${short}"
-          body="Moves the pinned ${SOURCE} calls and their redline-ref inputs, and every ${SOURCE} action pin (drift-report, checkout-with-retry, fleet-status, fleet-status-check), to ${SOURCE}@${SHA}, the main commit that last changed the review, the fix or an action (${note}). The scripts are fetched at that same commit. The pins are the only change."
+          body="Moves this repository's ${SOURCE} pins (its reusable workflow calls, their redline-ref inputs and any action pins) to ${SOURCE}@${SHA}, the main commit that last changed the review, the fix or an action (${note}). The scripts are fetched at that same commit. The pins are the only change."
 
           # A path as the Contents API takes it: each segment percent-encoded, so a workflow named
           # with a space, a # or a ? is read and written as one whole path.
