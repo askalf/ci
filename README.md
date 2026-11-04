@@ -110,6 +110,7 @@ full commit sha of `main`, so a change here reaches it only through a reviewed b
 | This repository's own | What it does |
 |---|---|
 | `redline.yml`, `redline-fix.yml`, `redline-post.yml` | This repository's callers of the review, the fix and the post, pinned and bumped like every other caller's. |
+| `public-text-check.yml` | Runs `public-text.yml` on this repository's own pull requests, with the script fetched at the base commit. |
 | `redline-pin-bump.yml` | Hourly, moves every caller's pins to the newest `main` commit that changed what a caller runs, one pull request per repository. |
 | `redline-self-test.yml` | The Redline, public-text, drift-report, fleet-status and pin-bump tests on every pull request: a required check. |
 | `checkout-with-retry-self-test.yml` | Proves the retry action on a runner: a healthy checkout, the retry paths through a stub, and the act path under act. |

@@ -1,0 +1,24 @@
+# Public text on this repository's own pull requests: the check every caller runs, called here from
+# the checkout, so its job reports as `public-text / check` as it does on a caller. public-text.yml
+# in this repository is the called workflow, not a caller, which is why this file has its own name.
+# The script is fetched at the pull request's base commit: a change to the script is read by the
+# pull requests after it merges, not by its own. No pin here, so the pin bump has nothing to move.
+name: Public text check
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: public-text-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  public-text:
+    uses: ./.github/workflows/public-text.yml
+    with:
+      redline-ref: ${{ github.event.pull_request.base.sha }}
