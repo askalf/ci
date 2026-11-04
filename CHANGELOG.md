@@ -13,6 +13,9 @@ names the commit's date and the pull request it came from.
 
 ## November 2026
 
+- This repository's own pull requests run the public text check. `public-text.yml` here is the
+  called workflow, so `public-text-check.yml` calls it from the checkout and reports the same
+  `public-text / check` a caller does, with the script fetched at the base commit.
 - The values that named askalf in the reusable workflows are inputs with today's values as their
   defaults, so every caller runs as before: `env-file` and `prompt-file` (review and fix),
   `reviewer-login` (review and post) and `ci-repo` (review, post, fix and public-text), which the
