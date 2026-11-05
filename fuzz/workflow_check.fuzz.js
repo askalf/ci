@@ -35,20 +35,15 @@ import {
   workflowRunList,
   yamlGaps,
 } from '../scripts/fleet-status/check.mjs';
-
-function fail(msg) {
-  throw new Error(msg);
-}
+import { attempt, fail } from './violation.js';
 
 const dir = mkdtempSync(join(tmpdir(), 'ci-fuzz-caller-'));
 process.on('exit', () => rmSync(dir, { recursive: true, force: true }));
 
 const isStrings = (a) => Array.isArray(a) && a.every((x) => typeof x === 'string');
 
-// The errors an expression may throw on purpose: its own, and fromJSON's.
-function documentedThrow(e) {
-  return e instanceof Error && (e.constructor === Error || e.constructor === SyntaxError);
-}
+// The errors an expression may throw on purpose: its own plain Error, and fromJSON's SyntaxError.
+const EXPRESSION_ERRORS = [SyntaxError];
 
 function evaluate(src) {
   const ctx = {
@@ -61,21 +56,15 @@ function evaluate(src) {
   };
   const modes = [{}, { strict: true }, { trusted: ['pull_request.head.repo.full_name', 'pull_request.user.login'] }, { strict: true, trusted: [] }];
   for (const mode of modes) {
-    try {
-      const v = evalExpr(src, ctx, mode);
-      const ok = v === null || v === undefined || ['string', 'number', 'boolean', 'object'].includes(typeof v)
-        || v === UNKNOWN || v === UNKNOWN_TRUTHY || v === UNKNOWN_FALSY || v instanceof Other;
-      if (!ok) fail(`evalExpr returned a ${typeof v}`);
-    } catch (e) {
-      if (!documentedThrow(e)) throw e;
-    }
+    const r = attempt(() => evalExpr(src, ctx, mode), EXPRESSION_ERRORS);
+    if (r.refused) continue;
+    const v = r.value;
+    const ok = v === null || v === undefined || ['string', 'number', 'boolean', 'object'].includes(typeof v)
+      || v === UNKNOWN || v === UNKNOWN_TRUTHY || v === UNKNOWN_FALSY || v instanceof Other;
+    if (!ok) fail(`evalExpr returned a ${typeof v}`);
   }
-  try {
-    const c = condOf(src, ctx);
-    if (c !== UNKNOWN && typeof c !== 'boolean') fail(`condOf returned ${String(c)}`);
-  } catch (e) {
-    if (!documentedThrow(e)) throw e;
-  }
+  const c = attempt(() => condOf(src, ctx), EXPRESSION_ERRORS);
+  if (!c.refused && c.value !== UNKNOWN && typeof c.value !== 'boolean') fail(`condOf returned ${String(c.value)}`);
 }
 
 function readers(y) {

@@ -6,13 +6,10 @@
 // for a line that holds no dash; and no pattern takes super-linear time on a hostile line (the
 // run reaches libFuzzer's timeout instead).
 import { addedLines, creditHits, dashHits, needsContent, ownDescription } from '../scripts/redline/public-text.mjs';
+import { fail } from './violation.js';
 
 // Built from char codes so the source carries no dash of its own.
 const DASH = new RegExp('[' + String.fromCharCode(0x2013, 0x2014) + ']');
-
-function fail(msg) {
-  throw new Error(msg);
-}
 
 export function fuzz(data) {
   const text = data.toString('utf8');

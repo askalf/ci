@@ -50,12 +50,13 @@ target states the contract it asserts in its header. To run them:
 
 ```bash
 npm ci --prefix .clusterfuzzlite
-FUZZ_SECONDS=60 node fuzz/run.mjs        # every target; FUZZ_ONLY=pin_yaml for one
+FUZZ_ARTIFACT_DIR=fuzz/crashes FUZZ_SECONDS=60 node fuzz/run.mjs   # FUZZ_ONLY=pin_yaml for one target
 ```
 
 `fuzz.yml` runs them weekly, on demand and on a pull request that changes a target or a script one
-imports. A crash writes the reproducing input to `fuzz/crashes/` (an artifact in CI): fix the
-script at its source, add a test and put the input under `fuzz/seeds/<target>/`. A script a target
+imports. A crash writes the reproducing input to `FUZZ_ARTIFACT_DIR` (`fuzz/crashes/` in CI, uploaded
+as an artifact; the working directory when it is unset): fix the script at its source, add a test and
+put the input under `fuzz/seeds/<target>/`, where `node fuzz/seeds.test.mjs` replays it. A script a target
 imports must not need a build step, and a new target is a `fuzz/<name>.fuzz.js` that is also listed in
 `.clusterfuzzlite/build.sh`.
 

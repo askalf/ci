@@ -21,20 +21,12 @@ import {
   missingGrants,
   permissionsOf,
 } from '../scripts/redline/pin.mjs';
+import { attempt, fail } from './violation.js';
 
 const SHA = '0123456789abcdef0123456789abcdef01234567';
 const LEVELS = ['none', 'read', 'write'];
 
-function fail(msg) {
-  throw new Error(msg);
-}
-
-// The refusals the readers document are plain Errors; anything else is a defect in the reader.
-function refusal(e) {
-  return e instanceof Error && e.constructor === Error;
-}
-
-function shapeOf(p) {
+function checkShape(p) {
   if (!p || typeof p !== 'object') fail('permissionsOf did not return an object');
   for (const block of [p.top ?? {}, ...Object.values(p.jobs)]) {
     if (typeof block !== 'object') fail('a permissions block is not an object');
@@ -43,15 +35,12 @@ function shapeOf(p) {
   for (const v of Object.values(p.uses)) if (typeof v !== 'string') fail('a job uses value is not a string');
 }
 
+// What missingGrants answers for a caller and a called workflow, as a comparable string.
 function grantsOf(caller, called) {
-  try {
-    const m = missingGrants(caller, called);
-    if (!Array.isArray(m) || m.some((x) => typeof x !== 'string')) fail('missingGrants did not return a list of strings');
-    return JSON.stringify(m);
-  } catch (e) {
-    if (!refusal(e)) throw e;
-    return 'refused';
-  }
+  const r = attempt(() => missingGrants(caller, called));
+  if (r.refused) return 'refused';
+  if (!Array.isArray(r.value) || r.value.some((x) => typeof x !== 'string')) fail('missingGrants did not return a list of strings');
+  return JSON.stringify(r.value);
 }
 
 export function fuzz(data) {
@@ -67,43 +56,33 @@ export function fuzz(data) {
   const masked = maskPins(caller);
   if (maskPins(masked) !== masked || masked.split('\n').length !== caller.split('\n').length) fail('maskPins is not a stable line-for-line rewrite');
 
-  try {
-    const once = bumpCaller(caller, SHA, 'note');
-    if (typeof once !== 'string' || !once.includes(`redline-ref: ${SHA}`)) fail('bumpCaller left no redline-ref at the new revision');
-    if (!CALLERS.some((c) => once.includes(`uses: ${c.workflow}@${SHA}`))) fail('bumpCaller left no call at the new revision');
-    if (bumpCaller(once, SHA, 'note') !== once) fail('bumpCaller is not idempotent');
-  } catch (e) {
-    if (!refusal(e)) throw e;
+  const once = attempt(() => bumpCaller(caller, SHA, 'note'));
+  if (once.value !== undefined) {
+    if (typeof once.value !== 'string' || !once.value.includes(`redline-ref: ${SHA}`)) fail('bumpCaller left no redline-ref at the new revision');
+    if (!CALLERS.some((c) => once.value.includes(`uses: ${c.workflow}@${SHA}`))) fail('bumpCaller left no call at the new revision');
+    const twice = attempt(() => bumpCaller(once.value, SHA, 'note'));
+    if (twice.value !== once.value) fail('bumpCaller is not idempotent');
   }
 
-  try {
-    shapeOf(permissionsOf(caller));
-    shapeOf(permissionsOf(called));
-  } catch (e) {
-    if (!refusal(e)) throw e;
+  for (const text of [caller, called]) {
+    const p = attempt(() => permissionsOf(text));
+    if (p.value !== undefined) checkShape(p.value);
   }
   grantsOf(caller, called);
 
-  // The same well-formed caller under the fuzzed job name and under an ordinary one.
+  // The same well-formed caller under the fuzzed job name and under an ordinary one. The calling
+  // job is always called `ordinary`; a fuzzed name equal to it would be a duplicate key, not a test.
   const callerFor = (name) => `permissions:\n  contents: read\njobs:\n  ${name}:\n    uses: ${CALLERS[0].workflow}@${SHA}\n    with:\n      redline-ref: ${SHA}\n`;
   // Another job, under the fuzzed name, with a broad block of its own: it grants the calling job nothing.
-  const withOther = (name) => `${callerFor('ordinary')}  ${name}:
-    permissions:
-      pull-requests: write
-    runs-on: x
-`;
+  const withOther = (name) => `${callerFor('ordinary')}  ${name}:\n    permissions:\n      pull-requests: write\n    runs-on: x\n`;
   const calledNeeds = 'permissions:\n  contents: read\n  pull-requests: write\njobs:\n  review:\n    runs-on: x\n';
   const reference = grantsOf(callerFor('ordinary'), calledNeeds);
   for (const name of [job, ...Object.getOwnPropertyNames(Object.prototype)]) {
-    if (!/^[\w-]+$/.test(name)) continue;
+    if (!/^[\w-]+$/.test(name) || name === 'ordinary') continue;
     if (grantsOf(callerFor(name), calledNeeds) !== reference) fail(`a job called ${name} is judged differently from an ordinary one`);
     if (grantsOf(withOther(name), calledNeeds) !== reference) fail(`another job called ${name} changed what the calling job is granted`);
   }
 
-  try {
-    const generated = fixCallerYaml(SHA, job, 'note');
-    if (typeof generated !== 'string' || /[\r]/.test(generated)) fail('fixCallerYaml returned malformed text');
-  } catch (e) {
-    if (!refusal(e)) throw e;
-  }
+  const generated = attempt(() => fixCallerYaml(SHA, job, 'note'));
+  if (generated.value !== undefined && (typeof generated.value !== 'string' || generated.value.includes('\r'))) fail('fixCallerYaml returned malformed text');
 }

@@ -161,6 +161,10 @@ const job = (id, head) => `\n  ${id}:\n${head}    steps:\n      - run: echo ${id
   check('an expression is kept as one', d.expr === 'matrix.os' && d.labels.length === 0);
   const withMatrix = (m) => jobsOf(`jobs:\n  m:\n    strategy:\n      matrix:\n${m}\n    runs-on: \${{ matrix.k0 }}\n`)[0];
   check('a matrix of exactly 256 combinations is expanded', withMatrix(bigMatrix(4, 4)).combos.length === 256);
+  const merged = withMatrix(`${bigMatrix(4, 4)}\n        include:\n          - extra: x`).combos;
+  check('256 base combinations and an include entry that merges into them are still expanded, with the extra key', merged.length > 256 && merged.some((c) => c.extra === 'x' && c.k0 === 0));
+  const entries = Array.from({ length: 257 }, (_, i) => `          - extra: v${i}`).join('\n');
+  check('an include list longer than 256 is read as unreadable', withMatrix(`        k0: [0]\n        include:\n${entries}`).combos.length === 1);
   check('a matrix of 257 is read as unreadable, without expanding it', withMatrix(bigMatrix(1, 257)).combos.length === 1 && withMatrix(bigMatrix(12, 6)).combos.length === 1);
   check('a # inside quotes is not a comment', uncomment("x == '## a' # b") === "x == '## a'");
 }

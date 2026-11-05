@@ -25,13 +25,10 @@ import {
   zipEntry,
 } from '../scripts/redline/post.mjs';
 import { verdictProblem } from '../scripts/redline/review.mjs';
+import { fail } from './violation.js';
 
 const SHA = '0123456789abcdef0123456789abcdef01234567';
 const DECISIONS = ['skip', 'refuse', 'retry', 'post'];
-
-function fail(msg) {
-  throw new Error(msg);
-}
 
 function fields(data) {
   const out = [];
