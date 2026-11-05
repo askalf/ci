@@ -290,6 +290,8 @@ const unwrap = (s) => (/^\$\{\{\s*([\s\S]*?)\s*\}\}$/.exec(s.trim())?.[1] ?? s.t
 
 /** Marks a runs-on this check cannot read; it is never hosted and never ours, so it fails. */
 export const UNREADABLE = '<unreadable>';
+/** The most jobs one matrix may generate in Actions; a larger one is a workflow Actions refuses, read as unreadable here. */
+export const MATRIX_MAX_JOBS = 256;
 const indentOf = (l) => /^ */.exec(l)[0].length;
 const content = (l) => l.trim() !== '' && !/^\s*#/.test(l);
 
@@ -405,7 +407,8 @@ export function jobsOf(y) {
       };
       const keysSeen = new Set();
       for (const l of mx.under.filter((x) => indentOf(x) === keyIndent)) {
-        const m = /^\s*([\w-]+):\s*(.*)$/.exec(l);
+        // A key is `name:` then a space or the line's end, as valueIn reads it; `name:x` is no key.
+        const m = /^\s*([\w-]+):(?:\s.*)?$/.exec(l);
         if (!m || keysSeen.has(m[1])) { readable = false; continue; }
         keysSeen.add(m[1]);
         const v = valueIn(mx.under, m[1], keyIndent);
@@ -436,6 +439,9 @@ export function jobsOf(y) {
     // null there, as in Actions. An unreadable matrix is one empty combination, so any matrix key
     // a strict expression reads is unknown.
     let combos = [{}];
+    // Actions refuses a matrix of more than 256 jobs, and every combination is built below, so the
+    // product is counted first: a few lines of values must not cost more time or memory than that.
+    if ((Object.keys(matrix).length ? Object.values(matrix).reduce((n, vs) => n * vs.length, 1) : 0) + include.length > MATRIX_MAX_JOBS) readable = false;
     if (readable) {
       const keys = [...new Set([...Object.keys(matrix), ...include.flatMap(Object.keys)])];
       const hasBase = Object.keys(matrix).length > 0;

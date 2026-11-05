@@ -13,6 +13,15 @@ names the commit's date and the pull request it came from.
 
 ## November 2026
 
+- The scripts' input parsers are fuzzed with Jazzer.js: the pull request text and patches the public
+  text check reads, the workflow files the fleet-status check reads, the caller workflows the pin
+  bump rewrites, and the run record, patch and artifact the verdict post reads. `fuzz.yml` runs
+  every target weekly, on demand and, for a change to a target or the script under it, on a pull
+  request; `cflite.yml` is a coverage report, because ClusterFuzzLite cannot fuzz JavaScript. A
+  job named like a built-in property (`constructor`, `toString`, `__proto__`) in a caller
+  workflow is read as a job by the pin bump's permission check, not as that property.
+  The fleet-status check reads a matrix key with no space after its colon, and a matrix of more than
+  256 jobs (which Actions refuses), as unreadable, where it threw or ran out of time.
 - This repository's own pull requests run the public text check. `public-text.yml` here is the
   called workflow, so `public-text-check.yml` calls it from the checkout and reports the same
   `public-text / check` a caller does, with the script fetched at the base commit.

@@ -118,6 +118,20 @@ console.log('\n  a caller must grant what the called workflow asks for');
       && throws(() => missingGrants(`${fullTop}jobs:\n  a:\n    runs-on: x\n`, called)));
   check('a caller whose calling job cannot be found throws instead of falling back to the top level',
     throws(() => missingGrants(`${fullTop}jobs:\n  review: {permissions: {}, uses: askalf/ci/.github/workflows/redline-review.yml@${NEWSHA}}\n`, called)));
+  // A job name is text from the file: one spelled like a property every object has must be read as a
+  // job, not as that property (an inherited value standing in for the job's own grant, or a
+  // __proto__ key replacing the map's prototype).
+  const named = (job, perms = '') => `${fullTop}jobs:\n  ${job}:\n${perms}    uses: askalf/ci/.github/workflows/redline-review.yml@${NEWSHA}\n`;
+  const PROPS = ['constructor', 'toString', 'hasOwnProperty', '__proto__', 'valueOf'];
+  check('a calling job named like a built-in property is granted the top level, as any other job is',
+    PROPS.every((job) => missingGrants(named(job), called).length === 0), PROPS.map((job) => `${job}: ${missingGrants(named(job), called).join()}`).join(' | '));
+  check('and its own block, when it has one, is the grant',
+    PROPS.every((job) => missingGrants(named(job, '    permissions: {}\n'), called).length === 3));
+  check('the maps permissionsOf returns hold the file\'s jobs as own keys, whatever they are called',
+    PROPS.every((job) => {
+      const p = permissionsOf(named(job, '    permissions: {contents: read}\n'));
+      return Object.keys(p.jobs).join() === job && Object.keys(p.uses).join() === job && Object.getPrototypeOf(p.jobs) === Object.prototype;
+    }));
   check('a called workflow whose job is written inline throws instead of asking for nothing',
     throws(() => missingGrants(at('permissions: {}\n'), 'on:\n  workflow_call:\njobs:\n  r: {runs-on: ubuntu-latest, permissions: {actions: read}, steps: [{run: echo ok}]}\n'))
       && throws(() => missingGrants(at('permissions: {}\n'), 'on:\n  workflow_call:\njobs: {r: {permissions: {actions: read}}}\n'))
