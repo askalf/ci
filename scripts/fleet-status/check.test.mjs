@@ -17,6 +17,8 @@ function check(name, cond, detail = '') {
 }
 
 const FIXTURE = fileURLToPath(new URL('./test-fixtures/caller', import.meta.url));
+/** `keys` matrix keys of `values` values each, as block lines: values ** keys combinations. */
+const bigMatrix = (keys, values) => Array.from({ length: keys }, (_, i) => `        k${i}: [${Array.from({ length: values }, (_, j) => j).join(', ')}]`).join('\n');
 const failing = (results) => results.filter((r) => !r.ok).map((r) => r.name);
 const scratch = [];
 /** A copy of the fixture with `edit(file, text)` applied to the named files. */
@@ -157,6 +159,13 @@ const job = (id, head) => `\n  ${id}:\n${head}    steps:\n      - run: echo ${id
   check('a plain if: drops its comment; a block list is read', b.cond === "github.event_name == 'push'" && b.labels.join() === 'self-hosted,example-build');
   check('a reusable-workflow job has no runs-on', !c.hasRunsOn);
   check('an expression is kept as one', d.expr === 'matrix.os' && d.labels.length === 0);
+  const withMatrix = (m) => jobsOf(`jobs:\n  m:\n    strategy:\n      matrix:\n${m}\n    runs-on: \${{ matrix.k0 }}\n`)[0];
+  check('a matrix of exactly 256 combinations is expanded', withMatrix(bigMatrix(4, 4)).combos.length === 256);
+  const merged = withMatrix(`${bigMatrix(4, 4)}\n        include:\n          - extra: x`).combos;
+  check('256 base combinations and an include entry that merges into them are still expanded, with the extra key', merged.length > 256 && merged.some((c) => c.extra === 'x' && c.k0 === 0));
+  const entries = Array.from({ length: 257 }, (_, i) => `          - extra: v${i}`).join('\n');
+  check('an include list longer than 256 is read as unreadable', withMatrix(`        k0: [0]\n        include:\n${entries}`).combos.length === 1);
+  check('a matrix of 257 is read as unreadable, without expanding it', withMatrix(bigMatrix(1, 257)).combos.length === 1 && withMatrix(bigMatrix(12, 6)).combos.length === 1);
   check('a # inside quotes is not a comment', uncomment("x == '## a' # b") === "x == '## a'");
 }
 {
@@ -227,6 +236,9 @@ const cases = [
   ['a block-list boolean matrix value that sends a fork PR to our runners', { 'ci.yml': (y) => `${y}\n  extra:\n    strategy:\n      matrix:\n        flag:\n          - false\n    runs-on: \${{ matrix.flag && 'ubuntu-latest' || fromJSON('["self-hosted","example-exec"]') }}\n    steps:\n      - run: echo\n` }, /ci\.yml extra: only a job that never runs PR code uses it/],
   ['two include entries that together send a fork PR to our runners', { 'ci.yml': (y) => `${y}\n  extra:\n    strategy:\n      matrix:\n        os: [ubuntu-latest]\n        include:\n          - a: 'yes'\n          - b: 'yes'\n    runs-on: \${{ matrix.a == 'yes' && matrix.b == 'yes' && fromJSON('["self-hosted","example-exec"]') || 'ubuntu-latest' }}\n    steps:\n      - run: echo\n` }, /ci\.yml extra: only a job that never runs PR code uses it/],
   ['a matrix value YAML versions read differently', { 'ci.yml': (y) => `${y}\n  extra:\n    strategy:\n      matrix:\n        flag: [no]\n    runs-on: \${{ matrix.flag && 'ubuntu-latest' || fromJSON('["self-hosted","example-exec"]') }}\n    steps:\n      - run: echo\n` }, /not: ci\.yml extra: <unreadable>/],
+  ['a matrix key with no space after its colon', { 'ci.yml': (y) => `${y}\n  extra:\n    strategy:\n      matrix:\n        os:ubuntu-latest\n    runs-on: \${{ matrix.os }}\n    steps:\n      - run: echo\n` }, /not: ci\.yml extra: <unreadable>/],
+  ['a matrix of more jobs than Actions allows', { 'ci.yml': (y) => `${y}\n  extra:\n    strategy:\n      matrix:\n${bigMatrix(12, 6)}\n    runs-on: \${{ matrix.k0 }}\n    steps:\n      - run: echo\n` }, /not: ci\.yml extra: <unreadable>/],
+  ['an include key with no space after its colon', { 'ci.yml': (y) => `${y}\n  extra:\n    strategy:\n      matrix:\n        os: [ubuntu-latest]\n        include:x\n    runs-on: \${{ matrix.os }}\n    steps:\n      - run: echo\n` }, /not: ci\.yml extra: <unreadable>/],
   ['an include entry with a nested value', { 'ci.yml': (y) => `${y}\n  extra:\n    strategy:\n      matrix:\n        os: [ubuntu-latest]\n        include:\n          - os: ubuntu-latest\n            cfg:\n              runner: other-exec\n    runs-on: \${{ matrix.os }}\n    steps:\n      - run: echo\n` }, /not: ci\.yml extra: <unreadable>/],
   ['a status token that cannot write statuses', { [STATUS]: (y) => y.replace('      statuses: write', '      statuses: read') }, /status token reads what the action reads and writes statuses/],
   ['a status token that cannot read checks', { [STATUS]: (y) => y.replace('      checks: read\n', '') }, /status token reads what the action reads and writes statuses/],

@@ -41,6 +41,8 @@ jobs:
       - run: node scripts/fleet-status/check.test.mjs
       # The pin bump workflow's bump step, run as the workflow runs it, against a fake gh.
       - run: node scripts/redline/pin-bump.test.mjs
+      # Every fuzz seed through its target, so a target that rots fails here and not only in the weekly fuzz run.
+      - run: node fuzz/seeds.test.mjs
       # The real run-account tests need a second account this job may sudo to. A host that
       # provides one (redline-run, with a sudoers line for the runner's account) lends it; on
       # GitHub's runners, where the job has passwordless sudo, it is made; anywhere else they skip

@@ -12,6 +12,8 @@ const RUNS = [
   ['scripts/fleet-status/fleet-status.test.mjs'],
   ['scripts/fleet-status/check.test.mjs'],
   ['scripts/redline/pin-bump.test.mjs'],
+  // Every fuzz seed through its target, and the helpers that keep a broken contract apart from a refusal.
+  ['fuzz/seeds.test.mjs'],
   // The run-account tests in fix.test.mjs need a second account to sudo to and skip without one.
   ['scripts/redline/fix.test.mjs'],
   ['scripts/redline/dump-tools.mjs', '--check'],

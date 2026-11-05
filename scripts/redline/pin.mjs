@@ -257,6 +257,9 @@ function uncommented(l) {
   return l;
 }
 const valueOf = (l) => uncommented(l).split(':').slice(1).join(':').trim();
+// Sets a key the file chose (a job name) as an own property. A plain assignment of `__proto__` would
+// replace the map's prototype with the value, and every job read afterwards would inherit from it.
+const setOwn = (map, key, value) => Object.defineProperty(map, key, { value, enumerable: true, writable: true, configurable: true });
 
 const PLAIN_KEY = /^[A-Za-z0-9_][A-Za-z0-9_.\/-]*$/;
 const QUOTED = /^(?:'(?:[^']|'')*'|"(?:[^"\\]|\\.)*")$/;
@@ -387,8 +390,8 @@ export function permissionsOf(yaml) {
     }
     if (keyPad < 0) keyPad = pad;
     if (pad === keyPad && keyOf(l) === '<<') refuse(i, 'a merge key');
-    if (pad === keyPad && keyOf(l) === 'permissions') jobs[job] = readPermissions(lines, i);
-    if (pad === keyPad && keyOf(l) === 'uses') uses[job] = unquote(valueOf(l));
+    if (pad === keyPad && keyOf(l) === 'permissions') setOwn(jobs, job, readPermissions(lines, i));
+    if (pad === keyPad && keyOf(l) === 'uses') setOwn(uses, job, unquote(valueOf(l)));
   });
   return { top, jobs, uses };
 }
@@ -409,7 +412,8 @@ export function missingGrants(callerYaml, calledYaml) {
   const calling = Object.entries(caller.uses).filter(([, v]) => CALLERS.some((c) => v.startsWith(`${c.workflow}@`)));
   if (calling.length !== 1) throw new Error(`${calling.length === 0 ? 'no' : `${calling.length}`} job-level ${CALLERS.map((c) => c.workflow).join(' or ')} call(s) this can read; expected exactly one`);
   const callingJob = calling[0][0];
-  const grant = caller.jobs[callingJob] ?? caller.top;
+  // Only a block the job itself wrote counts: a job named `constructor` has no inherited one.
+  const grant = Object.hasOwn(caller.jobs, callingJob) ? caller.jobs[callingJob] : caller.top;
   if (grant === null) return [];
   const called = permissionsOf(calledYaml);
   const asks = {};
