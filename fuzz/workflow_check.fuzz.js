@@ -17,7 +17,6 @@ import {
   UNKNOWN,
   UNKNOWN_FALSY,
   UNKNOWN_TRUTHY,
-  UNREADABLE,
   checkCaller,
   condOf,
   evalExpr,

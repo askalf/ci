@@ -24,7 +24,7 @@ console.log('\n  a broken contract is never read as a refusal');
   check('a SyntaxError is a refusal only where the caller names it', !isRefusal(new SyntaxError('x')) && isRefusal(new SyntaxError('x'), [SyntaxError]));
   check('attempt returns the value, or the refusal', attempt(() => 7).value === 7 && attempt(() => { throw new Error('no'); }).refused.message === 'no');
   check('an assertion that fires inside attempt escapes it', thrown(() => attempt(() => fail('contract broken'))) instanceof Violation);
-  check('so does a defect in the code under test', thrown(() => attempt(() => null.x)) instanceof TypeError);
+  check('so does a defect in the code under test', thrown(() => attempt(() => Reflect.get(null, 'x'))) instanceof TypeError);
 }
 
 console.log('\n  every seed passes its target');
