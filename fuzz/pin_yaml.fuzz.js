@@ -78,7 +78,9 @@ export function fuzz(data) {
   const calledNeeds = 'permissions:\n  contents: read\n  pull-requests: write\njobs:\n  review:\n    runs-on: x\n';
   const reference = grantsOf(callerFor('ordinary'), calledNeeds);
   for (const name of [job, ...Object.getOwnPropertyNames(Object.prototype)]) {
-    if (!/^[\w-]+$/.test(name) || name === 'ordinary') continue;
+    // Only a valid job id (a letter or underscore, then letters, digits, dashes and underscores):
+    // a name the reader rightly refuses as a key is not a counterexample.
+    if (!/^[A-Za-z_][\w-]*$/.test(name) || name === 'ordinary') continue;
     if (grantsOf(callerFor(name), calledNeeds) !== reference) fail(`a job called ${name} is judged differently from an ordinary one`);
     if (grantsOf(withOther(name), calledNeeds) !== reference) fail(`another job called ${name} changed what the calling job is granted`);
   }
