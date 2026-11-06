@@ -2,6 +2,7 @@
 
 [![CI measured](https://img.shields.io/endpoint?url=https%3A%2F%2Fpitlane.askalf.org%2Fbadge.json)](https://pitlane.askalf.org/)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/askalf/ci/badge)](https://scorecard.dev/viewer/?uri=github.com/askalf/ci)
+[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/16411/badge)](https://www.bestpractices.dev/projects/16411)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 The gate every fix lands through: the reusable workflows and composite actions a pull request on
