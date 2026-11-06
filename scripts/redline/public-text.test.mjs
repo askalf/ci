@@ -167,13 +167,16 @@ console.log('check, against a stubbed GitHub');
   check('one dash in normal text passes (0), with nothing flagged', normal.code === 0 && normal.annotations.length === 0 && /within the limit/.test(normal.summary));
   const under = await checkPr(world((ref) => text(ref === MB ? 'row\n' : `row\n${rows(4)}`)), 5);
   check('four dashes pass (0)', under.code === 0);
-  const clean = await checkPr(world((ref) => text(ref === MB ? `row ${EM} one\n` : `row ${EM} one\nrow two\n`)), 5);
-  check('read whole with only an old dash, it passes (0)', clean.code === 0 && /within the limit/.test(clean.summary));
-  // The merge base holds a dashed line the PR keeps; the base branch deleted it after the PR branched.
-  const diverged = (ref) => text(ref === MB ? `row ${EM} one\nrow\n` : ref === PR.base.sha ? 'row\n' : `row ${EM} one\nrow\nrow two\n`);
+  const clean = await checkPr(world((ref) => text(ref === MB ? rows(5) : `${rows(5)}row two\n`)), 5);
+  check('read whole with only old dashes, past the limit if they counted, it passes (0)', clean.code === 0 && /within the limit/.test(clean.summary));
+  // The merge base holds dashed lines the PR keeps, enough to fail if they counted; the base branch
+  // deleted them after the PR branched.
+  const diverged = (ref) => text(ref === MB ? `${rows(5)}row\n` : ref === PR.base.sha ? 'row\n' : `${rows(5)}row\nrow two\n`);
   const kept = await checkPr(world(diverged), 5);
-  check('read whole against the merge base, not the moved base tip: a kept dashed line is not added (0)',
+  check('read whole against the merge base, not the moved base tip: kept dashed lines are not added (0)',
     kept.code === 0 && /within the limit/.test(kept.summary));
+  const baseTip = await checkPr(world(diverged, PR, PR.base.sha), 5);
+  check('the same file read against the base tip would count them (1), so the case above tells the two apart', baseTip.code === 1);
   // Both branches added the same dashed line after the PR branched: the base tip has it, the merge base does not.
   const bothAdded = (ref) => text(ref === MB ? 'row\n' : `row\n${rows(5)}`);
   const twice = await checkPr(world(bothAdded), 5);
