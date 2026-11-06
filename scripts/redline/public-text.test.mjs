@@ -1,5 +1,5 @@
 // Tests for scripts/redline/public-text.mjs. Run: node scripts/redline/public-text.test.mjs
-import { addedByContent, addedLines, check as checkPr, creditHits, dashHits, needsContent, ownDescription } from './public-text.mjs';
+import { addedByContent, addedLines, check as checkPr, creditHits, dashHits, fromFork, needsContent, overused, ownDescription } from './public-text.mjs';
 
 let pass = 0;
 let fail = 0;
@@ -33,6 +33,23 @@ console.log('addedLines');
   check('no patch adds nothing', addedLines(undefined).length === 0);
 }
 
+console.log('overused');
+{
+  check('four dashed lines are normal text, however short the PR', !overused(4, 4));
+  check('five dashed lines in a short PR are overuse', overused(5, 5) && overused(5, 40));
+  check('five dashed lines in a long PR are normal text', !overused(5, 1000));
+  check('exactly one line in twenty is under the limit', !overused(50, 1000));
+  check('more than one line in twenty is overuse', overused(51, 1000));
+  check('nothing read is not overuse', !overused(0, 0));
+}
+
+console.log('fromFork');
+{
+  check('a branch of this repository is not a fork', !fromFork({ head: { repo: { full_name: 'askalf/x' } } }, 'askalf/x'));
+  check('another repository is a fork', fromFork({ head: { repo: { full_name: 'someone/x' } } }, 'askalf/x'));
+  check('a deleted fork is a fork', fromFork({ head: { repo: null } }, 'askalf/x'));
+}
+
 console.log('dashHits');
 {
   const files = [
@@ -62,6 +79,7 @@ console.log('dashHits');
   check('PR text hits are not file hits', !hits.find((h) => h.where === 'PR title').file);
   check('a changed file with no patch is reported unread, an image with no change is not', JSON.stringify(unread) === '["big.json"]');
   check('a clean PR has no hits', dashHits({ title: 'fix: retry once', body: null, commits: [], files: [] }).hits.length === 0);
+  check('total counts the lines read and leaves blank ones out', dashHits({ title: 'a', body: 'b\n\nc', commits: [], files: [] }).total === 3);
 }
 
 console.log('creditHits');
@@ -116,7 +134,7 @@ console.log('a text file with no patch');
 
 console.log('check, against a stubbed GitHub');
 {
-  const PR = { title: 'docs: grow the table', body: 'More rows.', base: { sha: 'b'.repeat(40) }, head: { sha: 'h'.repeat(40) } };
+  const PR = { title: 'docs: grow the table', body: 'More rows.', base: { sha: 'b'.repeat(40) }, head: { sha: 'h'.repeat(40), repo: { full_name: 'askalf/x' } } };
   // The merge base of the PR's base and head: the base branch has moved on from it.
   const MB = 'a'.repeat(40);
   const big = { filename: 'docs/table.md', status: 'modified', changes: 9000 };
@@ -141,17 +159,26 @@ console.log('check, against a stubbed GitHub');
   const unreadable = await checkPr(world(() => down), 5);
   check('a text file with no patch that cannot be read fails the check (2), never passes',
     unreadable.code === 2 && /Not every added line could be read: docs\/table\.md/.test(unreadable.summary) && unreadable.annotations.some((a) => a.includes('file=docs/table.md')));
-  const dashed = await checkPr(world((ref) => text(ref === MB ? 'row\n' : `row\nrow ${EM} two\n`)), 5);
-  check('read whole, its added dash fails the check (1) at its line', dashed.code === 1 && dashed.summary.includes('docs/table.md:2'));
-  const clean = await checkPr(world((ref) => text(ref === MB ? `row ${EM} one\n` : `row ${EM} one\nrow two\n`)), 5);
-  check('read whole with only an old dash, it passes (0)', clean.code === 0 && /No added line/.test(clean.summary));
-  // The merge base holds a dashed line the PR keeps; the base branch deleted it after the PR branched.
-  const diverged = (ref) => text(ref === MB ? `row ${EM} one\nrow\n` : ref === PR.base.sha ? 'row\n' : `row ${EM} one\nrow\nrow two\n`);
+  const rows = (n) => Array.from({ length: n }, (_, i) => `row ${EM} ${i}\n`).join('');
+  const dashed = await checkPr(world((ref) => text(ref === MB ? 'row\n' : `row\n${rows(5)}`)), 5);
+  check('read whole, five added dashes fail the check (1), each at its line',
+    dashed.code === 1 && dashed.summary.includes('docs/table.md:2') && dashed.summary.includes('docs/table.md:6') && /5 of 8 added lines/.test(dashed.summary));
+  const normal = await checkPr(world((ref) => text(ref === MB ? 'row\n' : `row\n${rows(1)}`)), 5);
+  check('one dash in normal text passes (0), with nothing flagged', normal.code === 0 && normal.annotations.length === 0 && /within the limit/.test(normal.summary));
+  const under = await checkPr(world((ref) => text(ref === MB ? 'row\n' : `row\n${rows(4)}`)), 5);
+  check('four dashes pass (0)', under.code === 0);
+  const clean = await checkPr(world((ref) => text(ref === MB ? rows(5) : `${rows(5)}row two\n`)), 5);
+  check('read whole with only old dashes, past the limit if they counted, it passes (0)', clean.code === 0 && /within the limit/.test(clean.summary));
+  // The merge base holds dashed lines the PR keeps, enough to fail if they counted; the base branch
+  // deleted them after the PR branched.
+  const diverged = (ref) => text(ref === MB ? `${rows(5)}row\n` : ref === PR.base.sha ? 'row\n' : `${rows(5)}row\nrow two\n`);
   const kept = await checkPr(world(diverged), 5);
-  check('read whole against the merge base, not the moved base tip: a kept dashed line is not added (0)',
-    kept.code === 0 && /No added line/.test(kept.summary));
+  check('read whole against the merge base, not the moved base tip: kept dashed lines are not added (0)',
+    kept.code === 0 && /within the limit/.test(kept.summary));
+  const baseTip = await checkPr(world(diverged, PR, PR.base.sha), 5);
+  check('the same file read against the base tip would count them (1), so the case above tells the two apart', baseTip.code === 1);
   // Both branches added the same dashed line after the PR branched: the base tip has it, the merge base does not.
-  const bothAdded = (ref) => text(ref === MB ? 'row\n' : `row\nrow ${EM} both\n`);
+  const bothAdded = (ref) => text(ref === MB ? 'row\n' : `row\n${rows(5)}`);
   const twice = await checkPr(world(bothAdded), 5);
   check('read whole against the merge base: a dashed line the base branch also added still counts for the PR (1)',
     twice.code === 1 && twice.summary.includes('docs/table.md:2'));
@@ -180,11 +207,20 @@ console.log('check, against a stubbed GitHub');
   const bump = { ...PR, changed_files: 1, commits: 1, user: { login: 'dependabot[bot]', type: 'Bot' }, body: `Release notes\n<li>fix: keys ${EM} values</li>\nGenerated with Claude Code` };
   const quoted = await checkPr(world(cleanRead, bump), 5);
   check('a Dependabot description quoting upstream dashes and credits passes (0)', quoted.code === 0);
-  const bumpTitle = await checkPr(world(cleanRead, { ...bump, title: `chore(deps): bump x ${EM} y` }), 5);
+  const bumpTitle = await checkPr(world((ref) => text(ref === MB ? 'row\n' : `row\n${rows(4)}`), { ...bump, title: `chore(deps): bump x ${EM} y` }), 5);
   check('a Dependabot title is still checked (1)', bumpTitle.code === 1 && bumpTitle.summary.includes('PR title, line 1'));
   const lookalike = await checkPr(world(cleanRead, { ...bump, user: { login: 'dependabot[bot]', type: 'User' } }), 5);
   check('an account named like Dependabot but not a bot is checked (1)', lookalike.code === 1);
   check('ownDescription: a person keeps the description', ownDescription({ user: { login: 'askalf', type: 'User' }, body: 'x' }) === 'x');
+  const fork = { ...PR, head: { sha: PR.head.sha, repo: { full_name: 'someone/x' } }, changed_files: 1, commits: 1 };
+  const forked = await checkPr(world((ref) => text(ref === MB ? 'row\n' : `row\n${rows(30)}`), { ...fork, title: `fix: x ${EM} y`, body: `a ${EM} b\nc ${EM} d` }), 5);
+  check('a fork full of dashes passes (0), and the summary says they were not read', forked.code === 0 && /not read on a fork/.test(forked.summary));
+  const forkDown = await checkPr(world(() => down, { ...fork, changed_files: 3500 }), 5);
+  check('a fork\'s files are not read, so one too large to patch or past the list is no failure (0)', forkDown.code === 0);
+  const forkCredit = await checkPr(world(cleanRead, { ...fork, body: 'Generated with Claude Code' }), 5);
+  check('a credit on a fork still fails (1)', forkCredit.code === 1 && /credit a model/.test(forkCredit.summary));
+  const forkCommits = await checkPr(world(cleanRead, { ...fork, commits: 300 }), 5);
+  check('a fork\'s commit messages past the list are still incomplete (2), since credits are read there', forkCommits.code === 2);
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

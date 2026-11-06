@@ -1,21 +1,24 @@
 #!/usr/bin/env node
-// Public text: fails a pull request that adds an em or en dash (U+2014, U+2013) to what people
+// Public text: fails a pull request that overuses em or en dashes (U+2014, U+2013) in what people
 // read, or whose title, description or a commit message credits a model or an AI tool (a
-// co-author trailer, a "generated with" footer, a session link). The review leaves dashes to this
-// check and still blocks a credit itself; this check reads every line, so each costs one quick
-// failing check instead of a review round, and every one shows in one run. Dashes are read in the added lines of each changed file, the PR
-// title and description, and the commit messages; credits only in the PR text and the commit
-// messages, since code and docs may name these tools for other reasons. Lines the PR does not add
-// are never read, so a file that already holds dashes can still be changed. A file the base
-// commit marks redline-protected (captured data, see review.mjs) is skipped.
+// co-author trailer, a "generated with" footer, a session link). A dash or two in normal text
+// passes: the limit is for a dash in sentence after sentence, the habit of generated writing. A
+// pull request from a fork is someone else's writing, so its dashes are not read at all. The review
+// leaves dashes to this check and still blocks a credit itself; this check reads every line, so
+// each costs one quick failing check instead of a review round, and every one shows in one run.
+// Dashes are read in the added lines of each changed file, the PR title and description, and the
+// commit messages; credits only in the PR text and the commit messages, since code and docs may
+// name these tools for other reasons. Lines the PR does not add are never read, so a file that
+// already holds dashes can still be changed. A file the base commit marks redline-protected
+// (captured data, see review.mjs) is skipped.
 //
 // CLI: REPO=owner/name PR=<number> GH_READ_TOKEN=<token> node scripts/redline/public-text.mjs
 // A text file too large for GitHub to send a patch is read whole at the merge base and the head
 // and diffed with git, the same two sides the PR's own diff compares. A PR with more changed files
 // than the files API lists (it stops at 3,000), or more commits than the commits API lists (it
 // stops at 250), is incomplete and fails.
-// Exit 0 when nothing adds a dash or a credit, 1 when something does, 2 when the PR or a changed
-// file could not be read: an unread file never passes.
+// Exit 0 when dashes are within the limit and nothing credits a tool, 1 when either fails, 2 when
+// the PR or a changed file could not be read: an unread file never passes.
 
 import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -26,6 +29,10 @@ import { gh, ghAll, baseAttributes, protectedIn, withRetry } from './review.mjs'
 
 // Built from char codes so the source carries no dash of its own.
 const DASH = new RegExp('[' + String.fromCharCode(0x2013, 0x2014) + ']');
+// Overuse: at least this many added lines carry a dash, and they are more than this share of the
+// added lines read. Anything under either is normal punctuation.
+const OVERUSE_LINES = 5;
+const OVERUSE_SHARE = 0.05;
 const TOOL = '(claude|anthropic|openai|chatgpt|gpt|copilot|codex|gemini)';
 const CREDIT = [
   new RegExp(`\\bgenerated (with|by) \\[?${TOOL}\\b`, 'i'),
@@ -61,6 +68,16 @@ function creditsCoAuthor(line) {
   const m = /^\s*co-authored-by:\s*(.*?)\s*(?:<([^>]*)>)?\s*$/i.exec(line);
   if (!m) return false;
   return toolName(m[1]) || TOOL_ADDRESS.some((re) => re.test((m[2] ?? '').trim().toLowerCase()));
+}
+
+/** Whether `dashed` of `total` added lines is overuse. Pure. */
+export function overused(dashed, total) {
+  return dashed >= OVERUSE_LINES && dashed / total > OVERUSE_SHARE;
+}
+
+/** Whether the PR comes from outside `repo`: a fork, or a fork deleted since. Pure. */
+export function fromFork(pr, repo) {
+  return pr?.head?.repo?.full_name !== repo;
 }
 
 /** Pushes { where, line, text } onto `hits` for each line of `text` that `test` accepts. */
@@ -129,12 +146,14 @@ export function needsContent(files, protectedPaths = new Set()) {
 /**
  * Every added dash as { where, line, text, file }, file set for a changed file's line, plus
  * `unread`: the files with no patch whose base and head `contents` (filename to { base, head },
- * from needsContent) could not be read. A head holding a NUL byte is binary and skipped. Runs git
- * for a file read whole (addedByContent); otherwise pure.
+ * from needsContent) could not be read, and `total`: the added lines read, blank ones left out. A
+ * head holding a NUL byte is binary and skipped. Runs git for a file read whole (addedByContent);
+ * otherwise pure.
  */
 export function dashHits({ title = '', body = '', commits = [], files = [], protectedPaths = new Set(), contents = new Map() }) {
   const hits = [];
-  const dashed = (t) => DASH.test(t);
+  let total = 0;
+  const dashed = (t) => { if (t.trim()) total++; return DASH.test(t); };
   scanLines(hits, 'PR title', title, dashed);
   scanLines(hits, 'PR description', body, dashed);
   for (const c of commits) scanLines(hits, `commit ${String(c.sha).slice(0, 7)} message`, c.commit?.message, dashed);
@@ -151,9 +170,9 @@ export function dashHits({ title = '', body = '', commits = [], files = [], prot
       if (c.head.includes('\0')) continue;
       added = addedByContent(c.base, c.head);
     }
-    for (const a of added) if (DASH.test(a.text)) hits.push({ where: f.filename, line: a.line, text: a.text, file: true });
+    for (const a of added) if (dashed(a.text)) hits.push({ where: f.filename, line: a.line, text: a.text, file: true });
   }
-  return { hits, unread };
+  return { hits, unread, total };
 }
 
 /** A file's text at `ref`, '' when it is not there (404), or null when it could not be read. */
@@ -195,12 +214,14 @@ export function ownDescription(pr) {
 }
 
 /**
- * Checks PR `n` and returns { code, summary, annotations }: code 0 clean, 1 a dash, 2 a changed file
- * or a commit message that could not be read or was not listed. ctx: { repo, readToken, fetch, sleep, now }.
+ * Checks PR `n` and returns { code, summary, annotations }: code 0 clean, 1 dash overuse or a credit,
+ * 2 a changed file or a commit message that could not be read or was not listed. A fork's files are
+ * not fetched, since only dashes are read in them. ctx: { repo, readToken, fetch, sleep, now }.
  */
 export async function check(ctx, n) {
   const pr = await gh(ctx, `/repos/${ctx.repo}/pulls/${n}`);
-  const files = await ghAll(ctx, `/repos/${ctx.repo}/pulls/${n}/files`);
+  const fork = fromFork(pr, ctx.repo);
+  const files = fork ? [] : await ghAll(ctx, `/repos/${ctx.repo}/pulls/${n}/files`);
   const commits = await ghAll(ctx, `/repos/${ctx.repo}/pulls/${n}/commits`, 3);
   const protectedPaths = protectedIn(await baseAttributes(ctx, pr), files.map((f) => f.filename));
   const contents = new Map();
@@ -212,9 +233,11 @@ export async function check(ctx, n) {
     if (base !== null && head !== null) contents.set(f.filename, { base, head });
   }
   const body = ownDescription(pr);
-  const { hits, unread } = dashHits({ title: pr.title, body, commits, files, protectedPaths, contents });
+  const read = fork ? { hits: [], unread: [], total: 0 } : dashHits({ title: pr.title, body, commits, files, protectedPaths, contents });
+  const { unread, total } = read;
+  const hits = overused(read.hits.length, total) ? read.hits : [];
   // The files API lists at most 3,000 files; the rest of a larger change was never read.
-  const unlisted = Math.max(0, Number(pr.changed_files ?? 0) - files.length);
+  const unlisted = fork ? 0 : Math.max(0, Number(pr.changed_files ?? 0) - files.length);
   // The commits API lists at most 250 commits; the messages of the rest were never read.
   const unlistedCommits = Math.max(0, Number(pr.commits ?? 0) - commits.length);
   const annotations = unread.map((u) => `::error file=${u}::GitHub sent no patch for ${u} and its text could not be read, so its added lines are unchecked`);
@@ -231,10 +254,10 @@ export async function check(ctx, n) {
   for (const h of hits) if (h.file) annotations.push(`::error file=${h.where},line=${h.line}::This line adds an em or en dash`);
   for (const h of credits) annotations.push(`::error::${h.where}, line ${h.line} credits a model or an AI tool`);
   const parts = [];
-  if (hits.length) parts.push(`${hits.length} added line(s) carry an em or en dash. Use a comma, colon, semicolon, parentheses or two sentences, and a hyphen for a range.\n\n${listOf(hits)}\n`);
+  if (hits.length) parts.push(`${hits.length} of ${total} added lines carry an em or en dash. A dash or two is fine; this many is overuse. Use a comma, colon, semicolon, parentheses or two sentences for most of them, and a hyphen for a range.\n\n${listOf(hits)}\n`);
   if (credits.length) parts.push(`${credits.length} line(s) credit a model or an AI tool. Remove them: the account that commits is the author.\n\n${listOf(credits)}\n`);
   if (unread.length) parts.push(`Not every added line could be read: ${unread.join(', ')}. Re-run the check.\n`);
-  if (!parts.length) parts.push('No added line carries an em or en dash, and nothing credits a model or an AI tool.\n');
+  if (!parts.length) parts.push(`${fork ? 'Dashes are not read on a fork' : 'Dashes are within the limit'}, and nothing credits a model or an AI tool.\n`);
   return { code: hits.length || credits.length ? 1 : unread.length ? 2 : 0, summary: parts.join('\n'), annotations };
 }
 
