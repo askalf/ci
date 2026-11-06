@@ -77,10 +77,12 @@ when the change routes there.
 
 Each repository's `.github/workflows/public-text.yml` runs on `pull_request` and calls
 `public-text.yml` at a pinned commit, on a GitHub-hosted runner. `public-text.mjs` reads the PR
-through the API (no checkout) and fails when an added line, the title, the description or a commit
-message carries an em or en dash, or when the title, the description or a commit message credits a
-model or an AI tool (a co-author trailer, a "generated with" footer, a session link), naming every
-one. Credits are read in that text only, since code and docs may name these tools for other
+through the API (no checkout) and fails when the added lines, the title, the description and the
+commit messages overuse em or en dashes, or when the title, the description or a commit message
+credits a model or an AI tool (a co-author trailer, a "generated with" footer, a session link),
+naming every one. Overuse is five or more lines that are also more than one line in twenty, so a
+dash or two in normal text passes, and a pull request from a fork is not read for dashes at all.
+Credits are read in that text only, since code and docs may name these tools for other
 reasons. Context and removed lines are never read, and captured data is skipped. It is a workflow of its own because a review is posted only when the
 review run's conclusion agrees with the verdict.
 

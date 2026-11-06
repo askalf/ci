@@ -13,6 +13,9 @@ names the commit's date and the pull request it came from.
 
 ## November 2026
 
+- Public text fails on dash overuse, not on a dash: five or more added lines that are also more than
+  one line in twenty. A dash or two in normal text passes, and a pull request from a fork is not read
+  for dashes at all. Credits to a model or an AI tool are read as before.
 - The scripts' input parsers are fuzzed with Jazzer.js: the pull request text and patches the public
   text check reads, the workflow files the fleet-status check reads, the caller workflows the pin
   bump rewrites, and the run record, patch and artifact the verdict post reads. `fuzz.yml` runs

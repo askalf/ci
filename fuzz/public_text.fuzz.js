@@ -46,8 +46,9 @@ export function fuzz(data) {
   const wide = needsContent(files, protectedPaths);
   if (!Array.isArray(wide) || wide.some((f) => typeof f.patch === 'string')) fail('needsContent returned a file that has a patch');
   // The unread path only: no contents are given for the wide file, so no git process is started.
-  const { hits, unread } = dashHits({ title, body, commits, files, protectedPaths });
+  const { hits, unread, total } = dashHits({ title, body, commits, files, protectedPaths });
   if (!Array.isArray(hits) || !Array.isArray(unread)) fail('dashHits returned a malformed result');
+  if (!Number.isInteger(total) || total < hits.length) fail('dashHits counted fewer lines than it reported');
   for (const h of hits) if (!DASH.test(h.text)) fail('dashHits reported a line with no dash');
   if (!unread.includes('big.txt')) fail('dashHits dropped a wide file whose contents were not read');
 
