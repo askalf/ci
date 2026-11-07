@@ -1156,9 +1156,9 @@ console.log('\n  pin bump');
   const expected = ['askalf/ci', 'askalf/askalf', 'askalf/dario', 'askalf/amnesia', 'askalf/browser-bridge', 'askalf/redstamp',
     'askalf/truecopy', 'askalf/truecopy-action', 'askalf/cordon', 'askalf/plumbline',
     'askalf/platform', 'askalf/homebrew-tap', 'askalf/pitlane-box', 'askalf/restore-desk',
-    'askalf/sprayberrylabs-site', 'askalf/unscathed-site', 'askalf/ownyourstack-site', 'askalf/airprint-bridge',
+    'askalf/sprayberrylabs-site', 'askalf/unscathed-site', 'askalf/airprint-bridge',
     'askalf/pitlane', 'askalf/ci-wizard'];
-  check('the bump job knows the twenty callers, this repository first, then platform (drift-report pins only), the repositories that joined 2026-10-27, the public askalf/pitlane (2026-11-01) and askalf/ci-wizard (2026-11-04)', callers.join() === expected.join());
+  check('the bump job knows the nineteen callers, this repository first, then platform (drift-report pins only), the repositories that joined 2026-10-27, the public askalf/pitlane (2026-11-01) and askalf/ci-wizard (2026-11-04)', callers.join() === expected.join());
   check('this repo\'s caller pins askalf/ci and the same sha as redline-ref',
     /uses: askalf\/ci\/\.github\/workflows\/redline-review\.yml@([0-9a-f]{40})/.exec(own)?.[1] === refs(own)[0] && !own.includes('askalf/askalf/') && own.includes('runner-label: redline\n'));
   // A called workflow holds no permission its caller does not grant.

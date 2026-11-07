@@ -78,7 +78,7 @@ jobs:
         askalf/ci askalf/askalf askalf/dario askalf/amnesia askalf/browser-bridge askalf/redstamp
         askalf/truecopy askalf/truecopy-action askalf/cordon askalf/plumbline
         askalf/platform askalf/homebrew-tap askalf/pitlane-box askalf/restore-desk
-        askalf/sprayberrylabs-site askalf/unscathed-site askalf/ownyourstack-site askalf/airprint-bridge
+        askalf/sprayberrylabs-site askalf/unscathed-site askalf/airprint-bridge
         askalf/pitlane
         askalf/ci-wizard
       # A fork's own list (repository variable REDLINE_CALLERS) replaces CALLERS when it is set.
