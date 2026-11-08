@@ -340,6 +340,16 @@ export const PROSE_RULES = new Set(['reads-as-generated', 'ai-attribution', 'mis
 export const ADVISORY_RULES = new Set(['reads-as-generated']);
 
 /**
+ * A finding on the pull request's description (the `file` the model names for the PR text), not
+ * on code or a commit. A `misleading-text` finding there is a note for the author and never
+ * blocks: the description is not what ships, an author edits it in seconds, and a round spent on
+ * it is a round (two rounds of one large PR on 2026-11-07 were wording of the body alone).
+ * Attribution and secrets in the description still block, as anywhere. Pure.
+ */
+export const DESCRIPTION_FILE = /^(?:pr|pull[\s-]?request)\s*(?:description|body|text)\b/i;
+export const isDescriptionFinding = (f) => DESCRIPTION_FILE.test(String(f?.file ?? '').trim()) && f?.rule === 'misleading-text';
+
+/**
  * The root .gitattributes of the pull request's base commit, '' when the base has none. The marks
  * come from the base, never from the head: a pull request cannot mark the files it adds or changes
  * as captured for its own review. The mark lands first, in a reviewed change of its own.
@@ -412,7 +422,7 @@ export function checkSubmission(input) {
   // that asked for changes only for wording approves; one that asked with no blocking finding at
   // all (a change it could not read) still asks.
   const blocked = findings.some((f) => f.severity === 'blocking');
-  const graded = findings.map((f) => (ADVISORY_RULES.has(f.rule) && f.severity === 'blocking' ? { ...f, severity: 'minor' } : f));
+  const graded = findings.map((f) => ((ADVISORY_RULES.has(f.rule) || isDescriptionFinding(f)) && f.severity === 'blocking' ? { ...f, severity: 'minor' } : f));
   const eased = input.verdict === 'REQUEST_CHANGES' && blocked && !graded.some((f) => f.severity === 'blocking');
   const rule = !eased && typeof input.rule === 'string' && /^[a-z0-9-]{1,40}$/.test(input.rule) ? input.rule : 'none';
   return { review: { verdict: eased ? 'APPROVE' : input.verdict, summary: input.summary.trim(), findings: graded, rule } };
