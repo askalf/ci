@@ -38,9 +38,10 @@
 //     force-push because a run is tied to the PR by its branch, not by a commit the PR still lists,
 //     and a run counts only when the PR could not have shaped it (below).
 //   - A run's verdict is trusted on the poster's terms: a dispatch by askalf of redline.yml on the
-//     default branch (the PR cannot shape that run), or a pull_request run of a PR that changes
-//     nothing under .github/workflows/ or .github/actions/ (one that does could upload a verdict
-//     of its own). Any other run's artifact is not read.
+//     default branch (the PR cannot shape that run), or a pull_request run whose own head changed
+//     nothing under .github/workflows/ or .github/actions/ against the base (a head that did could
+//     have uploaded a verdict of its own; the head read is the run's, not the PR's current one,
+//     since a later head can put the workflow back). Any other run's artifact is not read.
 //   - Turns, wall time, tool output and diff size are all bounded; near the end the model is
 //     forced to submit. A model that rejects a forced tool_choice (rejectsForcedToolChoice) is
 //     told in that turn's user content to submit, and every other tool call is refused.
@@ -538,17 +539,18 @@ export function dispatchTitleRe(repo, pr) {
 }
 
 /**
- * The finished Redline runs of this PR whose verdicts may be trusted, among a repository's runs
- * of redline.yml, in the order given (the API lists newest first), each { id, head, url, at }.
- * A run counts when it reached a verdict (success or failure) and the PR could not have shaped it:
+ * The finished Redline runs of this PR among a repository's runs of redline.yml, in the order
+ * given (the API lists newest first), each { id, head, url, at, event }:
  *   - a dispatch by DISPATCH_ACTOR of redline.yml on the default branch, titled for this PR and a
  *     head (the default branch's workflow files ran, whatever the PR changes);
  *   - a pull_request run from this repository tied to the PR (GitHub lists the PR on it, or it ran
- *     on the PR's branch), at its own head_sha, only when trustPullRequestRuns: the PR changes
- *     nothing under the CI directories, so the run was the reviewed redline.yml and not the PR's.
- * The branch tie, not the PR's current commit list, is what finds a head a force-push rewrote. Pure.
+ *     on the PR's branch), at its own head_sha. Whether that head could have shaped the run is
+ *     the caller's question, answered per run (earlierVerdicts), not here.
+ * Only a run that reached a verdict counts (success or failure); a cancelled or errored one left
+ * none. The branch tie, not the PR's current commit list, is what finds a head a force-push
+ * rewrote. Pure.
  */
-export function reviewRunsOf(runs, { repo, pr, prHeadRef, defaultBranch, trustPullRequestRuns = false }) {
+export function reviewRunsOf(runs, { repo, pr, prHeadRef, defaultBranch }) {
   const title = dispatchTitleRe(repo, pr);
   const out = [];
   for (const r of runs ?? []) {
@@ -559,14 +561,32 @@ export function reviewRunsOf(runs, { repo, pr, prHeadRef, defaultBranch, trustPu
     if (r.event === 'workflow_dispatch') {
       const byAskalf = r.actor?.login === DISPATCH_ACTOR && (r.triggering_actor?.login ?? DISPATCH_ACTOR) === DISPATCH_ACTOR;
       if (byAskalf && defaultBranch && r.head_branch === defaultBranch) head = title.exec(String(r.display_title ?? ''))?.[1] ?? null;
-    } else if (r.event === 'pull_request' && trustPullRequestRuns) {
+    } else if (r.event === 'pull_request') {
       const ours = r.head_repository?.full_name === repo;
       const tied = (r.pull_requests ?? []).some((p) => p?.number === pr) || (prHeadRef && r.head_branch === prHeadRef);
       if (ours && tied && /^[0-9a-f]{40}$/.test(String(r.head_sha ?? ''))) head = r.head_sha;
     }
-    if (head) out.push({ id: r.id, head, url: r.html_url ?? '', at: r.created_at ?? '' });
+    if (head) out.push({ id: r.id, head, url: r.html_url ?? '', at: r.created_at ?? '', event: r.event });
   }
   return out;
+}
+
+/** GitHub's compare lists at most this many files; a longer change cannot be checked and is not trusted. */
+export const COMPARE_FILES_MAX = 300;
+
+/**
+ * Whether a pull_request run at `head` ran the reviewed workflow files: the PR's change at that
+ * head, against its base, touched nothing under the CI directories. Read from the compare of base
+ * and head, so a head that changed redline.yml is refused even after a later head put it back.
+ * Null when it cannot be known (the read failed, or the change is past what compare lists).
+ */
+export async function headChangedNoCi(ctx, baseRef, head) {
+  if (!baseRef) return null;
+  let cmp;
+  try { cmp = await gh(ctx, `/repos/${ctx.repo}/compare/${encodeURIComponent(baseRef)}...${head}`); } catch (e) { ctx.log?.(`the change at ${head.slice(0, 7)} could not be read: ${e.message}`); return null; }
+  const files = cmp?.files;
+  if (!Array.isArray(files) || files.length >= COMPARE_FILES_MAX) return null;
+  return !changesCi(files);
 }
 
 /** A verdict.json as a review row, the shape the posted reviews have, so every reader treats it alike. */
@@ -590,20 +610,20 @@ export async function ghBytes(ctx, path, maxBytes = LIMITS.artifactBytes) {
  * Redline's earlier verdicts on this PR, read from its runs' redline-verdict artifacts, oldest
  * first, as review rows. On a private repository nothing is ever posted (the post runs on public
  * repositories only), so without this each round began with no memory of the last and a
- * request-changes round could not be counted. Only a run the PR could not have shaped is read
- * (reviewRunsOf); the newest LIMITS.earlierRuns of them are; an artifact that is missing, expired,
- * malformed, or for another PR or head is passed over; a read that fails leaves the rest unread
- * and is logged, never a failed review.
+ * request-changes round could not be counted. A run is read only when the PR could not have
+ * shaped it: a dispatch (reviewRunsOf), or a pull_request run whose own head changed no CI file
+ * against the base (headChangedNoCi, one read per such run). The newest LIMITS.earlierRuns runs
+ * are considered; an artifact that is missing, expired, malformed, or for another PR or head is
+ * passed over; a read that fails leaves the rest unread and is logged, never a failed review.
  */
-export async function earlierVerdicts(ctx, { pr, files }) {
+export async function earlierVerdicts(ctx, { pr }) {
   const { repo, pr: n } = ctx;
   const out = [];
   try {
     const listed = await gh(ctx, `/repos/${repo}/actions/workflows/redline.yml/runs?per_page=100`);
-    const runs = reviewRunsOf(listed?.workflow_runs, {
-      repo, pr: n, prHeadRef: pr?.head?.ref, defaultBranch: pr?.base?.repo?.default_branch, trustPullRequestRuns: !changesCi(files),
-    }).slice(0, LIMITS.earlierRuns);
+    const runs = reviewRunsOf(listed?.workflow_runs, { repo, pr: n, prHeadRef: pr?.head?.ref, defaultBranch: pr?.base?.repo?.default_branch }).slice(0, LIMITS.earlierRuns);
     for (const run of runs) {
+      if (run.event === 'pull_request' && (await headChangedNoCi(ctx, pr?.base?.ref, run.head)) !== true) continue;
       const arts = await gh(ctx, `/repos/${repo}/actions/runs/${run.id}/artifacts`);
       const a = (arts?.artifacts ?? []).find((x) => x?.name === VERDICT_ARTIFACT && x.expired !== true && Number.isInteger(x.id));
       if (!a) continue;
@@ -1276,7 +1296,7 @@ export async function runReview(ctx) {
   const files = await ghAll(ctx, `/repos/${repo}/pulls/${n}/files`);
   const commits = await ghAll(ctx, `/repos/${repo}/pulls/${n}/commits`, 3);
   const postedReviews = await ghAll(ctx, `/repos/${repo}/pulls/${n}/reviews`);
-  const reviews = mergeVerdicts(postedReviews, await earlierVerdicts(ctx, { pr, files }));
+  const reviews = mergeVerdicts(postedReviews, await earlierVerdicts(ctx, { pr }));
   // A re-read reviews the head again: the verdict standing there is the one being reconsidered. A
   // standing verdict is written to verdict.json too, so this run carries it like the run that made
   // it; a dry run writes nothing.
