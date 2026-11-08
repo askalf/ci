@@ -27,6 +27,11 @@
 //   - redline_search runs in a child process with a time cap: the pattern is the model's and the
 //     files are the PR's, so a pattern that backtracks without end must not stall the run.
 //   - Blocking findings force REQUEST_CHANGES whatever verdict the model named.
+//   - A round after an earlier verdict reads the delta first: the brief's diff is the change since
+//     the head Redline last judged (GitHub's compare of that head and this one), and the whole
+//     change against the base is one redline_diff call away. Findings may quote either; both are
+//     in the corpus. A first review, or a delta that cannot be read, shows the whole change as
+//     before. The earlier findings are checked against what moved, not found again in what did not.
 //   - Redline's earlier verdicts on the PR reach the model whether or not they were posted: they
 //     are read from the PR's earlier dispatched runs' redline-verdict artifacts as well as from
 //     the posted reviews. On a private repository nothing is ever posted (the post runs on public
@@ -653,6 +658,8 @@ export const TOOLS = [
     input_schema: { type: 'object', properties: { path: { type: 'string' }, start_line: { type: 'integer', minimum: 1 }, end_line: { type: 'integer', minimum: 1 } }, required: ['path'] } },
   { name: 'redline_search', description: `Search the PR checkout with a JavaScript regular expression. At most ${LIMITS.grepResults} matches.`,
     input_schema: { type: 'object', properties: { pattern: { type: 'string' }, path: { type: 'string', description: 'Directory or file to search; default the root.' } }, required: ['pattern'] } },
+  { name: 'redline_diff', description: 'The whole change of the pull request against its base, as a unified diff: every changed file, or one path. The brief shows the change since the last review; call this for the rest.',
+    input_schema: { type: 'object', properties: { path: { type: 'string', description: 'One changed file; default every file.' } } } },
   { name: 'redline_submit', description: 'Submit the review. Call exactly once, last.',
     input_schema: { type: 'object', required: ['verdict', 'summary', 'findings'], properties: {
       verdict: { type: 'string', enum: ['APPROVE', 'REQUEST_CHANGES'] },
@@ -667,8 +674,15 @@ export const TOOLS = [
         rule: { type: 'string', description: 'This finding\'s rule slug (reads-as-generated, ai-attribution, secret-exposure, or none for a code finding). Required on a file the brief lists as captured data.' } } } } } } },
 ];
 
-export function runTool(root, name, input = {}) {
+export function runTool(root, name, input = {}, extra = {}) {
   try {
+    if (name === 'redline_diff') {
+      const all = Array.isArray(extra.diffFiles) ? extra.diffFiles : [];
+      const path = typeof input.path === 'string' && input.path.trim() ? input.path.trim() : '';
+      const want = path ? all.filter((f) => f.filename === path || f.previous_filename === path) : all;
+      if (path && !want.length) return 'error: not a file this pull request changes; redline_diff with no path lists them all';
+      return planDiff(want).text || '(no diff)';
+    }
     if (name === 'redline_list') {
       const dir = safePath(root, input.path);
       const rows = readdirSync(dir, { withFileTypes: true }).filter((e) => e.name !== '.git')
@@ -930,7 +944,7 @@ export function askForSubmit(messages) {
   }
 }
 
-export function buildBrief(pr, files, commits, diff, protectedFiles = []) {
+export function buildBrief(pr, files, commits, diff, protectedFiles = [], since = null) {
   const body = (pr.body ?? '').slice(0, LIMITS.bodyChars);
   // A message past LIMITS.commitChars is cut with the cut stated, as context and earlier reviews
   // are: a bare cut reads as a message that ends mid-sentence, and is reviewed as one.
@@ -949,8 +963,33 @@ export function buildBrief(pr, files, commits, diff, protectedFiles = []) {
     ...(protectedFiles.length
       ? ['', `Captured data, marked ${PROTECTED_ATTR} in .gitattributes (copied in, never written by hand: its wording is not a finding; a correctness or security defect or a secret in it is, and a finding there must carry its rule): ${protectedFiles.join(', ')}`]
       : []),
-    '', 'Diff:', diff,
+    '',
+    since
+      ? `Diff since the last review, at ${String(since.head).slice(0, 7)} (the whole change against ${pr.base.ref} is one redline_diff call away; a finding may quote either; check each earlier finding against what moved here):`
+      : 'Diff:',
+    diff,
   ].join('\n');
+}
+
+/**
+ * What to read first in a round after an earlier verdict: the compare of the head Redline last
+ * judged (its newest approve or request at another head) and this head, as { head, files }, or
+ * null for a first review, a compare that cannot be read, or one that shows nothing new. A read
+ * that fails is logged; the review then shows the whole change, as a first review does.
+ */
+export async function deltaSince(ctx, reviews, headSha) {
+  const at = (r) => Date.parse(r?.submitted_at ?? '') || 0;
+  const judged = (reviews ?? []).filter((r) => isReviewer(r) && (r.state === 'APPROVED' || r.state === 'CHANGES_REQUESTED') && /^[0-9a-f]{40}$/.test(String(r.commit_id ?? '')) && r.commit_id !== headSha);
+  const last = judged.sort((a, b) => at(a) - at(b)).at(-1);
+  if (!last) return null;
+  try {
+    const cmp = await gh(ctx, `/repos/${ctx.repo}/compare/${last.commit_id}...${headSha}`);
+    if (!Array.isArray(cmp?.files) || cmp.status === 'identical' || cmp.status === 'behind') return null;
+    return { head: last.commit_id, files: cmp.files };
+  } catch (e) {
+    ctx.log?.(`the change since ${last.commit_id.slice(0, 7)} could not be read, so the whole change is shown: ${e.message}`);
+    return null;
+  }
 }
 
 /**
@@ -1117,10 +1156,13 @@ export function routeModel(ctx, files) {
  * runReview reads all of it from GitHub; local.mjs builds it from a local branch. Returns
  * { review, verdict, notes }; throws when no review is submitted.
  */
-export async function reviewChange(ctx, { pr, files, commits, reviews = [], protectedSet = new Set(), deadline = ctx.now() + LIMITS.hardMs }) {
+export async function reviewChange(ctx, { pr, files, commits, reviews = [], protectedSet = new Set(), deadline = ctx.now() + LIMITS.hardMs, since = null }) {
+  // The whole change is always the corpus (and redline_diff); the brief shows the delta since the
+  // last verdict when there is one, the whole change otherwise.
   const diff = planDiff(files);
-  const brief = buildBrief(pr, files, commits, diff.text, [...protectedSet].sort()) + contextSection(ctx.context);
-  const corpus = [...corpusOf(brief), ...checkoutCorpus(ctx.checkout, unshownFiles(files, diff.omitted))];
+  const shown = since ? planDiff(since.files) : diff;
+  const brief = buildBrief(pr, files, commits, shown.text, [...protectedSet].sort(), since) + contextSection(ctx.context);
+  const corpus = [...corpusOf(brief), ...(since ? corpusOf(diff.text) : []), ...checkoutCorpus(ctx.checkout, unshownFiles(files, diff.omitted))];
 
   // Earlier reviews reach the model but not the corpus: a line they quote may be gone from the head.
   // One round: every blocking finding the diff grounds goes in this verdict. A defect visible now
@@ -1185,7 +1227,7 @@ export async function reviewChange(ctx, { pr, files, commits, reviews = [], prot
         // not a gateway kept tool_choice (dario#1423, 2026-09-25: 30 turns of reading past it).
         results.push(force
           ? { type: 'tool_result', tool_use_id: u.id, is_error: true, content: 'The read budget is spent. Call redline_submit now with what you have read.' }
-          : { type: 'tool_result', tool_use_id: u.id, content: runTool(ctx.checkout, u.name, u.input) });
+          : { type: 'tool_result', tool_use_id: u.id, content: runTool(ctx.checkout, u.name, u.input, { diffFiles: files }) });
         continue;
       }
       const checked = checkSubmission(u.input);
@@ -1294,7 +1336,8 @@ export async function runReview(ctx) {
   } catch (e) {
     ctx.log?.(`no path counts as ${PROTECTED_ATTR}: ${e.message}`);
   }
-  const { review, verdict, notes } = await reviewChange(ctx, { pr, files, commits, reviews, protectedSet, deadline });
+  const since = await deltaSince(ctx, reviews, headSha);
+  const { review, verdict, notes } = await reviewChange(ctx, { pr, files, commits, reviews, protectedSet, deadline, since });
   if (ctx.dryRun) return { outcome: 'dry-run', verdict, body: renderBody(review, verdict, headSha, notes) };
   const now = await gh(ctx, `/repos/${repo}/pulls/${n}`);
   if (now.head.sha !== headSha) return { outcome: 'skipped', reason: `head moved to ${now.head.sha.slice(0, 7)} during the review` };

@@ -13,6 +13,9 @@ names the commit's date and the pull request it came from.
 
 ## November 2026
 
+- A Redline round after an earlier verdict reads the delta first: the brief's diff is the compare
+  of the head last judged and this one, and the whole change is one `redline_diff` call away
+  (every file, or one path). A finding may quote either. A first review shows the whole change.
 - Redline reads its own earlier verdicts from the pull request's runs, not only from posted
   reviews, so a round on a repository where nothing is posted still sees the last; the brief asks
   for every blocking finding in the one review; and after `REDLINE_ROUND_CAP` request-changes
