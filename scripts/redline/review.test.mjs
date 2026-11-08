@@ -10,7 +10,9 @@ import {
   parseEnvFile, readPrompt, safePath, buildDiff, planDiff, unshownFiles, checkoutCorpus, quoteIsGrounded, corpusOf, checkSubmission, finalVerdict,
   renderBody, verdictAtHead, runTool, runReview, buildBrief, contextSection, changedFilesSection, earlierReviewsSection, REVIEWER_LOGIN, LIMITS, metaPhrase,
   verdictRecord, verdictProblem, saveVerdict, VERDICT_VERSION,
+  reviewRunsOf, verdictAsReview, mergeVerdicts, roundsAsked, renderCapBody, roundCapOf, DEFAULT_ROUND_CAP, ROUND_CAP_RULE, VERDICT_ARTIFACT,
 } from './review.mjs';
+import { deflateRawSync } from 'node:zlib';
 import * as reviewModule from './review.mjs';
 import { protectedIn, baseAttributes, capturedFindings, PROTECTED_ATTR } from './review.mjs';
 import { withRetry, OutOfTime, darioAccess, socketFetch, withDarioSocket, callModelWith } from './review.mjs';
@@ -307,7 +309,10 @@ console.log('\n  verdictAtHead');
 
 
 const PATCH = '@@ -1 +1,2 @@\n+export const token = process.env.X;\n const y = 2;';
-function world({ reviews = [], heads = [HEAD], turns, modelStatus = [], draft = false, files = null, attributes = null, headRepo = 'askalf/r' } = {}) {
+// runs: the repository's redline.yml runs (none by default; null makes the route 404 like any other
+// unknown path); artifacts: run id -> its artifact rows, or an HTTP status; zips: artifact id -> zip
+// bytes (a Buffer), or an HTTP status.
+function world({ reviews = [], heads = [HEAD], turns, modelStatus = [], draft = false, files = null, attributes = null, headRepo = 'askalf/r', runs = [], artifacts = {}, zips = {} } = {}) {
   const calls = { posted: [], model: [], keys: [], sleeps: 0 };
   let headReads = 0;
   const json = (body, status = 200, headers = {}) => ({ ok: status < 300, status, headers: new Headers(headers), json: async () => body, text: async () => JSON.stringify(body) });
@@ -333,6 +338,11 @@ function world({ reviews = [], heads = [HEAD], turns, modelStatus = [], draft = 
     if (p.endsWith('/contents/.gitattributes')) return attributes === null ? json({ message: 'Not Found' }, 404) : json({ type: 'file', encoding: 'base64', content: Buffer.from(attributes).toString('base64') });
     if (p.endsWith('/files')) return json(u.searchParams.get('page') === '1' ? (files ?? [{ filename: 'src/b.js', status: 'modified', additions: 1, deletions: 0, patch: PATCH }]) : []);
     if (p.endsWith('/commits')) return json(u.searchParams.get('page') === '1' ? [{ sha: HEAD, commit: { message: 'feat: add token' } }] : []);
+    if (p.endsWith('/actions/workflows/redline.yml/runs') && runs) return json({ workflow_runs: runs });
+    const arts = /\/actions\/runs\/(\d+)\/artifacts$/.exec(p);
+    if (arts && runs) { const rows = artifacts[arts[1]]; return typeof rows === 'number' ? json({ message: 'down' }, rows) : json({ artifacts: rows ?? [] }); }
+    const zipOf = /\/actions\/artifacts\/(\d+)\/zip$/.exec(p);
+    if (zipOf && runs) { const z = zips[zipOf[1]]; return typeof z === 'number' ? json({ message: 'gone' }, z) : { ok: true, status: 200, headers: new Headers(), arrayBuffer: async () => z, json: async () => ({}), text: async () => '' }; }
     return json({ message: `unexpected ${p}` }, 404);
   };
   let t = 0;
@@ -1360,6 +1370,98 @@ console.log('\n  pin bump');
     ctx.model = 'gpt-5.6-terra'; ctx.pinModel = 'gpt-5.6-terra'; ctx.deepModel = 'gpt-6-astra';
     await runReview(ctx);
     check('a pin bump stays on the pin model when it is REDLINE_MODEL, not the deep model', calls.model.length > 0 && calls.model.every((b) => b.model === 'gpt-5.6-terra'));
+  }
+}
+
+console.log('\n  earlier verdicts from the runs, and the round cap');
+{
+  // A one-file zip, as actions/upload-artifact writes one.
+  const makeZip = (name, text) => {
+    const data = Buffer.from(text, 'utf8'); const body = deflateRawSync(data); const n = Buffer.from(name, 'utf8');
+    const local = Buffer.alloc(30); local.writeUInt32LE(0x04034b50, 0); local.writeUInt16LE(8, 8); local.writeUInt32LE(body.length, 18); local.writeUInt32LE(data.length, 22); local.writeUInt16LE(n.length, 26);
+    const central = Buffer.alloc(46); central.writeUInt32LE(0x02014b50, 0); central.writeUInt16LE(8, 10); central.writeUInt32LE(body.length, 20); central.writeUInt32LE(data.length, 24); central.writeUInt16LE(n.length, 28); central.writeUInt32LE(0, 42);
+    const eocd = Buffer.alloc(22); eocd.writeUInt32LE(0x06054b50, 0); eocd.writeUInt16LE(1, 8); eocd.writeUInt16LE(1, 10); eocd.writeUInt32LE(central.length + n.length, 12); eocd.writeUInt32LE(local.length + n.length + body.length, 16);
+    return Buffer.concat([local, n, body, central, n, eocd]);
+  };
+  const sha = (c) => String(c).repeat(40);
+  const title = (head, more = '') => `Redline review askalf/r#7 @ ${head}${more}`;
+  const run = (id, over = {}) => ({ id, status: 'completed', conclusion: 'failure', event: 'workflow_dispatch', path: '.github/workflows/redline.yml', display_title: title(sha(id)), html_url: `https://x/run/${id}`, created_at: `2026-11-08T0${id}:00:00Z`, ...over });
+  const commitShas = new Set([HEAD, sha(1), sha(2), sha(3), sha(4)]);
+  const picked = reviewRunsOf([
+    run(1), run(2, { event: 'pull_request', head_sha: sha(2), display_title: 'feat: add token' }), run(3, { display_title: title(sha(3), ' (re-read)') }),
+    run(5, { status: 'in_progress', conclusion: null }), run(6, { conclusion: 'cancelled' }), run(7, { display_title: 'Redline review askalf/r#8 @ ' + sha(7) }),
+    run(8, { event: 'pull_request', head_sha: sha(9) }), run(9, { path: '.github/workflows/ci.yml' }), run(4, { display_title: title(sha(4)) + ' and more' }),
+  ], { repo: 'askalf/r', pr: 7, commitShas });
+  check('reviewRunsOf: a dispatch titled for this PR, a pull_request run at one of its commits, a re-read; not a run still going, cancelled, of another PR, at a foreign head, of another workflow, or with extra title text',
+    picked.map((r) => r.id).join() === '1,2,3' && picked[0].head === sha(1) && picked[1].head === sha(2) && picked[2].head === sha(3) && picked[0].url === 'https://x/run/1');
+  check('roundCapOf: a count, 0 for none, the default otherwise', roundCapOf('2') === 2 && roundCapOf('0') === 0 && roundCapOf(undefined) === DEFAULT_ROUND_CAP && roundCapOf('many') === DEFAULT_ROUND_CAP && roundCapOf('-1') === DEFAULT_ROUND_CAP && DEFAULT_ROUND_CAP === 4);
+  const vr = (head, event = 'REQUEST_CHANGES', body = `asked at ${head.slice(0, 7)}`) => ({ version: 1, repo: 'askalf/r', pr: 7, head_sha: head, event, body, comments: [], posted: false });
+  const asReview = verdictAsReview(vr(sha(1)), { id: 1, url: 'u1', at: '2026-11-08T01:00:00Z' });
+  check('verdictAsReview: the reviewer, the state, the head, the body and the run', asReview.user.login === REVIEWER_LOGIN && asReview.state === 'CHANGES_REQUESTED' && asReview.commit_id === sha(1) && asReview.body === 'asked at 1111111' && asReview.html_url === 'u1' && asReview.from_run === 1);
+  const postedRow = (head, state, at) => ({ user: { login: REVIEWER_LOGIN }, state, commit_id: head, body: `posted ${state}`, submitted_at: at });
+  const merged = mergeVerdicts([postedRow(sha(2), 'CHANGES_REQUESTED', '2026-11-08T02:00:00Z')], [asReview, verdictAsReview(vr(sha(2), 'APPROVE'), { id: 2, url: 'u2', at: '2026-11-08T02:00:00Z' })]);
+  check('mergeVerdicts: a head with a posted verdict keeps it, the rest come from the runs, oldest first', merged.length === 2 && merged[0].commit_id === sha(1) && merged[1].body === 'posted CHANGES_REQUESTED');
+  check('roundsAsked: distinct heads asked, not the head being read, not approvals, not other reviewers',
+    roundsAsked([postedRow(sha(1), 'CHANGES_REQUESTED'), postedRow(sha(1), 'CHANGES_REQUESTED'), postedRow(sha(2), 'APPROVED'), postedRow(HEAD, 'CHANGES_REQUESTED'), { ...postedRow(sha(3), 'CHANGES_REQUESTED'), user: { login: 'someone' } }, postedRow(sha(4), 'CHANGES_REQUESTED')], HEAD) === 2);
+  const capBody = renderCapBody(4, 4, { commit_id: sha(4), body: '### 1. Blocking: `a.js:3`\n\nThe loop skips the last item.\n\n<!-- redline:head=4444 -->' }, HEAD);
+  check('renderCapBody: request changes, the count and the cap, the last request quoted without its marker, the rule and the head marker',
+    capBody.startsWith('**Verdict: request changes.** This pull request has had 4 rounds') && capBody.includes('the cap is 4') && capBody.includes('at 4444444') && capBody.includes('The loop skips the last item.')
+    && !capBody.includes('redline:head=4444') && capBody.includes(`rule:${ROUND_CAP_RULE}`) && capBody.endsWith(`<!-- redline:head=${HEAD} -->`) && /reread/.test(capBody));
+
+  // A private repository: nothing posted, two earlier runs with verdict artifacts.
+  const art = (id) => [{ id: 100 + id, name: VERDICT_ARTIFACT, expired: false }];
+  const zipsOf = (ids, mk = vr) => Object.fromEntries(ids.map((id) => [100 + id, makeZip('verdict.json', JSON.stringify(mk(sha(id))))]));
+  const artsOf = (ids) => Object.fromEntries(ids.map((id) => [id, art(id)]));
+  {
+    const { ctx, calls } = world({ runs: [run(2), run(1)], artifacts: artsOf([1, 2]), zips: zipsOf([1, 2]), turns: [submit(APPROVE)] });
+    const r = await runReview(ctx);
+    const brief = calls.model[0].messages[0].content;
+    check('the runs\' verdicts reach the model as earlier reviews, oldest first, and the review goes on', r.outcome === 'posted' && brief.includes('asked at 1111111') && brief.includes('asked at 2222222') && brief.indexOf('asked at 1111111') < brief.indexOf('asked at 2222222'));
+    check('two rounds so far: under the cap, so the model was called', calls.model.length === 1);
+  }
+  {
+    const { ctx, calls } = world({ runs: [run(4), run(3), run(2), run(1)], artifacts: artsOf([1, 2, 3, 4]), zips: zipsOf([1, 2, 3, 4]), turns: [submit(APPROVE)] });
+    const r = await runReview(ctx);
+    check('four rounds from the runs alone: capped, no model call, request changes posted at the head with the reviewer token',
+      r.outcome === 'capped' && r.verdict === 'REQUEST_CHANGES' && r.rounds === 4 && calls.model.length === 0 && calls.posted.length === 1 && calls.posted[0].commit_id === HEAD && calls.posted[0].event === 'REQUEST_CHANGES');
+    check('the cap verdict quotes the newest request and carries its rule', calls.posted[0].body.includes('asked at 4444444') && calls.posted[0].body.includes(`rule:${ROUND_CAP_RULE}`) && r.record.event === 'REQUEST_CHANGES' && r.record.posted === true);
+    const { ctx: quiet, calls: quietCalls } = world({ runs: [run(4), run(3), run(2), run(1)], artifacts: artsOf([1, 2, 3, 4]), zips: zipsOf([1, 2, 3, 4]), turns: [submit(APPROVE)] });
+    const q = await runReview({ ...quiet, reviewToken: '' });
+    check('with no reviewer token the cap verdict is left for the post, posted: false', q.outcome === 'capped' && quietCalls.posted.length === 0 && q.record.posted === false && q.record.body === q.body);
+    const { ctx: rr, calls: rrCalls } = world({ runs: [run(4), run(3), run(2), run(1)], artifacts: artsOf([1, 2, 3, 4]), zips: zipsOf([1, 2, 3, 4]), turns: [submit(APPROVE)] });
+    const rrr = await runReview({ ...rr, reread: true });
+    check('a re-read lifts the cap: the head is read, the earlier requests in the brief', rrr.outcome === 'posted' && rrCalls.model.length === 1 && rrCalls.model[0].messages[0].content.includes('asked at 4444444'));
+    const { ctx: off, calls: offCalls } = world({ runs: [run(4), run(3), run(2), run(1)], artifacts: artsOf([1, 2, 3, 4]), zips: zipsOf([1, 2, 3, 4]), turns: [submit(APPROVE)] });
+    await runReview({ ...off, roundCap: 0 });
+    check('REDLINE_ROUND_CAP=0 turns the cap off', offCalls.model.length === 1);
+    const { ctx: three, calls: threeCalls } = world({ runs: [run(3), run(2), run(1)], artifacts: artsOf([1, 2, 3]), zips: zipsOf([1, 2, 3]), turns: [submit(APPROVE)] });
+    await runReview({ ...three, roundCap: 3 });
+    check('the cap counts heads: three rounds against a cap of three stop it', threeCalls.model.length === 0);
+  }
+  {
+    const posted = [{ user: { login: REVIEWER_LOGIN }, state: 'CHANGES_REQUESTED', commit_id: sha(1), body: 'posted one', submitted_at: '2026-11-08T01:00:00Z' }, { user: { login: REVIEWER_LOGIN }, state: 'CHANGES_REQUESTED', commit_id: sha(2), body: 'posted two', submitted_at: '2026-11-08T02:00:00Z' }];
+    const { ctx, calls } = world({ reviews: posted, runs: [run(4), run(3), run(2), run(1)], artifacts: artsOf([1, 2, 3, 4]), zips: zipsOf([1, 2, 3, 4]), turns: [submit(APPROVE)] });
+    const r = await runReview(ctx);
+    check('posted and run verdicts count once per head together: two posted plus two more from the runs is four', r.outcome === 'capped' && r.rounds === 4 && calls.model.length === 0 && calls.posted[0].body.includes('asked at 4444444'));
+  }
+  {
+    const { ctx, calls } = world({ runs: [run(1, { display_title: title(HEAD), conclusion: 'success' })], artifacts: { 1: art(1) }, zips: { 101: makeZip('verdict.json', JSON.stringify(vr(HEAD, 'APPROVE', 'fine'))) }, turns: [submit(APPROVE)] });
+    const r = await runReview(ctx);
+    check('a run\'s verdict at this very head stands: no model call, and this run writes the same verdict, posted: false', r.outcome === 'existing' && r.verdict === 'APPROVE' && calls.model.length === 0 && r.record?.event === 'APPROVE' && r.record.body === 'fine' && r.record.posted === false);
+  }
+  {
+    const { ctx, calls } = world({ runs: [run(2), run(1)], artifacts: { 1: 500, 2: art(2) }, zips: zipsOf([2]), turns: [submit(APPROVE)] });
+    const r = await runReview(ctx);
+    check('an artifact list that cannot be read is logged and the review goes on without it', r.outcome === 'posted' && calls.model.length === 1);
+    const { ctx: noRoute, calls: noRouteCalls } = world({ runs: null, turns: [submit(APPROVE)] });
+    const logged = [];
+    noRoute.log = (l) => logged.push(l);
+    const nr = await runReview(noRoute);
+    check('a runs listing that cannot be read at all is logged once and the review goes on', nr.outcome === 'posted' && noRouteCalls.model.length === 1 && logged.filter((l) => /earlier verdicts from the runs not all read/.test(l)).length === 1);
+    const bad = world({ runs: [run(3), run(2), run(1)], artifacts: artsOf([1, 2, 3]), zips: { ...zipsOf([1]), 102: makeZip('verdict.json', JSON.stringify({ ...vr(sha(2)), pr: 8 })), 103: makeZip('other.json', '{}') }, turns: [submit(APPROVE)] });
+    const b = await runReview(bad.ctx);
+    const text = bad.calls.model[0].messages[0].content;
+    check('a verdict for another PR, or a zip without verdict.json, is passed over; the good one is kept', b.outcome === 'posted' && text.includes('asked at 1111111') && !text.includes('asked at 2222222'));
   }
 }
 
