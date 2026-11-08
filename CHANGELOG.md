@@ -13,6 +13,13 @@ names the commit's date and the pull request it came from.
 
 ## November 2026
 
+- Redline reads its own earlier verdicts from the pull request's runs, not only from posted
+  reviews, so a round on a repository where nothing is posted still sees the last; the brief asks
+  for every blocking finding in the one review; and after `REDLINE_ROUND_CAP` request-changes
+  rounds on one pull request (default 4, by head) a new head is not read: the run asks for changes
+  once more without a model call, quotes the last request and leaves the pull request to a person,
+  under the rule `round-cap`. A dispatch with `reread` reads that head after all. `zipEntry` moves
+  to `zip.mjs`, shared by the post and the review.
 - Public text fails on dash overuse, not on a dash: five or more added lines that are also more than
   one line in twenty. A dash or two in normal text passes, and a pull request from a fork is not read
   for dashes at all. Credits to a model or an AI tool are read as before.

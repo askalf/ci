@@ -27,6 +27,21 @@
 //   - redline_search runs in a child process with a time cap: the pattern is the model's and the
 //     files are the PR's, so a pattern that backtracks without end must not stall the run.
 //   - Blocking findings force REQUEST_CHANGES whatever verdict the model named.
+//   - Redline's earlier verdicts on the PR reach the model whether or not they were posted: they
+//     are read from the PR's earlier dispatched runs' redline-verdict artifacts as well as from
+//     the posted reviews. On a private repository nothing is ever posted (the post runs on public
+//     ones only), so until 2026-11-08 every round there began with no memory of the last.
+//   - A round cap: after REDLINE_ROUND_CAP (default 4) request-changes rounds on one PR, counted
+//     by distinct head over posted and run verdicts, a new head is not reviewed. The run asks for
+//     changes once more without a model call, says so, quotes the last request, and a person takes
+//     the PR; a dispatch with reread lifts the cap for that head. The count holds across a
+//     force-push because a run is tied to the PR by its branch, not by a commit the PR still lists,
+//     and only a run the PR could not have shaped is read (below).
+//   - Only a dispatch by askalf of redline.yml on the default branch feeds that history: it ran the
+//     default branch's workflow files, whatever the PR or its base branch carries. A pull_request
+//     run ran the head's own files, which the PR, or a base branch that is not the default, can
+//     shape into uploading any artifact, so it is never read; on a public repository its verdict
+//     is posted and comes in with the reviews.
 //   - Turns, wall time, tool output and diff size are all bounded; near the end the model is
 //     forced to submit. A model that rejects a forced tool_choice (rejectsForcedToolChoice) is
 //     told in that turn's user content to submit, and every other tool call is refused.
@@ -72,6 +87,7 @@ import { spawnSync } from 'node:child_process';
 import { request as httpRequest } from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { ACTIONS, CALLERS } from './pin.mjs';
+import { zipEntry } from './zip.mjs';
 
 /**
  * The account whose posted reviews are Redline's, lowercased: sprayberry-redline, or the login a
@@ -144,6 +160,9 @@ export const SUBMIT_REQUIRED = 'The read budget is spent. Your next response mus
   + 'with verdict, summary and findings, based on what you have read. Do not call any other tool and do not answer in text.';
 export const LIMITS = {
   diffChars: 180_000, bodyChars: 8_000, commitChars: 600, commits: 100, contextChars: 60_000, earlierReviews: 3, earlierReviewChars: 6_000,
+  // earlierRuns caps the PR's earlier Redline runs whose verdict artifacts are read (two reads
+  // each); artifactBytes caps one artifact.
+  earlierRuns: 8, artifactBytes: 1_000_000,
   // filesChars caps the changed files sent in full with the brief; readLines and readBytes cap one
   // redline_read. Each read is a model round trip, so a larger range means fewer turns.
   filesChars: 120_000, readLines: 1_000, readBytes: 120_000, listEntries: 400,
@@ -447,7 +466,7 @@ export function earlierReviewsSection(reviews, headSha) {
   if (!asked.length) return '';
   const cap = LIMITS.earlierReviewChars;
   const parts = asked.slice(-LIMITS.earlierReviews).map((r) => {
-    const b = String(r.body).replace(/<!--[\s\S]*?-->/g, '').trim();
+    const b = stripComments(r.body).trim();
     const text = b.length > cap ? `${b.slice(0, cap)}\n[cut at ${cap} characters]` : b;
     return `Review of ${String(r.commit_id).slice(0, 7)}:\n${text}`;
   });
@@ -487,6 +506,142 @@ export function verdictProblem(v) {
 export function saveVerdict(file, record) {
   mkdirSync(dirname(file), { recursive: true });
   writeFileSync(file, `${JSON.stringify(record, null, 2)}\n`);
+}
+
+// ---------- earlier verdicts from the runs, and the round cap ----------
+
+/** The verdict artifact every Redline run uploads (redline-review.yml), and the file in it. */
+export const VERDICT_ARTIFACT = 'redline-verdict';
+export const VERDICT_FILE = 'verdict.json';
+/** Request-changes rounds on one PR after which a new head is not reviewed and a person takes it. */
+export const DEFAULT_ROUND_CAP = 4;
+export const ROUND_CAP_RULE = 'round-cap';
+
+/** REDLINE_ROUND_CAP as a count: a non-negative integer, 0 for no cap; anything else is the default. */
+export function roundCapOf(value) {
+  const s = String(value ?? '').trim();
+  return /^\d{1,3}$/.test(s) ? Number(s) : DEFAULT_ROUND_CAP;
+}
+
+/** The identity that dispatches a review (the ops tick); the poster holds the same rule. */
+export const DISPATCH_ACTOR = 'askalf';
+
+/** The title a dispatched review run carries: `Redline review <repo>#<pr> @ <head>[ (re-read)]`. */
+export function dispatchTitleRe(repo, pr) {
+  return new RegExp(`^Redline review ${escapeRe(repo)}#${pr} @ ([0-9a-f]{40})( \\(re-read\\))?$`);
+}
+
+/**
+ * The finished dispatched Redline runs of this PR among a repository's runs of redline.yml, in
+ * the order given (the API lists newest first), each { id, head, url, at }: a workflow_dispatch
+ * by DISPATCH_ACTOR, of redline.yml, on the default branch, titled for this PR and a head. Such a
+ * run executed the default branch's workflow files, so neither the PR nor its base branch could
+ * shape what it uploaded; a pull_request run executed the head's own files and is never taken.
+ * Only a run that reached a verdict counts (success or failure); a cancelled or errored one left
+ * none. The head is the title's, so a head a force-push rewrote keeps its round. Pure.
+ */
+export function reviewRunsOf(runs, { repo, pr, defaultBranch }) {
+  const title = dispatchTitleRe(repo, pr);
+  const out = [];
+  for (const r of runs ?? []) {
+    if (r?.status !== 'completed' || (r.conclusion !== 'success' && r.conclusion !== 'failure')) continue;
+    if (r.path !== '.github/workflows/redline.yml' || !Number.isInteger(r.id) || r.event !== 'workflow_dispatch') continue;
+    if (r.repository?.full_name && r.repository.full_name !== repo) continue;
+    if (r.actor?.login !== DISPATCH_ACTOR || (r.triggering_actor?.login ?? DISPATCH_ACTOR) !== DISPATCH_ACTOR) continue;
+    if (!defaultBranch || r.head_branch !== defaultBranch) continue;
+    const head = title.exec(String(r.display_title ?? ''))?.[1];
+    if (head) out.push({ id: r.id, head, url: r.html_url ?? '', at: r.created_at ?? '' });
+  }
+  return out;
+}
+
+/** A verdict.json as a review row, the shape the posted reviews have, so every reader treats it alike. */
+export function verdictAsReview(v, run) {
+  const state = v.event === 'APPROVE' ? 'APPROVED' : v.event === 'REQUEST_CHANGES' ? 'CHANGES_REQUESTED' : 'COMMENTED';
+  return { user: { login: REVIEWER_LOGIN }, state, commit_id: v.head_sha, body: v.body, html_url: run.url, submitted_at: run.at, from_run: run.id };
+}
+
+/** The bytes of a GitHub read as the read token: an artifact zip, which the API answers with a redirect fetch follows. */
+export async function ghBytes(ctx, path, maxBytes = LIMITS.artifactBytes) {
+  const res = await withRetry(ctx, `GitHub GET ${path}`, () => ctx.fetch(`https://api.github.com${path}`, {
+    headers: { authorization: `Bearer ${ctx.readToken}`, accept: 'application/vnd.github+json', 'x-github-api-version': '2022-11-28' },
+    signal: AbortSignal.timeout(30_000),
+  }));
+  const buf = Buffer.from(await res.arrayBuffer());
+  if (buf.length > maxBytes) throw new Error(`${path}: ${buf.length} bytes, over the ${maxBytes} byte cap`);
+  return buf;
+}
+
+/**
+ * Redline's earlier verdicts on this PR, read from its dispatched runs' redline-verdict artifacts,
+ * oldest first, as review rows. On a private repository nothing is ever posted (the post runs on
+ * public repositories only), so without this each round began with no memory of the last and a
+ * request-changes round could not be counted. Only a run the PR could not have shaped is read
+ * (reviewRunsOf); the newest LIMITS.earlierRuns of them are; an artifact that is missing,
+ * expired, malformed, or for another PR or head is passed over; a read that fails leaves the rest
+ * unread and is logged, never a failed review.
+ */
+export async function earlierVerdicts(ctx, { pr }) {
+  const { repo, pr: n } = ctx;
+  const out = [];
+  try {
+    const listed = await gh(ctx, `/repos/${repo}/actions/workflows/redline.yml/runs?event=workflow_dispatch&per_page=100`);
+    const runs = reviewRunsOf(listed?.workflow_runs, { repo, pr: n, defaultBranch: pr?.base?.repo?.default_branch }).slice(0, LIMITS.earlierRuns);
+    for (const run of runs) {
+      const arts = await gh(ctx, `/repos/${repo}/actions/runs/${run.id}/artifacts`);
+      const a = (arts?.artifacts ?? []).find((x) => x?.name === VERDICT_ARTIFACT && x.expired !== true && Number.isInteger(x.id));
+      if (!a) continue;
+      const entry = zipEntry(await ghBytes(ctx, `/repos/${repo}/actions/artifacts/${a.id}/zip`), VERDICT_FILE, LIMITS.artifactBytes);
+      let v = null;
+      try { v = entry && JSON.parse(entry.toString('utf8')); } catch { v = null; }
+      if (!v || verdictProblem(v) || v.repo !== repo || v.pr !== n || v.head_sha !== run.head) continue;
+      out.push(verdictAsReview(v, run));
+    }
+  } catch (e) {
+    ctx.log?.(`earlier verdicts from the runs not all read: ${e.message}`);
+  }
+  return out.reverse();
+}
+
+/**
+ * The posted reviews and the runs' verdicts as one list, oldest first: a head with a posted
+ * Redline verdict keeps it, a head with none takes the run's. Pure.
+ */
+export function mergeVerdicts(posted, fromRuns) {
+  const postedHeads = new Set((posted ?? []).filter((r) => isReviewer(r) && (r.state === 'APPROVED' || r.state === 'CHANGES_REQUESTED')).map((r) => r.commit_id));
+  const extra = (fromRuns ?? []).filter((r) => !postedHeads.has(r.commit_id));
+  const at = (r) => Date.parse(r?.submitted_at ?? '') || 0;
+  return [...(posted ?? []), ...extra].sort((a, b) => at(a) - at(b));
+}
+
+/** How many heads of this PR, other than the one being read, Redline asked to change. Pure. */
+export function roundsAsked(reviews, headSha) {
+  return new Set((reviews ?? []).filter((r) => isReviewer(r) && r.state === 'CHANGES_REQUESTED' && r.commit_id && r.commit_id !== headSha).map((r) => r.commit_id)).size;
+}
+
+/**
+ * The verdict Redline leaves when the cap is reached: it asks for changes once more without a
+ * model call, says why, and quotes its last request so the person who takes the PR has the list.
+ */
+/** The text without HTML comments (the head marker), removed until none is left: one pass can leave one behind. Pure. */
+export function stripComments(text) {
+  let t = String(text ?? '');
+  for (;;) {
+    const next = t.replace(/<!--[\s\S]*?-->/g, '');
+    if (next === t) return t;
+    t = next;
+  }
+}
+
+export function renderCapBody(rounds, cap, last, headSha) {
+  const lastText = last ? stripComments(last.body).trim() : '';
+  const where = String(last?.commit_id ?? '').slice(0, 7);
+  return [
+    `**Verdict: request changes.** This pull request has had ${rounds} rounds of requested changes and the cap is ${cap}, so this head is not read: a person takes it from here. The last request${where ? `, at ${where},` : ''} follows; what it asked and is still open is the list. A dispatch with reread reads this head after all.`,
+    ...(lastText ? [lastText] : []),
+    `rule:${ROUND_CAP_RULE}`,
+    `<!-- redline:head=${headSha} -->`,
+  ].join('\n\n');
 }
 
 // ---------- tools over the checkout ----------
@@ -968,7 +1123,9 @@ export async function reviewChange(ctx, { pr, files, commits, reviews = [], prot
   const corpus = [...corpusOf(brief), ...checkoutCorpus(ctx.checkout, unshownFiles(files, diff.omitted))];
 
   // Earlier reviews reach the model but not the corpus: a line they quote may be gone from the head.
-  const messages = [{ role: 'user', content: `${brief}${changedFilesSection(ctx.checkout, files)}${earlierReviewsSection(reviews, pr.head.sha)}\n\nReview this change and finish with redline_submit.` }];
+  // One round: every blocking finding the diff grounds goes in this verdict. A defect visible now
+  // and raised only after the author answers the first costs the author a round (ci-wizard#33, 20).
+  const messages = [{ role: 'user', content: `${brief}${changedFilesSection(ctx.checkout, files)}${earlierReviewsSection(reviews, pr.head.sha)}\n\nReview this change and finish with redline_submit. Report every blocking finding you can ground, not the first one you meet: a defect visible now and raised only in a later round costs the author a round.` }];
   const started = ctx.now();
   const conversation = `redline-${randomUUID()}`;
   let review = null;
@@ -1098,14 +1255,39 @@ export async function runReview(ctx) {
   if (pr.head.repo?.full_name !== repo && !ctx.fork) return { outcome: 'skipped', reason: 'fork PR' };
   if (pr.draft) return { outcome: 'skipped', reason: 'draft PR' };
 
-  // A re-read reviews the head again: the verdict standing there is the one being reconsidered.
-  const reviews = await ghAll(ctx, `/repos/${repo}/pulls/${n}/reviews`);
-  const standing = ctx.reread ? null : verdictAtHead(reviews, headSha);
-  if (standing) return { outcome: 'existing', verdict: standing.state === 'APPROVED' ? 'APPROVE' : 'REQUEST_CHANGES', url: standing.html_url };
-
+  // Redline's verdicts so far: the posted reviews, and the runs' artifacts for the heads nothing
+  // was posted at (every head, on a private repository).
   const files = await ghAll(ctx, `/repos/${repo}/pulls/${n}/files`);
-  routeModel(ctx, files);
   const commits = await ghAll(ctx, `/repos/${repo}/pulls/${n}/commits`, 3);
+  const postedReviews = await ghAll(ctx, `/repos/${repo}/pulls/${n}/reviews`);
+  const reviews = mergeVerdicts(postedReviews, await earlierVerdicts(ctx, { pr }));
+  // A re-read reviews the head again: the verdict standing there is the one being reconsidered. A
+  // standing verdict is written to verdict.json too, so this run carries it like the run that made
+  // it; a dry run writes nothing.
+  const standing = ctx.reread ? null : verdictAtHead(reviews, headSha);
+  if (standing) {
+    const verdict = standing.state === 'APPROVED' ? 'APPROVE' : 'REQUEST_CHANGES';
+    const record = !ctx.dryRun && typeof standing.body === 'string' && standing.body.trim()
+      ? verdictRecord({ repo, pr: n, headSha, event: verdict, body: standing.body, comments: [], posted: !standing.from_run })
+      : undefined;
+    return { outcome: 'existing', verdict, url: standing.html_url, record };
+  }
+  // The round cap: a PR that has had its rounds is not read again until a person says so (reread).
+  // A dry run reports the cap verdict and posts and records nothing, as it does for a review.
+  const cap = Number.isInteger(ctx.roundCap) ? ctx.roundCap : DEFAULT_ROUND_CAP;
+  const rounds = roundsAsked(reviews, headSha);
+  if (cap > 0 && !ctx.reread && rounds >= cap) {
+    const last = [...reviews].reverse().find((r) => isReviewer(r) && r.state === 'CHANGES_REQUESTED' && r.commit_id !== headSha) ?? null;
+    const body = renderCapBody(rounds, cap, last, headSha);
+    ctx.log?.(`round cap: ${rounds} request-changes rounds on #${n} against a cap of ${cap}; ${headSha.slice(0, 7)} is not read`);
+    if (ctx.dryRun) return { outcome: 'dry-run', verdict: 'REQUEST_CHANGES', rounds, cap, body };
+    const record = (wasPosted) => verdictRecord({ repo, pr: n, headSha, event: 'REQUEST_CHANGES', body, comments: [], posted: wasPosted });
+    if (!ctx.reviewToken) return { outcome: 'capped', verdict: 'REQUEST_CHANGES', rounds, cap, body, record: record(false) };
+    const p = await gh(ctx, `/repos/${repo}/pulls/${n}/reviews`, { token: ctx.reviewToken, method: 'POST', body: { commit_id: headSha, event: 'REQUEST_CHANGES', body } });
+    return { outcome: 'capped', verdict: 'REQUEST_CHANGES', rounds, cap, body, url: p.html_url, record: record(true) };
+  }
+
+  routeModel(ctx, files);
   let protectedSet = new Set();
   try {
     protectedSet = protectedIn(await baseAttributes(ctx, pr), files.filter((f) => f.status !== 'removed').map((f) => f.filename));
@@ -1175,6 +1357,7 @@ async function main() {
     context,
     dryRun: env.REDLINE_DRY_RUN === '1',
     reread: env.REDLINE_REREAD === '1',
+    roundCap: roundCapOf(secrets.REDLINE_ROUND_CAP ?? env.REDLINE_ROUND_CAP),
     fork: env.REDLINE_FORK === '1',
     log: (line) => console.log(line),
   };
@@ -1187,6 +1370,7 @@ async function main() {
     console.error(`::error::Redline could not write ${verdictFile}: ${e.message}`); process.exit(2);
   }
   const line = result.outcome === 'skipped' ? `Redline skipped: ${result.reason}`
+    : result.outcome === 'capped' ? `Redline stopped at the round cap (${result.rounds} rounds, cap ${result.cap}), ${result.url ? 'posted' : 'not posted from this run'}: ${result.verdict} ${result.url ?? ''}`
     : result.outcome === 'dry-run' ? `Redline dry run (nothing posted): ${result.verdict}`
       : result.outcome === 'unposted' ? `Redline verdict, not posted from this run: ${result.verdict}`
         : `Redline ${result.outcome === 'existing' ? 'already reviewed' : 'posted'}: ${result.verdict} ${result.url ?? ''}`;

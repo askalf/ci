@@ -53,11 +53,13 @@
 // CLI (the post step of redline-post.yml):
 //   REPO=owner/name RUN_ID=<the Redline run> GH_READ_TOKEN=... REDLINE_REVIEWER_TOKEN=... node post.mjs
 
-import { inflateRawSync } from 'node:zlib';
 import { appendFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
-import { gh, verdictProblem, REVIEWER_LOGIN } from './review.mjs';
+import { gh, verdictProblem, REVIEWER_LOGIN, DISPATCH_ACTOR } from './review.mjs';
+export { DISPATCH_ACTOR };
 import { CI_REPO } from './pin.mjs';
+import { zipEntry, MAX_ARTIFACT_BYTES } from './zip.mjs';
+export { zipEntry, MAX_ARTIFACT_BYTES };
 
 export const CALLER_PATH = '.github/workflows/redline.yml';
 /**
@@ -69,10 +71,7 @@ export const TOOLING_REPOS = CI_REPO === 'askalf/ci' ? ['askalf/ci', 'askalf/ask
 export const REVIEW_WORKFLOW_FILE = '.github/workflows/redline-review.yml';
 export const VERDICT_ARTIFACT = 'redline-verdict';
 export const VERDICT_FILE = 'verdict.json';
-/** verdict.json is a few KB; anything far larger is not one. */
-export const MAX_ARTIFACT_BYTES = 1_000_000;
-/** The identity that dispatches a review. A dispatched run attributed to anyone else is not ours. */
-export const DISPATCH_ACTOR = 'askalf';
+// DISPATCH_ACTOR, the identity that dispatches a review, is review.mjs's: both readers of a run hold the one rule.
 /**
  * How many of the base branch's commits to redline.yml rule 3 reads. The run's copy is among them
  * unless that many changes to the file merged between the run and its post.
@@ -326,47 +325,7 @@ export function ruleVerdictMatches({ repo, pr, prHead, run, artifact, verdictTex
   };
 }
 
-// ---------- the artifact ----------
-
-/**
- * One entry of a zip archive, by name, from the central directory. Stored and deflated entries
- * only, no zip64, at most `maxBytes` uncompressed. Null when the entry is absent or unreadable. Pure.
- */
-export function zipEntry(zip, name, maxBytes = MAX_ARTIFACT_BYTES) {
-  try {
-    const min = Math.max(0, zip.length - 22 - 0xffff);
-    let eocd = -1;
-    for (let i = zip.length - 22; i >= min; i--) {
-      if (zip.readUInt32LE(i) === 0x06054b50) { eocd = i; break; }
-    }
-    if (eocd < 0) return null;
-    const entries = zip.readUInt16LE(eocd + 10);
-    let p = zip.readUInt32LE(eocd + 16);
-    for (let e = 0; e < entries; e++) {
-      if (zip.readUInt32LE(p) !== 0x02014b50) return null;
-      const method = zip.readUInt16LE(p + 10);
-      const csize = zip.readUInt32LE(p + 20);
-      const usize = zip.readUInt32LE(p + 24);
-      const nlen = zip.readUInt16LE(p + 28);
-      const xlen = zip.readUInt16LE(p + 30);
-      const clen = zip.readUInt16LE(p + 32);
-      const local = zip.readUInt32LE(p + 42);
-      const entryName = zip.subarray(p + 46, p + 46 + nlen).toString('utf8');
-      p += 46 + nlen + xlen + clen;
-      if (entryName !== name) continue;
-      if (csize === 0xffffffff || usize === 0xffffffff || usize > maxBytes) return null;
-      if (zip.readUInt32LE(local) !== 0x04034b50) return null;
-      const start = local + 30 + zip.readUInt16LE(local + 26) + zip.readUInt16LE(local + 28);
-      const data = zip.subarray(start, start + csize);
-      if (data.length !== csize) return null;
-      const out = method === 0 ? Buffer.from(data) : method === 8 ? inflateRawSync(data, { maxOutputLength: maxBytes }) : null;
-      return out && out.length === usize ? out : null;
-    }
-    return null;
-  } catch {
-    return null;
-  }
-}
+// ---------- the artifact: zipEntry, in zip.mjs, shared with the review ----------
 
 // ---------- I/O ----------
 

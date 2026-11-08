@@ -30,6 +30,21 @@ wherever it is, whatever severity the model gave it, and a review that asked for
 such findings approves. `redline_search` runs in a child process killed
 after 10 seconds, so a pattern that backtracks without end cannot stall the review.
 
+Rounds. The brief asks for every blocking finding the diff grounds in the one review, and
+Redline's earlier verdicts on the PR go to the model as data: the posted reviews, and, for a head
+nothing was posted at (every head on a private repository, where the post never runs), the
+`redline-verdict` artifact of the PR's earlier dispatched runs, read with the job's own token. Only
+askalf's dispatches of `redline.yml` on the default branch are read: they ran the default branch's
+workflow files, which neither the PR nor its base branch can shape. A `pull_request` run ran the
+head's own files and is never read; on a public repository its verdict is posted and comes in with
+the reviews. After
+`REDLINE_ROUND_CAP` request-changes rounds on one PR (default 4, counted by head; 0 turns it off),
+a new head is not read: the run asks for changes once more without a model call, says why, quotes
+the last request and leaves the PR to a person, under the rule `round-cap`. A dispatch with
+`reread` reads that head after all. A verdict already standing at the head, posted or in a run's
+artifact, is reused, and the run writes it to its own `verdict.json` so every finished run carries
+the verdict of its head.
+
 ## The post: `redline-post-verdict.yml` and `post.mjs`
 
 The review job runs the workflow files a pull request brings with it, so it never holds the
