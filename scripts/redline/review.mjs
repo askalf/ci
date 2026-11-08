@@ -32,10 +32,15 @@
 //     reviews. On a private repository nothing is ever posted (the post runs on public ones only),
 //     so until 2026-11-08 every round there began with no memory of the last.
 //   - A round cap: after REDLINE_ROUND_CAP (default 4) request-changes rounds on one PR, counted
-//     by head, a new head is not reviewed. The run asks for changes once more without a model
-//     call, says so, quotes the last request, and a person takes the PR; a dispatch with reread
-//     lifts the cap for that head. ci-wizard#33 took 20 rounds on 2026-11-08, each round raising one
-//     more finding in a diff already read.
+//     by distinct head over posted and run verdicts, a new head is not reviewed. The run asks for
+//     changes once more without a model call, says so, quotes the last request, and a person takes
+//     the PR; a dispatch with reread lifts the cap for that head. The count holds across a
+//     force-push because a run is tied to the PR by its branch, not by a commit the PR still lists,
+//     and a run counts only when the PR could not have shaped it (below).
+//   - A run's verdict is trusted on the poster's terms: a dispatch by askalf of redline.yml on the
+//     default branch (the PR cannot shape that run), or a pull_request run of a PR that changes
+//     nothing under .github/workflows/ or .github/actions/ (one that does could upload a verdict
+//     of its own). Any other run's artifact is not read.
 //   - Turns, wall time, tool output and diff size are all bounded; near the end the model is
 //     forced to submit. A model that rejects a forced tool_choice (rejectsForcedToolChoice) is
 //     told in that turn's user content to submit, and every other tool call is refused.
@@ -460,7 +465,7 @@ export function earlierReviewsSection(reviews, headSha) {
   if (!asked.length) return '';
   const cap = LIMITS.earlierReviewChars;
   const parts = asked.slice(-LIMITS.earlierReviews).map((r) => {
-    const b = String(r.body).replace(/<!--[\s\S]*?-->/g, '').trim();
+    const b = stripComments(r.body).trim();
     const text = b.length > cap ? `${b.slice(0, cap)}\n[cut at ${cap} characters]` : b;
     return `Review of ${String(r.commit_id).slice(0, 7)}:\n${text}`;
   });
@@ -517,27 +522,49 @@ export function roundCapOf(value) {
   return /^\d{1,3}$/.test(s) ? Number(s) : DEFAULT_ROUND_CAP;
 }
 
+/** The identity that dispatches a review (the ops tick); the poster holds the same rule. */
+export const DISPATCH_ACTOR = 'askalf';
+const CI_DIRS = ['.github/workflows/', '.github/actions/'];
+const underCiDir = (p) => typeof p === 'string' && CI_DIRS.some((d) => p.startsWith(d));
+
+/** Whether the PR changes anything under .github/workflows/ or .github/actions/: then its own pull_request runs are not trusted. */
+export function changesCi(files) {
+  return (files ?? []).some((f) => underCiDir(f?.filename) || underCiDir(f?.previous_filename));
+}
+
 /** The title a dispatched review run carries: `Redline review <repo>#<pr> @ <head>[ (re-read)]`. */
 export function dispatchTitleRe(repo, pr) {
   return new RegExp(`^Redline review ${escapeRe(repo)}#${pr} @ ([0-9a-f]{40})( \\(re-read\\))?$`);
 }
 
 /**
- * The finished Redline runs of this PR among a repository's runs of redline.yml, in the order
- * given (the API lists newest first), each { id, head, url, at }: a pull_request run whose head is
- * one of the PR's commits, or a dispatch whose title names this PR and a head. Only a run that
- * reached a verdict counts (success or failure); a cancelled or errored one left none. Pure.
+ * The finished Redline runs of this PR whose verdicts may be trusted, among a repository's runs
+ * of redline.yml, in the order given (the API lists newest first), each { id, head, url, at }.
+ * A run counts when it reached a verdict (success or failure) and the PR could not have shaped it:
+ *   - a dispatch by DISPATCH_ACTOR of redline.yml on the default branch, titled for this PR and a
+ *     head (the default branch's workflow files ran, whatever the PR changes);
+ *   - a pull_request run from this repository tied to the PR (GitHub lists the PR on it, or it ran
+ *     on the PR's branch), at its own head_sha, only when trustPullRequestRuns: the PR changes
+ *     nothing under the CI directories, so the run was the reviewed redline.yml and not the PR's.
+ * The branch tie, not the PR's current commit list, is what finds a head a force-push rewrote. Pure.
  */
-export function reviewRunsOf(runs, { repo, pr, commitShas }) {
+export function reviewRunsOf(runs, { repo, pr, prHeadRef, defaultBranch, trustPullRequestRuns = false }) {
   const title = dispatchTitleRe(repo, pr);
   const out = [];
   for (const r of runs ?? []) {
     if (r?.status !== 'completed' || (r.conclusion !== 'success' && r.conclusion !== 'failure')) continue;
-    if (r.path && r.path !== '.github/workflows/redline.yml') continue;
+    if (r.path !== '.github/workflows/redline.yml' || !Number.isInteger(r.id)) continue;
+    if (r.repository?.full_name && r.repository.full_name !== repo) continue;
     let head = null;
-    if (r.event === 'pull_request' && commitShas.has(r.head_sha)) head = r.head_sha;
-    else if (r.event === 'workflow_dispatch') head = title.exec(String(r.display_title ?? ''))?.[1] ?? null;
-    if (head && Number.isInteger(r.id)) out.push({ id: r.id, head, url: r.html_url ?? '', at: r.created_at ?? '' });
+    if (r.event === 'workflow_dispatch') {
+      const byAskalf = r.actor?.login === DISPATCH_ACTOR && (r.triggering_actor?.login ?? DISPATCH_ACTOR) === DISPATCH_ACTOR;
+      if (byAskalf && defaultBranch && r.head_branch === defaultBranch) head = title.exec(String(r.display_title ?? ''))?.[1] ?? null;
+    } else if (r.event === 'pull_request' && trustPullRequestRuns) {
+      const ours = r.head_repository?.full_name === repo;
+      const tied = (r.pull_requests ?? []).some((p) => p?.number === pr) || (prHeadRef && r.head_branch === prHeadRef);
+      if (ours && tied && /^[0-9a-f]{40}$/.test(String(r.head_sha ?? ''))) head = r.head_sha;
+    }
+    if (head) out.push({ id: r.id, head, url: r.html_url ?? '', at: r.created_at ?? '' });
   }
   return out;
 }
@@ -563,16 +590,19 @@ export async function ghBytes(ctx, path, maxBytes = LIMITS.artifactBytes) {
  * Redline's earlier verdicts on this PR, read from its runs' redline-verdict artifacts, oldest
  * first, as review rows. On a private repository nothing is ever posted (the post runs on public
  * repositories only), so without this each round began with no memory of the last and a
- * request-changes round could not be counted. The newest LIMITS.earlierRuns runs are read; an
- * artifact that is missing, expired, malformed, or for another PR or head is passed over; a read
- * that fails leaves the rest unread and is logged, never a failed review.
+ * request-changes round could not be counted. Only a run the PR could not have shaped is read
+ * (reviewRunsOf); the newest LIMITS.earlierRuns of them are; an artifact that is missing, expired,
+ * malformed, or for another PR or head is passed over; a read that fails leaves the rest unread
+ * and is logged, never a failed review.
  */
-export async function earlierVerdicts(ctx, { commitShas }) {
+export async function earlierVerdicts(ctx, { pr, files }) {
   const { repo, pr: n } = ctx;
   const out = [];
   try {
     const listed = await gh(ctx, `/repos/${repo}/actions/workflows/redline.yml/runs?per_page=100`);
-    const runs = reviewRunsOf(listed?.workflow_runs, { repo, pr: n, commitShas }).slice(0, LIMITS.earlierRuns);
+    const runs = reviewRunsOf(listed?.workflow_runs, {
+      repo, pr: n, prHeadRef: pr?.head?.ref, defaultBranch: pr?.base?.repo?.default_branch, trustPullRequestRuns: !changesCi(files),
+    }).slice(0, LIMITS.earlierRuns);
     for (const run of runs) {
       const arts = await gh(ctx, `/repos/${repo}/actions/runs/${run.id}/artifacts`);
       const a = (arts?.artifacts ?? []).find((x) => x?.name === VERDICT_ARTIFACT && x.expired !== true && Number.isInteger(x.id));
@@ -609,8 +639,18 @@ export function roundsAsked(reviews, headSha) {
  * The verdict Redline leaves when the cap is reached: it asks for changes once more without a
  * model call, says why, and quotes its last request so the person who takes the PR has the list.
  */
+/** The text without HTML comments (the head marker), removed until none is left: one pass can leave one behind. Pure. */
+export function stripComments(text) {
+  let t = String(text ?? '');
+  for (;;) {
+    const next = t.replace(/<!--[\s\S]*?-->/g, '');
+    if (next === t) return t;
+    t = next;
+  }
+}
+
 export function renderCapBody(rounds, cap, last, headSha) {
-  const lastText = last ? String(last.body ?? '').replace(/<!--[\s\S]*?-->/g, '').trim() : '';
+  const lastText = last ? stripComments(last.body).trim() : '';
   const where = String(last?.commit_id ?? '').slice(0, 7);
   return [
     `**Verdict: request changes.** This pull request has had ${rounds} rounds of requested changes and the cap is ${cap}, so this head is not read: a person takes it from here. The last request${where ? `, at ${where},` : ''} follows; what it asked and is still open is the list. A dispatch with reread reads this head after all.`,
@@ -1233,33 +1273,36 @@ export async function runReview(ctx) {
 
   // Redline's verdicts so far: the posted reviews, and the runs' artifacts for the heads nothing
   // was posted at (every head, on a private repository).
+  const files = await ghAll(ctx, `/repos/${repo}/pulls/${n}/files`);
   const commits = await ghAll(ctx, `/repos/${repo}/pulls/${n}/commits`, 3);
   const postedReviews = await ghAll(ctx, `/repos/${repo}/pulls/${n}/reviews`);
-  const reviews = mergeVerdicts(postedReviews, await earlierVerdicts(ctx, { commitShas: new Set(commits.map((c) => c.sha)) }));
+  const reviews = mergeVerdicts(postedReviews, await earlierVerdicts(ctx, { pr, files }));
   // A re-read reviews the head again: the verdict standing there is the one being reconsidered. A
-  // standing verdict is written to verdict.json too, so this run carries it like the run that made it.
+  // standing verdict is written to verdict.json too, so this run carries it like the run that made
+  // it; a dry run writes nothing.
   const standing = ctx.reread ? null : verdictAtHead(reviews, headSha);
   if (standing) {
     const verdict = standing.state === 'APPROVED' ? 'APPROVE' : 'REQUEST_CHANGES';
-    const record = typeof standing.body === 'string' && standing.body.trim()
+    const record = !ctx.dryRun && typeof standing.body === 'string' && standing.body.trim()
       ? verdictRecord({ repo, pr: n, headSha, event: verdict, body: standing.body, comments: [], posted: !standing.from_run })
       : undefined;
     return { outcome: 'existing', verdict, url: standing.html_url, record };
   }
   // The round cap: a PR that has had its rounds is not read again until a person says so (reread).
+  // A dry run reports the cap verdict and posts and records nothing, as it does for a review.
   const cap = Number.isInteger(ctx.roundCap) ? ctx.roundCap : DEFAULT_ROUND_CAP;
   const rounds = roundsAsked(reviews, headSha);
   if (cap > 0 && !ctx.reread && rounds >= cap) {
     const last = [...reviews].reverse().find((r) => isReviewer(r) && r.state === 'CHANGES_REQUESTED' && r.commit_id !== headSha) ?? null;
     const body = renderCapBody(rounds, cap, last, headSha);
-    const record = (wasPosted) => verdictRecord({ repo, pr: n, headSha, event: 'REQUEST_CHANGES', body, comments: [], posted: wasPosted });
     ctx.log?.(`round cap: ${rounds} request-changes rounds on #${n} against a cap of ${cap}; ${headSha.slice(0, 7)} is not read`);
+    if (ctx.dryRun) return { outcome: 'dry-run', verdict: 'REQUEST_CHANGES', rounds, cap, body };
+    const record = (wasPosted) => verdictRecord({ repo, pr: n, headSha, event: 'REQUEST_CHANGES', body, comments: [], posted: wasPosted });
     if (!ctx.reviewToken) return { outcome: 'capped', verdict: 'REQUEST_CHANGES', rounds, cap, body, record: record(false) };
     const p = await gh(ctx, `/repos/${repo}/pulls/${n}/reviews`, { token: ctx.reviewToken, method: 'POST', body: { commit_id: headSha, event: 'REQUEST_CHANGES', body } });
     return { outcome: 'capped', verdict: 'REQUEST_CHANGES', rounds, cap, body, url: p.html_url, record: record(true) };
   }
 
-  const files = await ghAll(ctx, `/repos/${repo}/pulls/${n}/files`);
   routeModel(ctx, files);
   let protectedSet = new Set();
   try {

@@ -55,7 +55,8 @@
 
 import { appendFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
-import { gh, verdictProblem, REVIEWER_LOGIN } from './review.mjs';
+import { gh, verdictProblem, REVIEWER_LOGIN, DISPATCH_ACTOR } from './review.mjs';
+export { DISPATCH_ACTOR };
 import { CI_REPO } from './pin.mjs';
 import { zipEntry, MAX_ARTIFACT_BYTES } from './zip.mjs';
 export { zipEntry, MAX_ARTIFACT_BYTES };
@@ -70,8 +71,7 @@ export const TOOLING_REPOS = CI_REPO === 'askalf/ci' ? ['askalf/ci', 'askalf/ask
 export const REVIEW_WORKFLOW_FILE = '.github/workflows/redline-review.yml';
 export const VERDICT_ARTIFACT = 'redline-verdict';
 export const VERDICT_FILE = 'verdict.json';
-/** The identity that dispatches a review. A dispatched run attributed to anyone else is not ours. */
-export const DISPATCH_ACTOR = 'askalf';
+// DISPATCH_ACTOR, the identity that dispatches a review, is review.mjs's: both readers of a run hold the one rule.
 /**
  * How many of the base branch's commits to redline.yml rule 3 reads. The run's copy is among them
  * unless that many changes to the file merged between the run and its post.
