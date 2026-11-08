@@ -977,6 +977,9 @@ export function buildBrief(pr, files, commits, diff, protectedFiles = [], since 
  * null for a first review, a compare that cannot be read, or one that shows nothing new. A read
  * that fails is logged; the review then shows the whole change, as a first review does.
  */
+/** GitHub's compare lists at most this many files; a delta that reaches it may be cut, and is not shown as the delta. */
+export const COMPARE_FILES_MAX = 300;
+
 export async function deltaSince(ctx, reviews, headSha) {
   const at = (r) => Date.parse(r?.submitted_at ?? '') || 0;
   const judged = (reviews ?? []).filter((r) => isReviewer(r) && (r.state === 'APPROVED' || r.state === 'CHANGES_REQUESTED') && /^[0-9a-f]{40}$/.test(String(r.commit_id ?? '')) && r.commit_id !== headSha);
@@ -984,7 +987,13 @@ export async function deltaSince(ctx, reviews, headSha) {
   if (!last) return null;
   try {
     const cmp = await gh(ctx, `/repos/${ctx.repo}/compare/${last.commit_id}...${headSha}`);
-    if (!Array.isArray(cmp?.files) || cmp.status === 'identical' || cmp.status === 'behind') return null;
+    // No files (identical trees, or a change and its revert) is nothing to read first; a list at
+    // the endpoint's cap may be cut, and a delta with files missing would hide them from the brief.
+    if (!Array.isArray(cmp?.files) || cmp.files.length === 0 || cmp.status === 'identical' || cmp.status === 'behind') return null;
+    if (cmp.files.length >= COMPARE_FILES_MAX) {
+      ctx.log?.(`the change since ${last.commit_id.slice(0, 7)} lists ${cmp.files.length} files, the compare endpoint's cap, so the whole change is shown`);
+      return null;
+    }
     return { head: last.commit_id, files: cmp.files };
   } catch (e) {
     ctx.log?.(`the change since ${last.commit_id.slice(0, 7)} could not be read, so the whole change is shown: ${e.message}`);
