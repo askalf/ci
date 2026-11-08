@@ -1425,12 +1425,10 @@ console.log('\n  the delta since the last verdict');
     const reverted = await deltaSince(cmpCtx({ status: 'ahead', files: [] }), [ask('x')], HEAD);
     check('an ahead compare with no files (a change and its revert) is no delta: the whole change is shown', reverted === null);
     const capped = await deltaSince(cmpCtx({ status: 'ahead', files: Array.from({ length: COMPARE_FILES_MAX }, (_, i) => ({ filename: `f${i}.js`, patch: '+x' })) }), [ask('x')], HEAD);
-    check('a compare at the endpoint's file cap may be cut: no delta, and a log line says so', capped === null && logged.some((l) => /compare endpoint's cap, so the whole change is shown/.test(l)) && COMPARE_FILES_MAX === 300);
+    check("a compare at the endpoint's file cap may be cut: no delta, and a log line says so", capped === null && logged.some((l) => /compare endpoint's cap, so the whole change is shown/.test(l)) && COMPARE_FILES_MAX === 300);
     const { ctx: emptyWorld, calls: emptyCalls } = world({ reviews: [ask('x')], compare: [], turns: [submit(APPROVE)] });
     await runReview(emptyWorld);
-    check('end to end, an empty delta shows the whole change under the plain heading', emptyCalls.model[0].messages[0].content.includes('
-Diff:
-') && emptyCalls.model[0].messages[0].content.includes('+export const token'));
+    check('end to end, an empty delta shows the whole change under the plain heading', emptyCalls.model[0].messages[0].content.includes('\nDiff:\n') && emptyCalls.model[0].messages[0].content.includes('+export const token'));
   }
 }
 
