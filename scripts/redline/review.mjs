@@ -340,13 +340,14 @@ export const PROSE_RULES = new Set(['reads-as-generated', 'ai-attribution', 'mis
 export const ADVISORY_RULES = new Set(['reads-as-generated']);
 
 /**
- * A finding on the pull request's description (the `file` the model names for the PR text), not
- * on code or a commit. A `misleading-text` finding there is a note for the author and never
- * blocks: the description is not what ships, an author edits it in seconds, and a round spent on
- * it is a round (two rounds of one large PR on 2026-11-07 were wording of the body alone).
- * Attribution and secrets in the description still block, as anywhere. Pure.
+ * A finding on the pull request's description: its `file` is the whole label the model gives the
+ * PR text (`PR description`, `pull request body`, `PR text`, one space between the words, an
+ * optional `:<line>`), and nothing else, so a repository file whose name begins the same way
+ * (`prbody.md`, `PR description.md`, `prbody/README.md`) is a file. A `misleading-text` finding
+ * on the description is a note for the author and never blocks: the description is not what
+ * ships. Attribution and a secret in the description still block, as anywhere. Pure.
  */
-export const DESCRIPTION_FILE = /^(?:pr|pull[\s-]?request)\s*(?:description|body|text)\b/i;
+export const DESCRIPTION_FILE = /^(?:pr|pull[ -]request) (?:description|body|text)(?::\d+)?$/i;
 export const isDescriptionFinding = (f) => DESCRIPTION_FILE.test(String(f?.file ?? '').trim()) && f?.rule === 'misleading-text';
 
 /**
