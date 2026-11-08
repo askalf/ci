@@ -13,6 +13,8 @@ names the commit's date and the pull request it came from.
 
 ## November 2026
 
+- A `misleading-text` finding on the pull request's description is reported as minor and never
+  blocks: the description is not what ships. Attribution and a secret there still block.
 - A Redline round after an earlier verdict reads the delta first: the brief's diff is the compare
   of the head last judged and this one, and the whole change is one `redline_diff` call away
   (every file, or one path). A finding may quote either. A first review shows the whole change.

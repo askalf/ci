@@ -224,6 +224,15 @@ console.log('\n  submission, verdict and body');
   const onlyWording = checkSubmission({ verdict: 'REQUEST_CHANGES', summary: 's', findings: [wording], rule: 'reads-as-generated' }).review;
   check('a wording finding marked blocking is reported as minor, and a review held only by it approves',
     onlyWording.findings[0].severity === 'minor' && onlyWording.verdict === 'APPROVE' && onlyWording.rule === 'none' && finalVerdict(onlyWording) === 'APPROVE');
+  const onBody = { ...blocking, file: 'PR description', line: 12, quote: 'reads pull_request runs', problem: 'The description says the opposite of the code.', rule: 'misleading-text' };
+  const onlyBody = checkSubmission({ verdict: 'REQUEST_CHANGES', summary: 's', findings: [onBody], rule: 'misleading-text' }).review;
+  check('a misleading-text finding on the PR description is reported as minor, and a review held only by it approves',
+    onlyBody.findings[0].severity === 'minor' && onlyBody.verdict === 'APPROVE' && finalVerdict(onlyBody) === 'APPROVE');
+  check('the description goes by its whole label, with an optional line; a commit message, a doc, or a file whose name begins the same way does not',
+    ['PR description', 'pr description:12', 'Pull request body', 'pull-request text', ' PR text '].every((file) => checkSubmission({ verdict: 'REQUEST_CHANGES', summary: 's', findings: [{ ...onBody, file }] }).review.findings[0].severity === 'minor')
+    && ['commit message', 'docs/README.md', 'src/pr-description.js', 'prbody.md', 'PR description.md', 'prbody/README.md', 'PR descriptions', 'PR description:12:3', 'PRdescription'].every((file) => checkSubmission({ verdict: 'REQUEST_CHANGES', summary: 's', findings: [{ ...onBody, file }] }).review.findings[0].severity === 'blocking'));
+  check('attribution or a secret in the description still blocks',
+    ['ai-attribution', 'secret-exposure', undefined].every((rule) => finalVerdict(checkSubmission({ verdict: 'REQUEST_CHANGES', summary: 's', findings: [{ ...onBody, rule }] }).review) === 'REQUEST_CHANGES'));
   const withSecret = checkSubmission({ verdict: 'REQUEST_CHANGES', summary: 's', findings: [wording, { ...blocking, rule: 'secret-exposure' }], rule: 'secret-exposure' }).review;
   check('beside another blocking finding the review still requests changes',
     withSecret.findings[0].severity === 'minor' && withSecret.findings[1].severity === 'blocking' && finalVerdict(withSecret) === 'REQUEST_CHANGES' && withSecret.rule === 'secret-exposure');

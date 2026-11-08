@@ -340,6 +340,17 @@ export const PROSE_RULES = new Set(['reads-as-generated', 'ai-attribution', 'mis
 export const ADVISORY_RULES = new Set(['reads-as-generated']);
 
 /**
+ * A finding on the pull request's description: its `file` is the whole label the model gives the
+ * PR text (`PR description`, `pull request body`, `PR text`, one space between the words, an
+ * optional `:<line>`), and nothing else, so a repository file whose name begins the same way
+ * (`prbody.md`, `PR description.md`, `prbody/README.md`) is a file. A `misleading-text` finding
+ * on the description is a note for the author and never blocks: the description is not what
+ * ships. Attribution and a secret in the description still block, as anywhere. Pure.
+ */
+export const DESCRIPTION_FILE = /^(?:pr|pull[ -]request) (?:description|body|text)(?::\d+)?$/i;
+export const isDescriptionFinding = (f) => DESCRIPTION_FILE.test(String(f?.file ?? '').trim()) && f?.rule === 'misleading-text';
+
+/**
  * The root .gitattributes of the pull request's base commit, '' when the base has none. The marks
  * come from the base, never from the head: a pull request cannot mark the files it adds or changes
  * as captured for its own review. The mark lands first, in a reviewed change of its own.
@@ -412,7 +423,7 @@ export function checkSubmission(input) {
   // that asked for changes only for wording approves; one that asked with no blocking finding at
   // all (a change it could not read) still asks.
   const blocked = findings.some((f) => f.severity === 'blocking');
-  const graded = findings.map((f) => (ADVISORY_RULES.has(f.rule) && f.severity === 'blocking' ? { ...f, severity: 'minor' } : f));
+  const graded = findings.map((f) => ((ADVISORY_RULES.has(f.rule) || isDescriptionFinding(f)) && f.severity === 'blocking' ? { ...f, severity: 'minor' } : f));
   const eased = input.verdict === 'REQUEST_CHANGES' && blocked && !graded.some((f) => f.severity === 'blocking');
   const rule = !eased && typeof input.rule === 'string' && /^[a-z0-9-]{1,40}$/.test(input.rule) ? input.rule : 'none';
   return { review: { verdict: eased ? 'APPROVE' : input.verdict, summary: input.summary.trim(), findings: graded, rule } };
