@@ -33,11 +33,11 @@ after 10 seconds, so a pattern that backtracks without end cannot stall the revi
 Rounds. The brief asks for every blocking finding the diff grounds in the one review, and
 Redline's earlier verdicts on the PR go to the model as data: the posted reviews, and, for a head
 nothing was posted at (every head on a private repository, where the post never runs), the
-`redline-verdict` artifact of the PR's earlier runs, read with the job's own token. A run's artifact is
-trusted on the post's terms only: askalf's dispatch of `redline.yml` on the default branch, or a
-`pull_request` run whose own head changed nothing under `.github/workflows/` or `.github/actions/`
-against the base, read per run from the compare (a head that did could have uploaded a verdict of
-its own, and a later head can put the workflow back). After
+`redline-verdict` artifact of the PR's earlier dispatched runs, read with the job's own token. Only
+askalf's dispatches of `redline.yml` on the default branch are read: they ran the default branch's
+workflow files, which neither the PR nor its base branch can shape. A `pull_request` run ran the
+head's own files and is never read; on a public repository its verdict is posted and comes in with
+the reviews. After
 `REDLINE_ROUND_CAP` request-changes rounds on one PR (default 4, counted by head; 0 turns it off),
 a new head is not read: the run asks for changes once more without a model call, says why, quotes
 the last request and leaves the PR to a person, under the rule `round-cap`. A dispatch with
