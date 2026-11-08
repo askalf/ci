@@ -30,7 +30,11 @@ wherever it is, whatever severity the model gave it, and a review that asked for
 such findings approves. `redline_search` runs in a child process killed
 after 10 seconds, so a pattern that backtracks without end cannot stall the review.
 
-Rounds. The brief asks for every blocking finding the diff grounds in the one review, and
+Rounds. A round after an earlier verdict reads the delta first: the brief's diff is GitHub's
+compare of the head Redline last judged and this one, and the whole change against the base is one
+`redline_diff` call away (every file, or one path); a finding may quote either, since both are in
+the corpus. A first review, or a delta that cannot be read, shows the whole change. The brief asks
+for every blocking finding the diff grounds in the one review, and
 Redline's earlier verdicts on the PR go to the model as data: the posted reviews, and, for a head
 nothing was posted at (every head on a private repository, where the post never runs), the
 `redline-verdict` artifact of the PR's earlier dispatched runs, read with the job's own token. Only

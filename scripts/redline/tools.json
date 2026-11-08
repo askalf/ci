@@ -2,6 +2,19 @@
   "name": "redline",
   "tools": [
     {
+      "name": "redline_diff",
+      "description": "The whole change of the pull request against its base, as a unified diff: every changed file, or one path. The brief shows the change since the last review; call this for the rest.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "One changed file; default every file."
+          }
+        }
+      }
+    },
+    {
       "name": "redline_list",
       "description": "List a directory of the PR checkout (directories end with /).",
       "input_schema": {

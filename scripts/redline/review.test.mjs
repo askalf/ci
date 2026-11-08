@@ -10,7 +10,7 @@ import {
   parseEnvFile, readPrompt, safePath, buildDiff, planDiff, unshownFiles, checkoutCorpus, quoteIsGrounded, corpusOf, checkSubmission, finalVerdict,
   renderBody, verdictAtHead, runTool, runReview, buildBrief, contextSection, changedFilesSection, earlierReviewsSection, REVIEWER_LOGIN, LIMITS, metaPhrase,
   verdictRecord, verdictProblem, saveVerdict, VERDICT_VERSION,
-  reviewRunsOf, verdictAsReview, mergeVerdicts, roundsAsked, renderCapBody, roundCapOf, DEFAULT_ROUND_CAP, ROUND_CAP_RULE, VERDICT_ARTIFACT, stripComments, DISPATCH_ACTOR,
+  reviewRunsOf, verdictAsReview, mergeVerdicts, roundsAsked, renderCapBody, roundCapOf, DEFAULT_ROUND_CAP, ROUND_CAP_RULE, VERDICT_ARTIFACT, stripComments, DISPATCH_ACTOR, deltaSince, COMPARE_FILES_MAX,
 } from './review.mjs';
 import { deflateRawSync } from 'node:zlib';
 import * as reviewModule from './review.mjs';
@@ -312,7 +312,9 @@ const PATCH = '@@ -1 +1,2 @@\n+export const token = process.env.X;\n const y = 2
 // runs: the repository's redline.yml runs (none by default; null makes the route 404 like any other
 // unknown path); artifacts: run id -> its artifact rows, or an HTTP status; zips: artifact id -> zip
 // bytes (a Buffer), or an HTTP status.
-function world({ reviews = [], heads = [HEAD], turns, modelStatus = [], draft = false, files = null, attributes = null, headRepo = 'askalf/r', runs = [], artifacts = {}, zips = {} } = {}) {
+// compare: the files GitHub's compare of the last judged head and this one lists (null: the route
+// 404s, and the whole change is shown).
+function world({ reviews = [], heads = [HEAD], turns, modelStatus = [], draft = false, files = null, attributes = null, headRepo = 'askalf/r', runs = [], artifacts = {}, zips = {}, compare = null } = {}) {
   const calls = { posted: [], model: [], keys: [], sleeps: 0 };
   let headReads = 0;
   const json = (body, status = 200, headers = {}) => ({ ok: status < 300, status, headers: new Headers(headers), json: async () => body, text: async () => JSON.stringify(body) });
@@ -339,6 +341,7 @@ function world({ reviews = [], heads = [HEAD], turns, modelStatus = [], draft = 
     if (p.endsWith('/files')) return json(u.searchParams.get('page') === '1' ? (files ?? [{ filename: 'src/b.js', status: 'modified', additions: 1, deletions: 0, patch: PATCH }]) : []);
     if (p.endsWith('/commits')) return json(u.searchParams.get('page') === '1' ? [{ sha: HEAD, commit: { message: 'feat: add token' } }] : []);
     if (p.endsWith('/actions/workflows/redline.yml/runs') && runs) return json({ workflow_runs: runs.filter((r) => u.searchParams.get('event') ? r.event === u.searchParams.get('event') : true) });
+    if (/\/compare\/[0-9a-f]{40}\.\.\.[0-9a-f]{40}$/.test(p) && compare) { calls.compares = (calls.compares ?? 0) + 1; return json({ status: 'ahead', files: compare }); }
     const arts = /\/actions\/runs\/(\d+)\/artifacts$/.exec(p);
     if (arts && runs) { const rows = artifacts[arts[1]]; return typeof rows === 'number' ? json({ message: 'down' }, rows) : json({ artifacts: rows ?? [] }); }
     const zipOf = /\/actions\/artifacts\/(\d+)\/zip$/.exec(p);
@@ -362,7 +365,7 @@ console.log('\n  runReview');
   check('approve: posted at the head with the reviewer token', r.outcome === 'posted' && r.verdict === 'APPROVE'
     && calls.posted.length === 1 && calls.posted[0].commit_id === HEAD && calls.posted[0].event === 'APPROVE' && calls.posted[0].auth === 'Bearer review');
   check('the tool result went back to the model', JSON.stringify(calls.model[1].messages.at(-1)).includes('export const token'));
-  check('the model got the diff and the tools, and no forced choice early', calls.model[0].messages[0].content.includes('+export const token') && calls.model[0].tools.length === 4 && !calls.model[0].tool_choice);
+  check('the model got the diff and the tools, and no forced choice early', calls.model[0].messages[0].content.includes('+export const token') && calls.model[0].tools.length === 5 && !calls.model[0].tool_choice);
   const ids = calls.model.map((b) => b.metadata?.user_id);
   check('every turn of one review carries the same conversation id', ids.length === 2 && /^redline-[0-9a-f-]{36}$/.test(ids[0]) && ids[1] === ids[0]);
   const { ctx: again, calls: againCalls } = world({ turns: [submit(APPROVE)] });
@@ -682,7 +685,7 @@ console.log('\n  captured data (redline-protected)');
   const { ctx, calls } = world({ turns: [(b) => (b.tool_choice ? submit(APPROVE) : use('redline_list', {}))] });
   const r = await runReview(ctx);
   check(`the model is forced to submit at turn ${LIMITS.forceSubmitAt}`, r.verdict === 'APPROVE' && calls.model.length === LIMITS.forceSubmitAt && calls.model.at(-1).tool_choice.name === 'redline_submit');
-  check('a forced turn keeps every tool in the request (history may name them)', calls.model.at(-1).tools.length === 4);
+  check('a forced turn keeps every tool in the request (history may name them)', calls.model.at(-1).tools.length === 5);
 }
 {
   const { ctx } = world({ turns: [use('redline_list', {})] });
@@ -1370,6 +1373,62 @@ console.log('\n  pin bump');
     ctx.model = 'gpt-5.6-terra'; ctx.pinModel = 'gpt-5.6-terra'; ctx.deepModel = 'gpt-6-astra';
     await runReview(ctx);
     check('a pin bump stays on the pin model when it is REDLINE_MODEL, not the deep model', calls.model.length > 0 && calls.model.every((b) => b.model === 'gpt-5.6-terra'));
+  }
+}
+
+console.log('\n  the delta since the last verdict');
+{
+  const OLD = 'a'.repeat(40);
+  const ask = (body, over = {}) => ({ user: { login: REVIEWER_LOGIN }, state: 'CHANGES_REQUESTED', commit_id: OLD, body, submitted_at: '2026-11-08T01:00:00Z', ...over });
+  const DELTA = [{ filename: 'src/b.js', status: 'modified', additions: 1, deletions: 0, patch: '@@ -2 +2,2 @@\n const y = 2;\n+const z = 3;' }];
+  const prOf = (since) => buildBrief({ number: 7, title: 't', body: '', user: { login: 'a' }, head: { ref: 'h', sha: HEAD }, base: { ref: 'main', repo: { full_name: 'askalf/r' } } }, [], [], 'THE DIFF', [], since);
+  check('buildBrief: a first review heads the diff plainly; a round with a delta says since when, and where the whole change is',
+    prOf(null).includes('\nDiff:\nTHE DIFF') && prOf({ head: OLD, files: DELTA }).includes('Diff since the last review, at aaaaaaa (the whole change against main is one redline_diff call away') && prOf({ head: OLD, files: DELTA }).includes('THE DIFF'));
+  check('runTool redline_diff: the whole change, one path, an unknown path, nothing without files',
+    runTool(root, 'redline_diff', {}, { diffFiles: [{ filename: 'src/b.js', status: 'modified', patch: PATCH }] }).includes('+export const token')
+    && runTool(root, 'redline_diff', { path: 'src/b.js' }, { diffFiles: [{ filename: 'src/b.js', patch: PATCH }, { filename: 'src/c.js', patch: '+c' }] }).includes('+export const token')
+    && !runTool(root, 'redline_diff', { path: 'src/b.js' }, { diffFiles: [{ filename: 'src/b.js', patch: PATCH }, { filename: 'src/c.js', patch: '+c' }] }).includes('+c')
+    && /^error: not a file this pull request changes/.test(runTool(root, 'redline_diff', { path: 'nope.js' }, { diffFiles: [{ filename: 'src/b.js', patch: PATCH }] }))
+    && runTool(root, 'redline_diff', {}) === '(no diff)');
+  {
+    const { ctx, calls } = world({ reviews: [ask('The loop skips the last item.')], compare: DELTA, turns: [use('redline_diff', {}), submit({ verdict: 'REQUEST_CHANGES', summary: 'Still exports it.', findings: [GOOD] })] });
+    const r = await runReview(ctx);
+    const first = calls.model[0].messages[0].content;
+    check('a round after a verdict: the brief shows the delta since that head, not the whole change', first.includes('Diff since the last review, at aaaaaaa') && first.includes('+const z = 3;') && !first.includes('+export const token') && calls.compares === 1);
+    check('redline_diff answers with the whole change', JSON.stringify(calls.model[1].messages.at(-1)).includes('+export const token'));
+    check('a finding that quotes the whole change, not the delta, still grounds: no repair round, posted as asked', r.outcome === 'posted' && r.verdict === 'REQUEST_CHANGES' && calls.model.length === 2 && calls.posted[0].body.includes('+export const token'));
+    check('the earlier request is in the brief after the delta', first.indexOf('+const z = 3;') < first.indexOf('The loop skips the last item.'));
+  }
+  {
+    const { ctx, calls } = world({ reviews: [ask('x')], compare: null, turns: [submit(APPROVE)] });
+    const lines = [];
+    ctx.log = (l) => lines.push(l);
+    await runReview(ctx);
+    const first = calls.model[0].messages[0].content;
+    check('a compare that cannot be read: logged, and the whole change is shown as in a first review', first.includes('\nDiff:\n') && first.includes('+export const token') && lines.some((l) => /could not be read, so the whole change is shown/.test(l)));
+  }
+  {
+    const { ctx, calls } = world({ compare: DELTA, turns: [submit(APPROVE)] });
+    await runReview(ctx);
+    check('a first review reads no compare and shows the whole change', calls.model[0].messages[0].content.includes('\nDiff:\n') && !calls.compares);
+    const approved = { user: { login: REVIEWER_LOGIN }, state: 'APPROVED', commit_id: OLD, body: 'fine', submitted_at: '2026-11-08T01:00:00Z' };
+    const { ctx: afterOk, calls: afterOkCalls } = world({ reviews: [approved], compare: DELTA, turns: [submit(APPROVE)] });
+    await runReview(afterOk);
+    check('a round after an approve at another head reads the delta too', afterOkCalls.model[0].messages[0].content.includes('Diff since the last review, at aaaaaaa'));
+    const newest = ask('later', { commit_id: 'b'.repeat(40), submitted_at: '2026-11-08T02:00:00Z' });
+    const d = await deltaSince({ repo: 'askalf/r', readToken: 'r', fetch: async (url) => ({ ok: true, status: 200, headers: new Headers(), json: async () => ({ status: 'ahead', files: [{ filename: /bbbb/.test(url) ? 'newest' : 'older' }] }), text: async () => '' }), sleep: async () => {}, now: () => 0 }, [ask('x'), newest], HEAD);
+    check('deltaSince compares from the newest judged head, by time', d?.head === 'b'.repeat(40) && d.files[0].filename === 'newest');
+    const same = await deltaSince({ repo: 'askalf/r', readToken: 'r', fetch: async () => ({ ok: true, status: 200, headers: new Headers(), json: async () => ({ status: 'identical', files: [] }), text: async () => '' }), sleep: async () => {}, now: () => 0 }, [ask('x')], HEAD);
+    check('a compare that shows nothing new is no delta', same === null && (await deltaSince({}, [], HEAD)) === null);
+    const cmpCtx = (body) => ({ repo: 'askalf/r', readToken: 'r', fetch: async () => ({ ok: true, status: 200, headers: new Headers(), json: async () => body, text: async () => '' }), sleep: async () => {}, now: () => 0, log: (l) => logged.push(l) });
+    const logged = [];
+    const reverted = await deltaSince(cmpCtx({ status: 'ahead', files: [] }), [ask('x')], HEAD);
+    check('an ahead compare with no files (a change and its revert) is no delta: the whole change is shown', reverted === null);
+    const capped = await deltaSince(cmpCtx({ status: 'ahead', files: Array.from({ length: COMPARE_FILES_MAX }, (_, i) => ({ filename: `f${i}.js`, patch: '+x' })) }), [ask('x')], HEAD);
+    check("a compare at the endpoint's file cap may be cut: no delta, and a log line says so", capped === null && logged.some((l) => /compare endpoint's cap, so the whole change is shown/.test(l)) && COMPARE_FILES_MAX === 300);
+    const { ctx: emptyWorld, calls: emptyCalls } = world({ reviews: [ask('x')], compare: [], turns: [submit(APPROVE)] });
+    await runReview(emptyWorld);
+    check('end to end, an empty delta shows the whole change under the plain heading', emptyCalls.model[0].messages[0].content.includes('\nDiff:\n') && emptyCalls.model[0].messages[0].content.includes('+export const token'));
   }
 }
 
