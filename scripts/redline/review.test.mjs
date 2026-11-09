@@ -8,7 +8,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   parseEnvFile, readPrompt, safePath, buildDiff, planDiff, unshownFiles, checkoutCorpus, quoteIsGrounded, corpusOf, checkSubmission, finalVerdict,
-  renderBody, verdictAtHead, runTool, runReview, buildBrief, contextSection, changedFilesSection, earlierReviewsSection, REVIEWER_LOGIN, LIMITS, metaPhrase,
+  renderBody, verdictAtHead, isDeterministicApproval, runTool, runReview, buildBrief, contextSection, changedFilesSection, earlierReviewsSection, REVIEWER_LOGIN, LIMITS, metaPhrase,
   verdictRecord, verdictProblem, saveVerdict, VERDICT_VERSION,
   reviewRunsOf, verdictAsReview, mergeVerdicts, roundsAsked, renderCapBody, roundCapOf, DEFAULT_ROUND_CAP, ROUND_CAP_RULE, VERDICT_ARTIFACT, stripComments, DISPATCH_ACTOR, deltaSince, COMPARE_FILES_MAX,
 } from './review.mjs';
@@ -312,6 +312,13 @@ console.log('\n  verdictAtHead');
     verdictAtHead([r(REVIEWER_LOGIN, 'COMMENTED', HEAD), r('someone', 'APPROVED', HEAD), r(REVIEWER_LOGIN, 'APPROVED', OTHER)], HEAD) === null);
   check('the last verdict at the head wins', verdictAtHead([r(REVIEWER_LOGIN, 'CHANGES_REQUESTED', HEAD), r(REVIEWER_LOGIN, 'APPROVED', HEAD)], HEAD).state === 'APPROVED');
   check('a dismissed review is not a verdict', verdictAtHead([r(REVIEWER_LOGIN, 'DISMISSED', HEAD)], HEAD) === null);
+  const det = { ...r(REVIEWER_LOGIN, 'APPROVED', HEAD), body: '**Deterministic approval — no LLM reviewed this diff.**\n\nClassified low-risk: docs-only (1 file(s)).' };
+  check('a deterministic approval under the reviewer\'s login is not a verdict', isDeterministicApproval(det) && verdictAtHead([det], HEAD) === null);
+  check('it does not stand over a request at the same head',
+    verdictAtHead([{ ...r(REVIEWER_LOGIN, 'CHANGES_REQUESTED', HEAD), body: 'Verdict: request changes.' }, det], HEAD)?.state === 'CHANGES_REQUESTED');
+  check('a model approval that quotes the phrase later in its body still counts',
+    verdictAtHead([{ ...r(REVIEWER_LOGIN, 'APPROVED', HEAD), body: '**Verdict: approve.** The README says **Deterministic approval' }], HEAD)?.state === 'APPROVED');
+  check('the phrase on a request for changes is never read as an approval', !isDeterministicApproval({ ...det, state: 'CHANGES_REQUESTED' }));
 }
 
 // ---------- end to end against a fake GitHub and a fake model ----------
@@ -1474,6 +1481,9 @@ console.log('\n  earlier verdicts from the runs, and the round cap');
   const postedRow = (head, state, at) => ({ user: { login: REVIEWER_LOGIN }, state, commit_id: head, body: `posted ${state}`, submitted_at: at });
   const merged = mergeVerdicts([postedRow(sha(2), 'CHANGES_REQUESTED', '2026-11-08T02:00:00Z')], [asReview, verdictAsReview(vr(sha(2), 'APPROVE'), { id: 2, url: 'u2', at: '2026-11-08T02:00:00Z' })]);
   check('mergeVerdicts: a head with a posted verdict keeps it, the rest come from the runs, oldest first', merged.length === 2 && merged[0].commit_id === sha(1) && merged[1].body === 'posted CHANGES_REQUESTED');
+  const detRow = { ...postedRow(sha(1), 'APPROVED', '2026-11-08T01:30:00Z'), body: '**Deterministic approval — no LLM reviewed this diff.**' };
+  check('mergeVerdicts: a deterministic approval at a head does not hide the run verdict there',
+    mergeVerdicts([detRow], [asReview]).some((x) => x.commit_id === sha(1) && x.state === 'CHANGES_REQUESTED'));
   check('roundsAsked: distinct heads asked, not the head being read, not approvals, not other reviewers',
     roundsAsked([postedRow(sha(1), 'CHANGES_REQUESTED'), postedRow(sha(1), 'CHANGES_REQUESTED'), postedRow(sha(2), 'APPROVED'), postedRow(HEAD, 'CHANGES_REQUESTED'), { ...postedRow(sha(3), 'CHANGES_REQUESTED'), user: { login: 'someone' } }, postedRow(sha(4), 'CHANGES_REQUESTED')], HEAD) === 2);
   const capBody = renderCapBody(4, 4, { commit_id: sha(4), body: '### 1. Blocking: `a.js:3`\n\nThe loop skips the last item.\n\n<!-- redline:head=4444 -->' }, HEAD);

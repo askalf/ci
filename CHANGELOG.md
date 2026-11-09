@@ -13,6 +13,10 @@ names the commit's date and the pull request it came from.
 
 ## November 2026
 
+- A low-risk approval posted under the reviewer's login from the file list alone (its body opens with
+  `**Deterministic approval`) is never read as Redline's verdict: it is not reused as a standing
+  verdict, not a judged head for the delta, and not a round. Before, a head Redline had not read could
+  pass on it.
 - A `misleading-text` finding on the pull request's description is reported as minor and never
   blocks: the description is not what ships. Attribution and a secret there still block.
 - A Redline round after an earlier verdict reads the delta first: the brief's diff is the compare

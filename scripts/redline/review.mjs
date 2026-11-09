@@ -105,7 +105,13 @@ export function reviewerLogin(value) {
   return value.toLowerCase();
 }
 export const REVIEWER_LOGIN = reviewerLogin(process.env.REDLINE_REVIEWER_LOGIN);
-const isReviewer = (r) => String(r?.user?.login ?? '').toLowerCase() === REVIEWER_LOGIN;
+// A low-risk approval that another automation posts under the reviewer's login, from a PR's file
+// list alone, opens its body with this. No model read that head, so it is never Redline's verdict:
+// not a standing verdict to reuse, not a judged head to read a delta from, not a round. Counting it
+// let a head Redline had not read pass on an approval it never gave.
+export const DETERMINISTIC_APPROVAL = '**Deterministic approval';
+export const isDeterministicApproval = (r) => r?.state === 'APPROVED' && String(r?.body ?? '').trimStart().startsWith(DETERMINISTIC_APPROVAL);
+const isReviewer = (r) => String(r?.user?.login ?? '').toLowerCase() === REVIEWER_LOGIN && !isDeterministicApproval(r);
 
 // The review is public text on a public repository. It talks about the change and never about the
 // reviewer's own machinery. Until 2026-09-26 every review opened with a "fleet code reviewer /
