@@ -14,8 +14,9 @@ diff, the pull request text or a commit message it is about. The models are set 
 On our hosts, routine and deep reviews run on OpenAI models through a ChatGPT subscription:
 `REDLINE_MODEL=gpt-5.6-terra` reads routine pull requests and `REDLINE_DEEP_MODEL=gpt-6-astra` reads
 large or sensitive ones. Two paths have their own settings: a pull request that only moves Redline
-pins is read on `REDLINE_PIN_MODEL`, and a review whose model fails moves to
-`REDLINE_FALLBACK_MODEL`. When a setting is unset, the default in
+pins is read on `REDLINE_PIN_MODEL`, and a review whose model the endpoint has parked or cannot
+route moves to `REDLINE_FALLBACK_MODEL` (any other model error fails the review). When a setting is
+unset, the default in
 [`scripts/redline/review.mjs`](scripts/redline/review.mjs) applies: `claude-fable-5-1` for
 `REDLINE_MODEL`, and `claude-opus-5-5` for the pin and fallback models, so those two paths run on
 Claude unless a host sets them.
