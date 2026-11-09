@@ -10,9 +10,16 @@ one of our public repositories has to pass before it lands.
 
 **Redline, the review at its center, is an AI code review.** A model reads each ready pull request
 with read-only tools and either approves it or requests changes, and every finding has to quote the
-diff, the pull request text or a commit message it is about. The models are set on the runner host;
-the defaults in [`scripts/redline/review.mjs`](scripts/redline/review.mjs) are `claude-fable-5-1`,
-with `claude-opus-5-5` as the fallback and for pull requests that only move Redline pins.
+diff, the pull request text or a commit message it is about. The models are set on the runner host.
+On our hosts, routine and deep reviews run on OpenAI models through a ChatGPT subscription:
+`REDLINE_MODEL=gpt-5.6-terra` reads routine pull requests and `REDLINE_DEEP_MODEL=gpt-6-astra` reads
+large or sensitive ones. Two paths have their own settings: a pull request that only moves Redline
+pins is read on `REDLINE_PIN_MODEL`, and a review whose model the endpoint has parked or cannot
+route moves to `REDLINE_FALLBACK_MODEL` (any other model error fails the review). When a setting is
+unset, the default in
+[`scripts/redline/review.mjs`](scripts/redline/review.mjs) applies: `claude-fable-5-1` for
+`REDLINE_MODEL`, and `claude-opus-5-5` for the pin and fallback models, so those two paths run on
+Claude unless a host sets them.
 
 **Who this is for.** The askalf repositories call it today. Another repository can adopt it by
 forking this one: [Who can use this](#who-can-use-this) lists what a fork needs and what it changes.
