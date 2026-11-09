@@ -13,6 +13,13 @@ names the commit's date and the pull request it came from.
 
 ## November 2026
 
+- The round cap counts only heads a model read, since Redline's newest approval. A cap verdict
+  (`rule:round-cap`) is not a round, not the head a delta is read from, not an earlier request for
+  the model to check, and not the request the next cap quotes; before, every push past the cap
+  added a round and each cap quoted the one before it. A cap verdict does carry the count it states
+  and the request it quoted, so once capped pushes fill the verdict history a run reads, the PR stays
+  capped and the cap still quotes the real request. An approval, a re-read's included, clears the
+  count, so a PR that met the bar and then moved is read again instead of capped.
 - A low-risk approval posted under the reviewer's login from the file list alone (its body opens with
   `**Deterministic approval`) is never read as Redline's verdict: it is not reused as a standing
   verdict, not a judged head for the delta, and not a round. Before, a head Redline had not read could

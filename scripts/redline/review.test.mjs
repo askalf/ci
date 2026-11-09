@@ -10,7 +10,7 @@ import {
   parseEnvFile, readPrompt, safePath, buildDiff, planDiff, unshownFiles, checkoutCorpus, quoteIsGrounded, corpusOf, checkSubmission, finalVerdict,
   renderBody, verdictAtHead, isDeterministicApproval, runTool, runReview, buildBrief, contextSection, changedFilesSection, earlierReviewsSection, REVIEWER_LOGIN, LIMITS, metaPhrase,
   verdictRecord, verdictProblem, saveVerdict, VERDICT_VERSION,
-  reviewRunsOf, verdictAsReview, mergeVerdicts, roundsAsked, renderCapBody, roundCapOf, DEFAULT_ROUND_CAP, ROUND_CAP_RULE, VERDICT_ARTIFACT, stripComments, DISPATCH_ACTOR, deltaSince, COMPARE_FILES_MAX,
+  reviewRunsOf, verdictAsReview, mergeVerdicts, roundsAsked, isCapNotice, capNoticeRounds, capNoticeQuote, lastRequest, renderCapBody, roundCapOf, DEFAULT_ROUND_CAP, ROUND_CAP_RULE, VERDICT_ARTIFACT, stripComments, DISPATCH_ACTOR, deltaSince, COMPARE_FILES_MAX,
 } from './review.mjs';
 import { deflateRawSync } from 'node:zlib';
 import * as reviewModule from './review.mjs';
@@ -1434,6 +1434,10 @@ console.log('\n  the delta since the last verdict');
     const newest = ask('later', { commit_id: 'b'.repeat(40), submitted_at: '2026-11-08T02:00:00Z' });
     const d = await deltaSince({ repo: 'askalf/r', readToken: 'r', fetch: async (url) => ({ ok: true, status: 200, headers: new Headers(), json: async () => ({ status: 'ahead', files: [{ filename: /bbbb/.test(url) ? 'newest' : 'older' }] }), text: async () => '' }), sleep: async () => {}, now: () => 0 }, [ask('x'), newest], HEAD);
     check('deltaSince compares from the newest judged head, by time', d?.head === 'b'.repeat(40) && d.files[0].filename === 'newest');
+    // A cap notice at a newer head was never read: the delta still runs from the newest head a model judged.
+    const capAtC = ask(renderCapBody(4, 4, { commit_id: 'b'.repeat(40), body: 'later' }, 'c'.repeat(40)), { commit_id: 'c'.repeat(40), submitted_at: '2026-11-08T03:00:00Z' });
+    const dc = await deltaSince({ repo: 'askalf/r', readToken: 'r', fetch: async (url) => ({ ok: true, status: 200, headers: new Headers(), json: async () => ({ status: 'ahead', files: [{ filename: /bbbb/.test(url) ? 'from-b' : /cccc/.test(url) ? 'from-c' : 'other' }] }), text: async () => '' }), sleep: async () => {}, now: () => 0 }, [ask('x'), newest, capAtC], HEAD);
+    check('deltaSince passes over a cap notice: the delta runs from the newest head a model read', dc?.head === 'b'.repeat(40) && dc.files[0].filename === 'from-b');
     const same = await deltaSince({ repo: 'askalf/r', readToken: 'r', fetch: async () => ({ ok: true, status: 200, headers: new Headers(), json: async () => ({ status: 'identical', files: [] }), text: async () => '' }), sleep: async () => {}, now: () => 0 }, [ask('x')], HEAD);
     check('a compare that shows nothing new is no delta', same === null && (await deltaSince({}, [], HEAD)) === null);
     const cmpCtx = (body) => ({ repo: 'askalf/r', readToken: 'r', fetch: async () => ({ ok: true, status: 200, headers: new Headers(), json: async () => body, text: async () => '' }), sleep: async () => {}, now: () => 0, log: (l) => logged.push(l) });
@@ -1484,8 +1488,35 @@ console.log('\n  earlier verdicts from the runs, and the round cap');
   const detRow = { ...postedRow(sha(1), 'APPROVED', '2026-11-08T01:30:00Z'), body: '**Deterministic approval — no LLM reviewed this diff.**' };
   check('mergeVerdicts: a deterministic approval at a head does not hide the run verdict there',
     mergeVerdicts([detRow], [asReview]).some((x) => x.commit_id === sha(1) && x.state === 'CHANGES_REQUESTED'));
-  check('roundsAsked: distinct heads asked, not the head being read, not approvals, not other reviewers',
-    roundsAsked([postedRow(sha(1), 'CHANGES_REQUESTED'), postedRow(sha(1), 'CHANGES_REQUESTED'), postedRow(sha(2), 'APPROVED'), postedRow(HEAD, 'CHANGES_REQUESTED'), { ...postedRow(sha(3), 'CHANGES_REQUESTED'), user: { login: 'someone' } }, postedRow(sha(4), 'CHANGES_REQUESTED')], HEAD) === 2);
+  check('roundsAsked: distinct heads asked, not the head being read, not other reviewers',
+    roundsAsked([postedRow(sha(1), 'CHANGES_REQUESTED'), postedRow(sha(1), 'CHANGES_REQUESTED'), postedRow(HEAD, 'CHANGES_REQUESTED'), { ...postedRow(sha(3), 'CHANGES_REQUESTED'), user: { login: 'someone' } }, postedRow(sha(4), 'CHANGES_REQUESTED')], HEAD) === 2);
+  // A cap notice as renderCapBody writes it, at a head no model read.
+  const capRow = (head, quoted = 'The loop skips the last item.') => ({ ...postedRow(head, 'CHANGES_REQUESTED'), body: renderCapBody(4, 4, { commit_id: sha(9), body: quoted }, head) });
+  check('isCapNotice: the cap\'s own request is one; a model request, an approval, or a quote of the rule mid-line is not',
+    isCapNotice(capRow(sha(5))) && !isCapNotice(postedRow(sha(5), 'CHANGES_REQUESTED'))
+    && !isCapNotice({ ...capRow(sha(5)), state: 'APPROVED' }) && !isCapNotice({ ...postedRow(sha(5), 'CHANGES_REQUESTED'), body: 'see rule:round-cap in the README' }));
+  check('roundsAsked: a cap notice is no round, so a push past the cap does not add one',
+    roundsAsked([1, 2, 3, 4].map((i) => postedRow(sha(i), 'CHANGES_REQUESTED')).concat([capRow(sha(5)), capRow(sha(6))]), HEAD) === 4);
+  check('roundsAsked: an approval clears the count, so rounds are only the requests after the newest one',
+    roundsAsked([1, 2, 3, 4].map((i) => postedRow(sha(i), 'CHANGES_REQUESTED')).concat([postedRow(sha(5), 'APPROVED'), postedRow(sha(6), 'CHANGES_REQUESTED')]), HEAD) === 1
+    && roundsAsked([1, 2, 3, 4].map((i) => postedRow(sha(i), 'CHANGES_REQUESTED')).concat([capRow(sha(5)), postedRow(sha(5), 'APPROVED')]), HEAD) === 0);
+  check('roundsAsked: a deterministic approval is not Redline\'s, so it clears nothing',
+    roundsAsked([1, 2, 3, 4].map((i) => postedRow(sha(i), 'CHANGES_REQUESTED')).concat([{ ...postedRow(sha(5), 'APPROVED'), body: '**Deterministic approval — no LLM reviewed this diff.**' }]), HEAD) === 4);
+  check('capNoticeRounds reads the count a cap states; capNoticeQuote the request it quoted and the head it named',
+    capNoticeRounds(capRow(sha(5))) === 4 && capNoticeRounds(postedRow(sha(5), 'CHANGES_REQUESTED')) === 0
+    && capNoticeQuote(capRow(sha(5)))?.body === 'The loop skips the last item.' && capNoticeQuote(capRow(sha(5)))?.commit_id === '9999999'
+    && capNoticeQuote(postedRow(sha(5), 'CHANGES_REQUESTED')) === null);
+  check('roundsAsked: with only cap notices left in the history, the count they state holds, so the PR stays capped',
+    roundsAsked([capRow(sha(5)), capRow(sha(6)), capRow(sha(7))], HEAD) === 4
+    && roundsAsked([postedRow(sha(3), 'CHANGES_REQUESTED'), postedRow(sha(4), 'CHANGES_REQUESTED'), capRow(sha(5))], HEAD) === 4
+    && roundsAsked([capRow(sha(5)), postedRow(sha(6), 'APPROVED')], HEAD) === 0);
+  check('lastRequest: the newest request a model made, else the request the newest cap quoted, never a cap itself',
+    lastRequest([postedRow(sha(3), 'CHANGES_REQUESTED'), capRow(sha(4))], HEAD)?.commit_id === sha(3)
+    && lastRequest([capRow(sha(4), 'older quote'), capRow(sha(5), 'newest quote')], HEAD)?.body === 'newest quote'
+    && lastRequest([], HEAD) === null);
+  check('earlierReviewsSection leaves a cap notice out: the model checks the requests a model made, not the cap quoting them',
+    !earlierReviewsSection([postedRow(sha(1), 'CHANGES_REQUESTED'), capRow(sha(2), 'quoted request')], HEAD).includes('Review of 2222222')
+    && earlierReviewsSection([postedRow(sha(1), 'CHANGES_REQUESTED'), capRow(sha(2), 'quoted request')], HEAD).includes('Review of 1111111'));
   const capBody = renderCapBody(4, 4, { commit_id: sha(4), body: '### 1. Blocking: `a.js:3`\n\nThe loop skips the last item.\n\n<!-- redline:head=4444 -->' }, HEAD);
   check('renderCapBody: request changes, the count and the cap, the last request quoted without its marker, the rule and the head marker',
     capBody.startsWith('**Verdict: request changes.** This pull request has had 4 rounds') && capBody.includes('the cap is 4') && capBody.includes('at 4444444') && capBody.includes('The loop skips the last item.')
@@ -1533,6 +1564,35 @@ console.log('\n  earlier verdicts from the runs, and the round cap');
     const { ctx, calls } = world({ runs: [run(4), run(3), run(2), run(1)], artifacts: artsOf([1, 2, 3, 4]), zips: zipsOf([1, 2, 3, 4]), turns: [submit(APPROVE)] });
     const r = await runReview(ctx);
     check('four earlier dispatches at heads the PR no longer lists: still four rounds, capped', r.outcome === 'capped' && r.rounds === 4 && calls.model.length === 0);
+  }
+  {
+    // Capped pushes fill the history a run reads (the newest LIMITS.earlierRuns): four real requests
+    // (heads 1-4), then cap verdicts at every later head. The cap must stand on what the caps carry.
+    const capVr = (h) => vr(h, 'REQUEST_CHANGES', renderCapBody(4, 4, { commit_id: sha(4), body: 'asked at 4444444' }, h));
+    const at = (id) => ({ created_at: `2026-11-08T${String(id).padStart(2, '0')}:00:00Z` });
+    const history = (caps) => {
+      const ids = [1, 2, 3, 4, ...Array.from({ length: caps }, (_, i) => 5 + i)];
+      return {
+        runs: [...ids].reverse().map((id) => run(id, at(id))),
+        artifacts: artsOf(ids),
+        zips: { ...zipsOf([1, 2, 3, 4]), ...zipsOf(ids.slice(4), capVr) },
+      };
+    };
+    check('the window is the one these cases rely on', LIMITS.earlierRuns === 8);
+    const five = history(5);
+    const { ctx: c5, calls: k5 } = world({ ...five, turns: [submit(APPROVE)] });
+    const r5 = await runReview(c5);
+    check('four requests then five capped pushes (three requests left in the window): a new head stays capped, no model call',
+      r5.outcome === 'capped' && r5.rounds === 4 && k5.model.length === 0 && k5.posted[0].body.includes('asked at 4444444'));
+    const eight = history(8);
+    const { ctx: c8, calls: k8 } = world({ ...eight, turns: [submit(APPROVE)] });
+    const r8 = await runReview(c8);
+    check('four requests then eight capped pushes (only caps in the window): still capped, and the cap quotes the request the caps carried, once',
+      r8.outcome === 'capped' && r8.rounds === 4 && k8.model.length === 0 && k8.posted[0].body.includes('asked at 4444444')
+      && k8.posted[0].body.split('This pull request has had').length === 2);
+    const { ctx: cr, calls: kr } = world({ ...history(8), turns: [submit(APPROVE)] });
+    const rr = await runReview({ ...cr, reread: true });
+    check('a re-read still lifts it', rr.outcome === 'posted' && kr.model.length === 1);
   }
   {
     // The trust line: a PR that changes redline.yml could upload an APPROVE of its own head from its

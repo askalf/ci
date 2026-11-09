@@ -483,7 +483,7 @@ const EARLIER_HEADING = 'Earlier reviews of this PR that asked for changes (post
  * when there is nothing. The bodies are the reviewer's own posted text, still given as data. Pure.
  */
 export function earlierReviewsSection(reviews, headSha) {
-  const asked = (reviews ?? []).filter((r) => isReviewer(r)
+  const asked = (reviews ?? []).filter((r) => isRead(r)
     && r.state === 'CHANGES_REQUESTED' && r.commit_id && r.commit_id !== headSha && String(r.body ?? '').trim());
   if (!asked.length) return '';
   const cap = LIMITS.earlierReviewChars;
@@ -538,6 +538,39 @@ export const VERDICT_FILE = 'verdict.json';
 /** Request-changes rounds on one PR after which a new head is not reviewed and a person takes it. */
 export const DEFAULT_ROUND_CAP = 4;
 export const ROUND_CAP_RULE = 'round-cap';
+
+/**
+ * A round-cap verdict: the request Redline leaves at a head it did not read (renderCapBody, the
+ * `rule:round-cap` line). No model read that head, so it is not a round, not a judged head to read a
+ * delta from, and not an earlier request to check. It does carry what it was capped on: the round
+ * count it states (capNoticeRounds) and the request it quoted (capNoticeQuote), so a cap stands even
+ * once the requests behind it have left the verdict history a run reads. Pure.
+ */
+export function isCapNotice(r) {
+  return r?.state === 'CHANGES_REQUESTED' && new RegExp(`(^|\\n)rule:${ROUND_CAP_RULE}[ \\t]*(\\n|$)`).test(stripComments(r?.body));
+}
+/** Redline's own verdict on a head it read: its login, not a deterministic approval, not a cap. */
+const isRead = (r) => isReviewer(r) && !isCapNotice(r);
+
+/** renderCapBody's first paragraph: the count it states, and (separately) the head it names. */
+const CAP_HEADER = /^\*\*Verdict: request changes\.\*\* This pull request has had (\d+) rounds of requested changes and the cap is \d+, so this head is not read/;
+const CAP_LAST_AT = /The last request, at ([0-9a-f]{7}),/;
+/** The round count a cap notice states ("has had N rounds"); 0 for anything else. Pure. */
+export function capNoticeRounds(r) {
+  const m = isCapNotice(r) ? CAP_HEADER.exec(stripComments(r.body).trim()) : null;
+  return m ? Number(m[1]) : 0;
+}
+/**
+ * The request a cap notice quoted, as a review row ({ commit_id: the 7-character head it names,
+ * body: the quoted text }), or null when it quoted none. Pure.
+ */
+export function capNoticeQuote(r) {
+  if (!isCapNotice(r)) return null;
+  const parts = stripComments(r.body).trim().split(/\n\n/);
+  if (!CAP_HEADER.test(parts[0] ?? '')) return null;
+  const body = parts.slice(1).filter((p) => !new RegExp(`^rule:${ROUND_CAP_RULE}\\s*$`).test(p.trim())).join('\n\n').trim();
+  return body ? { commit_id: CAP_LAST_AT.exec(parts[0])?.[1] ?? '', body } : null;
+}
 
 /** REDLINE_ROUND_CAP as a count: a non-negative integer, 0 for no cap; anything else is the default. */
 export function roundCapOf(value) {
@@ -636,9 +669,40 @@ export function mergeVerdicts(posted, fromRuns) {
   return [...(posted ?? []), ...extra].sort((a, b) => at(a) - at(b));
 }
 
-/** How many heads of this PR, other than the one being read, Redline asked to change. Pure. */
+/**
+ * How many heads of this PR, other than the one being read, Redline read and asked to change
+ * since its newest approval. `reviews` is oldest first (mergeVerdicts). A cap notice is no round
+ * (isCapNotice), and an approval (a re-read's included; a deterministic one is not Redline's)
+ * clears the count: the PR met the bar there, and the rounds that capped it were before.
+ * A cap notice since that approval still holds the count it states (capNoticeRounds): a run reads
+ * only the newest LIMITS.earlierRuns verdicts, and once capped pushes fill that window the requests
+ * behind the cap are no longer in it. So the count is the larger of the two, and a capped PR stays
+ * capped until an approval or a re-read. Pure.
+ */
 export function roundsAsked(reviews, headSha) {
-  return new Set((reviews ?? []).filter((r) => isReviewer(r) && r.state === 'CHANGES_REQUESTED' && r.commit_id && r.commit_id !== headSha).map((r) => r.commit_id)).size;
+  const list = reviews ?? [];
+  let from = 0;
+  list.forEach((r, i) => { if (isReviewer(r) && r.state === 'APPROVED') from = i + 1; });
+  const since = list.slice(from);
+  const read = new Set(since.filter((r) => isRead(r) && r.state === 'CHANGES_REQUESTED' && r.commit_id && r.commit_id !== headSha).map((r) => r.commit_id)).size;
+  const carried = since.filter((r) => isReviewer(r)).reduce((n, r) => Math.max(n, capNoticeRounds(r)), 0);
+  return Math.max(read, carried);
+}
+
+/**
+ * The request a cap quotes: Redline's newest request at another head that a model read, or, when
+ * the history a run reads holds none (capped pushes filled it), the request the newest cap notice
+ * quoted. Never a cap notice itself. Pure.
+ */
+export function lastRequest(reviews, headSha) {
+  const newestFirst = [...(reviews ?? [])].reverse();
+  const read = newestFirst.find((r) => isRead(r) && r.state === 'CHANGES_REQUESTED' && r.commit_id !== headSha);
+  if (read) return read;
+  for (const r of newestFirst) {
+    const q = isReviewer(r) ? capNoticeQuote(r) : null;
+    if (q) return q;
+  }
+  return null;
 }
 
 /**
@@ -999,7 +1063,7 @@ export const COMPARE_FILES_MAX = 300;
 
 export async function deltaSince(ctx, reviews, headSha) {
   const at = (r) => Date.parse(r?.submitted_at ?? '') || 0;
-  const judged = (reviews ?? []).filter((r) => isReviewer(r) && (r.state === 'APPROVED' || r.state === 'CHANGES_REQUESTED') && /^[0-9a-f]{40}$/.test(String(r.commit_id ?? '')) && r.commit_id !== headSha);
+  const judged = (reviews ?? []).filter((r) => isRead(r) && (r.state === 'APPROVED' || r.state === 'CHANGES_REQUESTED') && /^[0-9a-f]{40}$/.test(String(r.commit_id ?? '')) && r.commit_id !== headSha);
   const last = judged.sort((a, b) => at(a) - at(b)).at(-1);
   if (!last) return null;
   try {
@@ -1345,7 +1409,7 @@ export async function runReview(ctx) {
   const cap = Number.isInteger(ctx.roundCap) ? ctx.roundCap : DEFAULT_ROUND_CAP;
   const rounds = roundsAsked(reviews, headSha);
   if (cap > 0 && !ctx.reread && rounds >= cap) {
-    const last = [...reviews].reverse().find((r) => isReviewer(r) && r.state === 'CHANGES_REQUESTED' && r.commit_id !== headSha) ?? null;
+    const last = lastRequest(reviews, headSha);
     const body = renderCapBody(rounds, cap, last, headSha);
     ctx.log?.(`round cap: ${rounds} request-changes rounds on #${n} against a cap of ${cap}; ${headSha.slice(0, 7)} is not read`);
     if (ctx.dryRun) return { outcome: 'dry-run', verdict: 'REQUEST_CHANGES', rounds, cap, body };
