@@ -22,17 +22,27 @@ the address the badge reads, up to four times, 15 s apart.
 
 | What scorecard.dev serves | The run was | Outcome |
 |---|---|---|
-| a result dated no earlier than the run's start, less a minute for clock skew | any | published; the step passes |
-| anything else: an older result, 404, an error, no answer | `schedule`, `push`, `branch_protection_rule` | the Scorecard workflow is dispatched on the default branch, once, with a warning; the step passes |
+| a result that carries a time of day, no earlier than the run's start less a minute for clock skew | any | published; the step passes |
+| anything else: an older result, a date with no time, 404, an error, no answer | `schedule`, `push`, `branch_protection_rule` | the Scorecard workflow is dispatched on the default branch, once, with a warning; the step passes |
 | anything else | `workflow_dispatch` | the step fails |
+
+The date. A result the action published is dated to the second: the API served
+`2026-11-09T10:25:29Z` and `2026-11-10T01:38:45Z` for askalf/pitlane's publishes of those days. A
+date with no time of day is OpenSSF's own weekly scan of the repository, which no run of ours
+wrote, so it is never taken for a run's publish, whatever its day.
 
 A dispatch is never answered with another dispatch, so one failed publish costs at most one extra
 Scorecard run. The dispatched run is checked like any other when it finishes, and that is where a
 publish that fails twice turns red. A dispatch a person sends is held to the same rule: it is not
 retried.
 
-The dispatch goes to the workflow file the checked run came from, read from the event, and needs
-`actions: write` on the job token. Nothing is checked out and nothing else is written.
+The dispatch goes to the workflow file the checked run came from and needs `actions: write` on
+the job token. Nothing is checked out and nothing else is written.
+
+The run's facts reach the script as the action's inputs, each defaulting to the `workflow_run`
+event's own field, so a caller passes none. The script reads no file. A `workflow_run` that
+arrives with no run id fails the step: a runner that did not fill the inputs in must be a red
+run, not a check that never checks.
 
 ## Dry run
 

@@ -23,6 +23,41 @@ inputs:
     description: "true: say what would be dispatched, dispatch nothing."
     required: false
     default: 'false'
+  # The finished Scorecard run, from the workflow_run event. A caller passes none of these: each
+  # defaults to the event's own field. A workflow_run event that arrives with no run id fails the
+  # step, so a runner that did not fill these in is a red run, not a check that never checks.
+  run-id:
+    description: The Scorecard run's id.
+    required: false
+    default: ${{ github.event.workflow_run.id }}
+  run-event:
+    description: The event that started the Scorecard run (schedule, push, workflow_dispatch).
+    required: false
+    default: ${{ github.event.workflow_run.event }}
+  run-conclusion:
+    description: How the Scorecard run ended.
+    required: false
+    default: ${{ github.event.workflow_run.conclusion }}
+  run-branch:
+    description: The branch the Scorecard run was on.
+    required: false
+    default: ${{ github.event.workflow_run.head_branch }}
+  run-started-at:
+    description: When the Scorecard run started.
+    required: false
+    default: ${{ github.event.workflow_run.run_started_at }}
+  run-path:
+    description: The Scorecard workflow's file, as the run names it.
+    required: false
+    default: ${{ github.event.workflow_run.path }}
+  default-branch:
+    description: The repository's default branch.
+    required: false
+    default: ${{ github.event.repository.default_branch }}
+  private:
+    description: Whether the repository is private.
+    required: false
+    default: ${{ github.event.repository.private }}
 
 runs:
   using: node24

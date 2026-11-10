@@ -351,8 +351,8 @@ jobs:
 ```
 
 For a Scorecard run that succeeded on the default branch, it reads what scorecard.dev serves for
-the repository, four times at most, 15 s apart. A result dated no earlier than the run's start is
-published. Otherwise it dispatches the Scorecard workflow on the default branch once; when the
+the repository, four times at most, 15 s apart. A result dated, to the second, no earlier than the
+run's start is published. Otherwise it dispatches the Scorecard workflow on the default branch once; when the
 unpublished run was itself a dispatch, it fails the job, so a failed publish costs one extra run
 and ends as a red run, not a stale badge. It cannot be a step of the Scorecard job: scorecard.dev
 accepts results only from a job whose steps it recognises. The rules are in

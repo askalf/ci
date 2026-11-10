@@ -14,8 +14,11 @@
 // What it does, for a Scorecard run that succeeded on the default branch of a public repository:
 //   - reads https://api.scorecard.dev/projects/github.com/<owner>/<name>, the address the badge
 //     reads, a few times some seconds apart;
-//   - published: the result there is dated no earlier than the run started (less a minute for
-//     clock skew). Exit 0.
+//   - published: the result there carries a time, and it is no earlier than the run started
+//     (less a minute for clock skew). Exit 0. A result this action's publish wrote is dated to
+//     the second ("2026-11-09T10:25:29Z", read from the API on 2026-11-09 and 10); a date with
+//     no time is OpenSSF's own weekly scan of the repository, never a run's publish, so it is
+//     not taken for one whatever its day.
 //   - not published, and the run was not a dispatch: dispatches the Scorecard workflow on the
 //     default branch, once. Exit 0; that run is checked in turn.
 //   - not published, and the run was a dispatch (the retry above, or one a person sent): exit 1,
@@ -24,9 +27,13 @@
 // Any other run (failed, cancelled, on another branch, in a private repository) is not one that
 // publishes, and exits 0 untouched.
 //
-// CLI: REPO=owner/name GITHUB_TOKEN=... GITHUB_EVENT_PATH=<workflow_run event> [DRY_RUN=true] node check.mjs
+// The run's facts come in as the action's inputs, which default to the workflow_run event's own
+// fields, never from the event file: nothing read from a file goes into a request.
+//
+// CLI: REPO=owner/name GITHUB_TOKEN=... EVENT_NAME=workflow_run RUN_ID=<id> RUN_EVENT=schedule \
+//   RUN_CONCLUSION=success RUN_BRANCH=main RUN_STARTED_AT=<iso> RUN_PATH=.github/workflows/scorecard.yml \
+//   DEFAULT_BRANCH=main PRIVATE=false [DRY_RUN=true] node check.mjs
 
-import { readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 
 export const API = 'https://api.scorecard.dev/projects/github.com';
@@ -39,19 +46,24 @@ export const READ_WAIT_MS = 15_000;
 const REPO_RE = /^[A-Za-z0-9-]+\/[A-Za-z0-9._-]+$/;
 const WORKFLOW_RE = /^\.github\/workflows\/([A-Za-z0-9._-]+\.ya?ml)$/;
 
-/** The facts the decision reads, from a workflow_run event; null when the event is not one. */
-export function runOf(event) {
-  const r = event?.workflow_run;
-  if (!r || typeof r !== 'object') return null;
+const BRANCH_RE = /^[A-Za-z0-9._/-]{1,255}$/;
+
+/**
+ * The facts the decision reads, from the environment the action hands over; null when the event
+ * is not a workflow_run. A default branch that is not a plain branch name reads as none.
+ */
+export function runOf(env) {
+  if ((env?.EVENT_NAME ?? '') !== 'workflow_run') return null;
+  const text = (k) => String(env[k] ?? '').trim();
   return {
-    id: r.id,
-    event: String(r.event ?? ''),
-    conclusion: String(r.conclusion ?? ''),
-    headBranch: String(r.head_branch ?? ''),
-    startedAt: String(r.run_started_at ?? r.created_at ?? ''),
-    workflowFile: WORKFLOW_RE.exec(String(r.path ?? '').split('@')[0])?.[1] ?? '',
-    defaultBranch: String(event.repository?.default_branch ?? ''),
-    isPrivate: event.repository?.private === true,
+    id: text('RUN_ID'),
+    event: text('RUN_EVENT'),
+    conclusion: text('RUN_CONCLUSION'),
+    headBranch: text('RUN_BRANCH'),
+    startedAt: text('RUN_STARTED_AT'),
+    workflowFile: WORKFLOW_RE.exec(text('RUN_PATH').split('@')[0])?.[1] ?? '',
+    defaultBranch: BRANCH_RE.test(text('DEFAULT_BRANCH')) ? text('DEFAULT_BRANCH') : '',
+    isPrivate: text('PRIVATE') === 'true',
   };
 }
 
@@ -65,10 +77,18 @@ export function notChecked(run) {
   return '';
 }
 
-/** Whether what scorecard.dev serves ({ status, date }) is this run's result or a later one. Pure. */
+/** A result date with a time of day, as a publish from the action carries: 2026-11-09T10:25:29Z. */
+const TIMED_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/;
+
+/**
+ * Whether what scorecard.dev serves ({ status, date }) is this run's result or a later one. A
+ * date with no time of day is the weekly scan's and is never a run's publish. Pure.
+ */
 export function isPublished(run, served) {
   if (served?.status !== 200) return false;
-  const date = Date.parse(String(served.date ?? ''));
+  const text = String(served.date ?? '');
+  if (!TIMED_RE.test(text)) return false;
+  const date = Date.parse(text);
   return Number.isFinite(date) && date >= Date.parse(run.startedAt) - SKEW_MS;
 }
 
@@ -92,8 +112,8 @@ export async function readServed(fetchFn, repo) {
 const describe = (served) => (served.status === 200 ? `a result dated ${served.date || 'nothing'}` : served.status === 0 ? 'no answer' : `HTTP ${served.status}`);
 
 /**
- * @param {Record<string,string|undefined>} env REPO, GITHUB_TOKEN, GITHUB_EVENT_PATH, DRY_RUN, GITHUB_API_URL
- * @param {{ fetch?: typeof fetch, sleep?: (ms:number)=>Promise<void>, log?: (l:string)=>void, event?: object }} [io]
+ * @param {Record<string,string|undefined>} env REPO, GITHUB_TOKEN, EVENT_NAME, the RUN_* facts, DEFAULT_BRANCH, PRIVATE, DRY_RUN, GITHUB_API_URL
+ * @param {{ fetch?: typeof fetch, sleep?: (ms:number)=>Promise<void>, log?: (l:string)=>void }} [io]
  * @returns {Promise<number>} the exit code
  */
 export async function main(env, io = {}) {
@@ -102,13 +122,13 @@ export async function main(env, io = {}) {
   const log = io.log ?? ((l) => console.log(l));
   const repo = env.REPO ?? '';
   if (!REPO_RE.test(repo)) { log(`::error::REPO must be owner/name; got ${JSON.stringify(repo)}`); return 1; }
-  let event = io.event;
-  if (event === undefined) {
-    try { event = JSON.parse(readFileSync(env.GITHUB_EVENT_PATH ?? '', 'utf8')); } catch (e) {
-      log(`::error::cannot read the event at GITHUB_EVENT_PATH (${e.code ?? e.message})`); return 1;
-    }
+  const run = runOf(env);
+  // A workflow_run event always names its run. No id here means the action's inputs did not
+  // carry the event's fields, and passing would be a check that never checks.
+  if (run && !/^[1-9][0-9]*$/.test(run.id)) {
+    log('::error::the event is a workflow_run but the action got no run id: pass the run inputs (run-id, run-event, run-conclusion, run-branch, run-started-at, run-path, default-branch, private) from github.event in the caller');
+    return 1;
   }
-  const run = runOf(event);
   const why = notChecked(run);
   if (why) { log(`not checked: ${why}`); return 0; }
 
