@@ -1,0 +1,45 @@
+# The dario sidecar of hosted mode, for real: runs the "Start the dario sidecar" step of
+# redline-review.yml, as written there, against the pinned dario image and a stand-in lock service
+# (scripts/redline/sidecar.live.test.mjs). It proves what the stubbed tests cannot: dario started
+# with nothing but the file the runner check writes takes its seat from the registry and answers
+# /health, the step sees it ready, and the key made for the run is the one dario asks for.
+#
+# On a pull request that changes the review workflow or this test, weekly, and on demand. Not a
+# required check and not in test-all.mjs: it pulls an image and runs a container, so it runs on
+# GitHub's runners, where docker is there to use, and never on a self-hosted row.
+name: Redline sidecar self-test
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/redline-review.yml
+      - .github/workflows/redline-sidecar-self-test.yml
+      - scripts/redline/sidecar.live.test.mjs
+  schedule:
+    - cron: '23 4 * * 1' # weekly, Monday 04:23 UTC: a dario image that no longer pulls shows here
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: redline-sidecar-self-test-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sidecar:
+    # A fork's pull request runs the fork's copy of the test with a read-only token and no secret;
+    # the job needs neither.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: askalf/ci/actions/checkout-with-retry@13bfb335f995752cc7152df3d88cf88ac9ae339d # main 2026-11-10, askalf/ci#200
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+      # REQUIRE_DOCKER: without a daemon the test would skip and pass; here that is a failure.
+      - run: node scripts/redline/sidecar.live.test.mjs
+        env:
+          REQUIRE_DOCKER: '1'

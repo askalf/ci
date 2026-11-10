@@ -13,6 +13,9 @@ names the commit's date and the pull request it came from.
 
 ## November 2026
 
+- The dario sidecar of hosted mode is tested for real: `redline-sidecar-self-test.yml` runs the
+  start step of `redline-review.yml` against the pinned dario image and a stand-in lock service,
+  on a pull request that changes the review workflow or the test, and weekly.
 - A new action, `actions/scorecard-publish-check`: on `workflow_run` of a repository's Scorecard
   workflow it checks that the run's result reached scorecard.dev, dispatches Scorecard once more
   when it did not, and fails when a dispatched run is unpublished too. A failed publish was a
