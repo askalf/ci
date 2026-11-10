@@ -13,6 +13,9 @@ names the commit's date and the pull request it came from.
 
 ## November 2026
 
+- `docs/hosted-quickstart.md`: the whole hosted-mode setup for a repository outside askalf, in
+  order: the reviewer account, the three secrets, the two workflow files to copy, the ruleset,
+  and how a pull request that changes a workflow or comes from a fork is reviewed by a dispatch.
 - The dario sidecar of hosted mode is tested for real: `redline-sidecar-self-test.yml` runs the
   start step of `redline-review.yml` against the pinned dario image and a stand-in lock service,
   on a pull request that changes the review workflow or the test, and weekly.
