@@ -78,9 +78,11 @@ The inputs, each optional, with the value every askalf caller runs:
 | `prompt-file` | redline-review.yml | `/etc/askalf/redline-prompt.md` | the host file with the reviewer's rubric |
 | `env-file`, `prompt-file` | redline-fix-run.yml | `/etc/askalf/fix-exec.env`, `/etc/askalf/fix-prompt.md` | the same two for the fix lane |
 | `reviewer-login` | redline-review.yml, redline-post-verdict.yml | `sprayberry-redline` | the account whose posted reviews are Redline's: the one the post caller's token posts as |
+| `dispatch-actor` | redline-review.yml, redline-post-verdict.yml | `askalf` | the account whose dispatch of the caller's `redline.yml` on the default branch is trusted: its run is posted, and read as review history |
 | `ci-repo` | redline-review.yml, redline-post-verdict.yml, redline-fix-run.yml, public-text.yml | `askalf/ci` | where the scripts are fetched from; `redline-ref` must be a commit on its `main`, and the poster trusts a review run only if it called this repository's `redline-review.yml` |
 
-A caller passes the same `reviewer-login` to the review and to the post, and a fork passes its
+A caller passes the same `reviewer-login` and the same `dispatch-actor` to the review and to the
+post, and a fork passes its
 own `ci-repo` to all four. `uses:` takes no expression, so a fork's callers also name the fork
 there. In the fork itself, the pin bump (`redline-pin-bump.yml`) runs once the repository variable
 `REDLINE_CALLERS` lists its callers (space-separated owner/name; without it the bump runs in
@@ -136,10 +138,12 @@ What to know before choosing it:
 - **The post is unchanged.** The verdict still reaches the pull request through
   `redline-post.yml`, as the reviewer account, and a ruleset that requires an approving review is
   still what holds a merge ([Calling it](#calling-it), [What holds a merge](#what-holds-a-merge)).
-- **Dispatch mode is ours.** A dispatched review is trusted, by the post and as review history,
-  only when the account `askalf` dispatched it (`DISPATCH_ACTOR` in `review.mjs`). Another
-  repository gets the `pull_request` path: a pull request that changes a workflow there is not
-  posted on and waits for a person.
+- **Dispatch mode needs your account named.** A pull request that changes a workflow is not
+  posted on from its own run; it is reviewed by a dispatch of `redline.yml` on the default branch
+  (`gh workflow run redline.yml -f pr=<n> -f head=<sha>`). That run is trusted, by the post and as
+  review history, only when the dispatch account started it: `askalf` by default, so pass your
+  own login as `dispatch-actor` to the review and to the post. Nothing here dispatches for you;
+  on our repositories the ops tick does.
 
 ## Words used here
 

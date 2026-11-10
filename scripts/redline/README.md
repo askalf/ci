@@ -49,7 +49,8 @@ for every blocking finding the diff grounds in the one review, and
 Redline's earlier verdicts on the PR go to the model as data: the posted reviews, and, for a head
 nothing was posted at (every head on a private repository, where the post never runs), the
 `redline-verdict` artifact of the PR's earlier dispatched runs, read with the job's own token. Only
-askalf's dispatches of `redline.yml` on the default branch are read: they ran the default branch's
+the dispatch account's dispatches of `redline.yml` on the default branch are read (askalf, or the
+login a caller passes as `dispatch-actor` to the review and to the post): they ran the default branch's
 workflow files, which neither the PR nor its base branch can shape. A `pull_request` run ran the
 head's own files and is never read; on a public repository its verdict is posted and comes in with
 the reviews. After

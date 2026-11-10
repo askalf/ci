@@ -283,6 +283,24 @@ console.log('\n  a fork: ci-repo and reviewer-login');
   const { reviewerLogin } = reviewModule;
   check('reviewer-login is sprayberry-redline by default, lowercased, an App bot allowed', reviewerLogin(undefined) === 'sprayberry-redline' && reviewerLogin('Fork-Reviewer') === 'fork-reviewer' && reviewerLogin('my-app[bot]') === 'my-app[bot]');
   check('a reviewer-login that is no GitHub login is refused', ['-x', 'a b', 'x/y', 'a'.repeat(40), 'x[bot]y', 'x\ny'].every((v) => throws(reviewerLogin, v)));
+  const { dispatchActor, isDispatchActor } = reviewModule;
+  check('dispatch-actor is askalf by default, lowercased, an App bot allowed', dispatchActor(undefined) === 'askalf' && dispatchActor('') === 'askalf' && dispatchActor('Some-One') === 'some-one' && dispatchActor('my-app[bot]') === 'my-app[bot]');
+  check('a dispatch-actor that is no GitHub login is refused', ['-x', 'a b', 'x/y', 'a'.repeat(40), 'x[bot]y', 'x\ny'].every((v) => throws(dispatchActor, v)));
+  check('unset, only askalf is the dispatch account, whatever the case; no login is none', DISPATCH_ACTOR === 'askalf' && isDispatchActor('askalf') && isDispatchActor('AskAlf') && !isDispatchActor('askalf2') && !isDispatchActor('') && !isDispatchActor(undefined));
+  // A caller's dispatch-actor, read in a fresh process as the workflows set it: the review's history and the post's rule 1 both follow it.
+  const actorProbe = spawnSync(process.execPath, ['--input-type=module', '-e', [
+    `const r = await import(${JSON.stringify(new URL('./review.mjs', import.meta.url).href)});`,
+    `const s = await import(${JSON.stringify(new URL('./post.mjs', import.meta.url).href)});`,
+    'const run = (login) => ({ id: 1, status: "completed", conclusion: "success", event: "workflow_dispatch", path: ".github/workflows/redline.yml", display_title: `Redline review o/r#7 @ ${"a".repeat(40)}`, head_branch: "main", actor: { login }, triggering_actor: { login } });',
+    'const picked = (login) => r.reviewRunsOf([run(login)], { repo: "o/r", pr: 7, defaultBranch: "main" }).length;',
+    'const rule = (login) => s.ruleDispatchRun({ repo: "o/r", pr: 7, prState: "open", prHead: "a".repeat(40), prHeadRepo: "o/r", defaultBranch: "main", run: { id: 1, repo: "o/r", path: ".github/workflows/redline.yml", event: "workflow_dispatch", actor: login, triggeringActor: login, headBranch: "main", title: `Redline review o/r#7 @ ${"a".repeat(40)}`, status: "completed" } });',
+    'console.log(JSON.stringify({ actor: r.DISPATCH_ACTOR, same: s.DISPATCH_ACTOR === r.DISPATCH_ACTOR, theirs: picked("Some-One"), ours: picked("askalf"), postTheirs: rule("Some-One")?.action ?? null, postOurs: rule("askalf")?.action ?? null }));',
+  ].join('\n')], { env: { ...process.env, REDLINE_CI_REPO: '', REDLINE_REVIEWER_LOGIN: '', REDLINE_DISPATCH_ACTOR: 'some-one' }, encoding: 'utf8' });
+  const actor = actorProbe.status === 0 ? JSON.parse(actorProbe.stdout) : null;
+  check('with a caller\'s dispatch-actor, its dispatches are read and posted, and askalf\'s are not',
+    actor !== null && actor.actor === 'some-one' && actor.same && actor.theirs === 1 && actor.ours === 0 && actor.postTheirs === null && actor.postOurs === 'skip');
+  const badActor = spawnSync(process.execPath, ['--input-type=module', '-e', `await import(${JSON.stringify(new URL('./review.mjs', import.meta.url).href)});`], { env: { ...process.env, REDLINE_DISPATCH_ACTOR: 'a b' }, encoding: 'utf8' });
+  check('a dispatch-actor that is no login stops the script as it loads', badActor.status !== 0 && /REDLINE_DISPATCH_ACTOR must be a GitHub login/.test(badActor.stderr));
   // The module constants follow the env, read in a fresh process as the workflows set it.
   const probe = (env) => spawnSync(process.execPath, ['--input-type=module', '-e', [
     `const p = await import(${JSON.stringify(new URL('./pin.mjs', import.meta.url).href)});`,
@@ -1048,6 +1066,9 @@ console.log('\n  the reusable workflow');
   const optional = (name) => new RegExp(`\\n      ${name}:\\n(?:        .*\\n)*?        required: false\\n`).test(wf);
   check('runner-label and hosted-runner are both optional and empty by default', def('runner-label', "''") && def('hosted-runner', "''"));
   check('the hosted model settings default to Anthropic\'s endpoint and the script\'s model', def('model-url', 'https://api.anthropic.com') && def('model', "''") && def('deep-model', "''"));
+  check('the dispatch account is an input of the review and of the post, askalf by default, and reaches both scripts',
+    def('dispatch-actor', 'askalf') && (steps[reviewAt] ?? '').includes('          REDLINE_DISPATCH_ACTOR: ${{ inputs.dispatch-actor }}\n')
+    && ((post) => /\n      dispatch-actor:\n(?:        .*\n)*?        required: false\n        default: askalf\n        type: string\n/.test(post) && post.includes('          REDLINE_DISPATCH_ACTOR: ${{ inputs.dispatch-actor }}\n'))(readFileSync(fileURLToPath(new URL('../../.github/workflows/redline-post-verdict.yml', import.meta.url)), 'utf8')));
   check('the key and the rubric are optional secrets, so a self-hosted caller passes none',
     /\n    secrets:\n/.test(wf) && optional('model-api-key') && optional('reviewer-prompt') && !wf.slice(wf.indexOf('\n    secrets:\n'), wf.indexOf('\npermissions:\n')).includes('required: true'));
   check('the runner check comes after the ref checks and before anything is fetched', whereAt > mainAt && whereAt < fetchAt);

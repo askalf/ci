@@ -36,6 +36,14 @@ on:
         required: false
         default: sprayberry-redline
         type: string
+      dispatch-actor:
+        description: >-
+          The account whose dispatch of the caller's redline.yml on the default branch is a run
+          to post: the one that dispatches a review for a head the pull_request run cannot vouch
+          for. The review caller passes the same login.
+        required: false
+        default: askalf
+        type: string
     secrets:
       reviewer-token:
         description: The token that posts as reviewer-login.
@@ -164,4 +172,5 @@ jobs:
           REDLINE_REVIEWER_TOKEN: ${{ secrets.reviewer-token }}
           REDLINE_CI_REPO: ${{ inputs.ci-repo }}
           REDLINE_REVIEWER_LOGIN: ${{ inputs.reviewer-login }}
+          REDLINE_DISPATCH_ACTOR: ${{ inputs.dispatch-actor }}
         run: node .redline/scripts/redline/post.mjs

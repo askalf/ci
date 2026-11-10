@@ -19,6 +19,10 @@ names the commit's date and the pull request it came from.
   that answers the Anthropic Messages API (`model-url`, `model`, `deep-model`). No self-hosted
   runner, host file or local model endpoint is needed. `runner-label` is no longer a required
   input; a caller that passes it runs as before.
+- The account whose dispatched reviews are trusted is an input, `dispatch-actor`, of the review
+  and the post (default `askalf`, compared without case). Before, only askalf's dispatch was
+  posted or read as history, so no other repository could review a pull request that changes a
+  workflow.
 - The round cap counts only heads a model read, since Redline's newest approval. A cap verdict
   (`rule:round-cap`) is not a round, not the head a delta is read from, not an earlier request for
   the model to check, and not the request the next cap quotes; before, every push past the cap

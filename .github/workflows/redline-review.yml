@@ -86,6 +86,14 @@ on:
         required: false
         default: sprayberry-redline
         type: string
+      dispatch-actor:
+        description: >-
+          The account whose dispatches of the caller's redline.yml are trusted as review history:
+          the one that dispatches a review for a head the pull_request run cannot vouch for. The
+          post caller passes the same login.
+        required: false
+        default: askalf
+        type: string
       env-file:
         description: >-
           The host file with the model endpoint's address and key and the model settings. An absolute path on the runner host.
@@ -366,6 +374,7 @@ jobs:
           GH_READ_TOKEN: ${{ github.token }}
           REDLINE_CI_REPO: ${{ inputs.ci-repo }}
           REDLINE_REVIEWER_LOGIN: ${{ inputs.reviewer-login }}
+          REDLINE_DISPATCH_ACTOR: ${{ inputs.dispatch-actor }}
           # Hosted mode's two files, written above from the caller's secrets; otherwise the host's.
           REDLINE_ENV_FILE: ${{ steps.where.outputs.env-file || inputs.env-file }}
           # The reviewer's rubric lives on the host, root:<runner group> 640, never in a public
