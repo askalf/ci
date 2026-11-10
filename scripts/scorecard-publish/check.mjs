@@ -46,11 +46,10 @@ export const READ_WAIT_MS = 15_000;
 const REPO_RE = /^[A-Za-z0-9-]+\/[A-Za-z0-9._-]+$/;
 const WORKFLOW_RE = /^\.github\/workflows\/([A-Za-z0-9._-]+\.ya?ml)$/;
 
-const BRANCH_RE = /^[A-Za-z0-9._/-]{1,255}$/;
-
 /**
  * The facts the decision reads, from the environment the action hands over; null when the event
- * is not a workflow_run. A default branch that is not a plain branch name reads as none.
+ * is not a workflow_run. The default branch is kept as GitHub gives it: a branch may carry a +
+ * or letters outside ASCII, and it goes into the dispatch as a JSON string, nowhere else.
  */
 export function runOf(env) {
   if ((env?.EVENT_NAME ?? '') !== 'workflow_run') return null;
@@ -62,7 +61,7 @@ export function runOf(env) {
     headBranch: text('RUN_BRANCH'),
     startedAt: text('RUN_STARTED_AT'),
     workflowFile: WORKFLOW_RE.exec(text('RUN_PATH').split('@')[0])?.[1] ?? '',
-    defaultBranch: BRANCH_RE.test(text('DEFAULT_BRANCH')) ? text('DEFAULT_BRANCH') : '',
+    defaultBranch: text('DEFAULT_BRANCH'),
     isPrivate: text('PRIVATE') === 'true',
   };
 }

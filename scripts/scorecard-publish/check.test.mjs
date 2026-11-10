@@ -30,7 +30,7 @@ console.log('\n  which runs are checked');
   check('a run on another branch is not', /only main publishes/.test(notChecked(runOf(event({ RUN_BRANCH: 'feature' })))));
   check('a private repository is not', /private/.test(notChecked(runOf(event({ PRIVATE: 'true' })))));
   check('a run with no default branch or no start time is not', notChecked(runOf(event({ DEFAULT_BRANCH: '' }))) !== '' && notChecked(runOf(event({ RUN_STARTED_AT: '' }))) !== '');
-  check('a default branch that is not a plain branch name reads as none', ['main"}', 'a b', 'x\ny', 'm'.repeat(256)].every((b) => runOf(event({ DEFAULT_BRANCH: b })).defaultBranch === '') && runOf(event({ DEFAULT_BRANCH: 'release/1.x' })).defaultBranch === 'release/1.x');
+  check('a default branch is kept as GitHub names it, and a run on it is checked', ['release/1.x', 'release+stable', 'h\u00e4upt', 'main'].every((b) => runOf(event({ DEFAULT_BRANCH: b, RUN_BRANCH: b })).defaultBranch === b && notChecked(runOf(event({ DEFAULT_BRANCH: b, RUN_BRANCH: b }))) === ''));
   check('the workflow file is a plain file name under .github/workflows, or none',
     runOf(event({ RUN_PATH: '.github/workflows/scorecard.yaml@refs/heads/main' })).workflowFile === 'scorecard.yaml'
     && ['.github/workflows/../../x.yml', 'scorecard.yml', '.github/workflows/a/b.yml', '.github/workflows/x.yml?ref=1', ''].every((p) => runOf(event({ RUN_PATH: p })).workflowFile === ''));
@@ -115,6 +115,8 @@ console.log('\n  main');
   const noFile = world({ served: [GONE], ev: event({ RUN_PATH: 'dynamic/scorecard' }) });
   check('an unpublished run with no workflow file fails without a request to GitHub', await noFile.go() === 1 && noFile.dispatches().length === 0);
 
+  const plus = world({ served: [GONE], ev: event({ DEFAULT_BRANCH: 'release+stable "x"', RUN_BRANCH: 'release+stable "x"' }) });
+  check('an unpublished run on a default branch with a + and quotes is dispatched there, the ref a JSON string', await plus.go() === 0 && plus.dispatches().length === 1 && JSON.parse(plus.dispatches()[0].body).ref === 'release+stable "x"');
   const weekly = world({ served: [{ status: 200, date: '2026-11-09' }] });
   check('only the weekly scan\'s result served, with today\'s date: unpublished, one dispatch', await weekly.go() === 0 && weekly.dispatches().length === 1);
   const noId = world({ served: [FRESH], ev: event({ RUN_ID: '' }) });

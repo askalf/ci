@@ -40,7 +40,8 @@ The dispatch goes to the workflow file the checked run came from and needs `acti
 the job token. Nothing is checked out and nothing else is written.
 
 The run's facts reach the script as the action's inputs, each defaulting to the `workflow_run`
-event's own field, so a caller passes none. The script reads no file. A `workflow_run` that
+event's own field, so a caller passes none. The script reads no file. The default branch is used as
+GitHub names it and goes into the dispatch as a JSON string. A `workflow_run` that
 arrives with no run id fails the step: a runner that did not fill the inputs in must be a red
 run, not a check that never checks.
 
