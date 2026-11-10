@@ -32,6 +32,23 @@ what ships and an author edits it in seconds. A review that asked for changes on
 findings approves; attribution and a secret in the description still block. `redline_search` runs in a child process killed
 after 10 seconds, so a pattern that backtracks without end cannot stall the review.
 
+Hosted mode. A caller with no runner host passes `hosted-runner` (a GitHub-hosted runner label)
+in place of `runner-label`, and the `model-api-key` and `reviewer-prompt` secrets. The step `Check
+where the review runs` checks that exactly one runner is named and, in hosted mode, writes the two
+files a host would carry under `$RUNNER_TEMP/redline-hosted` (owner-only): an env file with
+`DARIO_URL` (`model-url`, https only), `DARIO_API_KEY`, `REDLINE_MODEL` and `REDLINE_DEEP_MODEL`,
+with `REDLINE_PIN_MODEL` and `REDLINE_FALLBACK_MODEL` set empty, and the rubric. The review step
+reads those paths in place of `env-file` and `prompt-file`. A self-hosted caller that passes either
+secret, `model` or `deep-model` is refused (`model-url` has a default and is not checked there), and
+so is a value with a line break, which could add a line to the env file.
+With `dario-image` (pinned by digest), `dario-lock-url` and the `dario-lock-token` secret in place
+of `model-api-key`, the endpoint is a dario sidecar: the env file names `http://127.0.0.1:3456`
+with a key made for the run, a third owner-only file, `dario.env`, carries that key, the lock
+service's address and token and the two shared-registry switches, and the step `Start the dario
+sidecar` runs the image with it on loopback and waits for `/health`, with no try started once a
+minute has passed. `Stop the dario sidecar`
+removes the container and its volume.
+
 Rounds. A round after an earlier verdict reads the delta first: the brief's diff is GitHub's
 compare of the head Redline last judged and this one, and the whole change against the base is one
 `redline_diff` call away (every file, or one path); a finding may quote either, since both are in
@@ -40,7 +57,8 @@ for every blocking finding the diff grounds in the one review, and
 Redline's earlier verdicts on the PR go to the model as data: the posted reviews, and, for a head
 nothing was posted at (every head on a private repository, where the post never runs), the
 `redline-verdict` artifact of the PR's earlier dispatched runs, read with the job's own token. Only
-askalf's dispatches of `redline.yml` on the default branch are read: they ran the default branch's
+the dispatch account's dispatches of `redline.yml` on the default branch are read (askalf, or the
+login a caller passes as `dispatch-actor` to the review and to the post): they ran the default branch's
 workflow files, which neither the PR nor its base branch can shape. A `pull_request` run ran the
 head's own files and is never read; on a public repository its verdict is posted and comes in with
 the reviews. After

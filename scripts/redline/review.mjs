@@ -42,7 +42,8 @@
 //     the PR; a dispatch with reread lifts the cap for that head. The count holds across a
 //     force-push because a run is tied to the PR by its branch, not by a commit the PR still lists,
 //     and only a run the PR could not have shaped is read (below).
-//   - Only a dispatch by askalf of redline.yml on the default branch feeds that history: it ran the
+//   - Only a dispatch of redline.yml on the default branch by the dispatch account (askalf, or the
+//     caller's dispatch-actor) feeds that history: it ran the
 //     default branch's workflow files, whatever the PR or its base branch carries. A pull_request
 //     run ran the head's own files, which the PR, or a base branch that is not the default, can
 //     shape into uploading any artifact, so it is never read; on a public repository its verdict
@@ -578,8 +579,20 @@ export function roundCapOf(value) {
   return /^\d{1,3}$/.test(s) ? Number(s) : DEFAULT_ROUND_CAP;
 }
 
-/** The identity that dispatches a review (the ops tick); the poster holds the same rule. */
-export const DISPATCH_ACTOR = 'askalf';
+/**
+ * The account whose dispatches of redline.yml are trusted, lowercased: askalf (the ops tick), or
+ * the login a caller passes as dispatch-actor (REDLINE_DISPATCH_ACTOR). A GitHub login, or an
+ * App's `<name>[bot]`; anything else is refused when the module loads.
+ */
+export function dispatchActor(value) {
+  if (value === undefined || value === '') return 'askalf';
+  if (!/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})(?:\[bot\])?$/.test(value)) throw new Error(`REDLINE_DISPATCH_ACTOR must be a GitHub login; got ${JSON.stringify(value)}`);
+  return value.toLowerCase();
+}
+/** The identity that dispatches a review; the poster holds the same rule. */
+export const DISPATCH_ACTOR = dispatchActor(process.env.REDLINE_DISPATCH_ACTOR);
+/** Whether `login` is DISPATCH_ACTOR; GitHub logins compare without case. */
+export const isDispatchActor = (login) => typeof login === 'string' && login.toLowerCase() === DISPATCH_ACTOR;
 
 /** The title a dispatched review run carries: `Redline review <repo>#<pr> @ <head>[ (re-read)]`. */
 export function dispatchTitleRe(repo, pr) {
@@ -602,7 +615,7 @@ export function reviewRunsOf(runs, { repo, pr, defaultBranch }) {
     if (r?.status !== 'completed' || (r.conclusion !== 'success' && r.conclusion !== 'failure')) continue;
     if (r.path !== '.github/workflows/redline.yml' || !Number.isInteger(r.id) || r.event !== 'workflow_dispatch') continue;
     if (r.repository?.full_name && r.repository.full_name !== repo) continue;
-    if (r.actor?.login !== DISPATCH_ACTOR || (r.triggering_actor?.login ?? DISPATCH_ACTOR) !== DISPATCH_ACTOR) continue;
+    if (!isDispatchActor(r.actor?.login) || !isDispatchActor(r.triggering_actor?.login ?? DISPATCH_ACTOR)) continue;
     if (!defaultBranch || r.head_branch !== defaultBranch) continue;
     const head = title.exec(String(r.display_title ?? ''))?.[1];
     if (head) out.push({ id: r.id, head, url: r.html_url ?? '', at: r.created_at ?? '' });

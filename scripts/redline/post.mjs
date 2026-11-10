@@ -30,9 +30,10 @@
 //      and head, with posted: false, whose event agrees with the run's conclusion (APPROVE exactly
 //      when the run succeeded).
 //   5. sprayberry-redline has no review at the head yet.
-// A dispatched run (askalf's workflow_dispatch of redline.yml on the default branch, for a head the
+// A dispatched run (a workflow_dispatch of redline.yml on the default branch by the dispatch account,
+// askalf unless the caller passes dispatch-actor, for a head the
 // pull_request run cannot vouch for):
-//   1. askalf dispatched .github/workflows/redline.yml in this repository on the default branch, the
+//   1. The dispatch account dispatched .github/workflows/redline.yml in this repository on the default branch, the
 //      run is completed, and its title names this repository, an open PR and the PR's current head.
 //   2. The run's commit is on the default branch.
 //   3. As above, with redline.yml read at the run's commit.
@@ -55,7 +56,7 @@
 
 import { appendFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
-import { gh, verdictProblem, REVIEWER_LOGIN, DISPATCH_ACTOR } from './review.mjs';
+import { gh, verdictProblem, REVIEWER_LOGIN, DISPATCH_ACTOR, isDispatchActor } from './review.mjs';
 export { DISPATCH_ACTOR };
 import { CI_REPO } from './pin.mjs';
 import { zipEntry, MAX_ARTIFACT_BYTES } from './zip.mjs';
@@ -150,7 +151,7 @@ export function rulePrRun({ repo, prState, prHead, prHeadRepo, run }) {
 /** Rule 1, dispatch. */
 export function ruleDispatchRun({ repo, pr, prState, prHead, prHeadRepo, defaultBranch, run }) {
   if (run.repo !== repo || run.path !== CALLER_PATH || run.event !== 'workflow_dispatch'
-    || run.actor !== DISPATCH_ACTOR || run.triggeringActor !== DISPATCH_ACTOR || !defaultBranch || run.headBranch !== defaultBranch) {
+    || !isDispatchActor(run.actor) || !isDispatchActor(run.triggeringActor) || !defaultBranch || run.headBranch !== defaultBranch) {
     return skip(`run ${run.id} is not ${DISPATCH_ACTOR}'s dispatch of ${CALLER_PATH} on ${defaultBranch || 'the default branch'} (${run.event || 'no event'} of ${run.path || 'no path'} on ${run.headBranch || 'no branch'} by ${run.actor || '?'})`);
   }
   const t = parseDispatchTitle(run.title);
