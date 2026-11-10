@@ -46,7 +46,9 @@ of `model-api-key`, the endpoint is a dario sidecar: the env file names `http://
 with a key made for the run, a third owner-only file, `dario.env`, carries that key, the lock
 service's address and token and the two shared-registry switches, and the step `Start the dario
 sidecar` runs the image with it on loopback and waits for `/health`, with no try started once a
-minute has passed. `Stop the dario sidecar`
+minute has passed. `sidecar.live.test.mjs` runs that step for real, against the pinned dario image
+and a stand-in lock service with one made-up seat, in `redline-sidecar-self-test.yml`: dario takes
+the seat, the step sees it ready, and dario asks for the run's key. No model is called. `Stop the dario sidecar`
 removes the container and its volume.
 
 Rounds. A round after an earlier verdict reads the delta first: the brief's diff is GitHub's
