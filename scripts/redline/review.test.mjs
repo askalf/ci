@@ -1065,7 +1065,10 @@ console.log('\n  the reusable workflow');
   const where = steps[whereAt] ?? '';
   const optional = (name) => new RegExp(`\\n      ${name}:\\n(?:        .*\\n)*?        required: false\\n`).test(wf);
   check('runner-label and hosted-runner are both optional and empty by default', def('runner-label', "''") && def('hosted-runner', "''"));
-  check('the hosted model settings default to Anthropic\'s endpoint and the script\'s model', def('model-url', 'https://api.anthropic.com') && def('model', "''") && def('deep-model', "''"));
+  // The endpoint default is compared as text: no pattern is built from an address.
+  const modelUrlInput = /\n      model-url:\n((?:        .*\n)+)/.exec(wf)?.[1] ?? '';
+  check('the hosted model settings default to Anthropic\'s endpoint and the script\'s model',
+    modelUrlInput.endsWith('        required: false\n        default: https://api.anthropic.com\n        type: string\n') && def('model', "''") && def('deep-model', "''"));
   check('the dispatch account is an input of the review and of the post, askalf by default, and reaches both scripts',
     def('dispatch-actor', 'askalf') && (steps[reviewAt] ?? '').includes('          REDLINE_DISPATCH_ACTOR: ${{ inputs.dispatch-actor }}\n')
     && ((post) => /\n      dispatch-actor:\n(?:        .*\n)*?        required: false\n        default: askalf\n        type: string\n/.test(post) && post.includes('          REDLINE_DISPATCH_ACTOR: ${{ inputs.dispatch-actor }}\n'))(readFileSync(fileURLToPath(new URL('../../.github/workflows/redline-post-verdict.yml', import.meta.url)), 'utf8')));
