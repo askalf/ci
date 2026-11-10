@@ -8,6 +8,10 @@
 # under the runner's temp directory and reads them as it reads a host's; the rest of the review is
 # the same. The secrets are the caller's repository secrets, within reach of every workflow there,
 # as any repository secret is.
+# Hosted mode with a dario sidecar: a caller that would spend subscription seats, not API credit,
+# passes dario-image and dario-lock-url with the dario-lock-token secret in place of model-api-key.
+# The job starts that dario on the runner, bound to loopback, with a key made for this run; dario
+# takes its seats from the lock service's account registry and the review is read through it.
 # The finished review is uploaded as the redline-verdict artifact (verdict.json). When the host file
 # holds no reviewer token the review is not posted here: the ops tick, or the repository's own
 # redline-post.yml, posts it as the reviewer account (reviewer-login, sprayberry-redline by default)
@@ -63,6 +67,21 @@ on:
       deep-model:
         description: >-
           Hosted mode only. The model for a large or sensitive pull request; empty reads those on model.
+        required: false
+        default: ''
+        type: string
+      dario-image:
+        description: >-
+          Hosted mode only. A dario image pinned by digest (ghcr.io/askalf/dario@sha256:...), to
+          run as a sidecar on the runner and read the review through, in place of model-url and
+          model-api-key. It gets its seats from the registry at dario-lock-url.
+        required: false
+        default: ''
+        type: string
+      dario-lock-url:
+        description: >-
+          With dario-image. The address of the dario lock service whose account registry holds
+          the seats the sidecar serves. https only: the lock token travels with every request.
         required: false
         default: ''
         type: string
@@ -129,6 +148,11 @@ on:
         description: >-
           Hosted mode only. The reviewer's rubric, the whole system prompt. It is the caller's
           own text: this repository carries none.
+        required: false
+      dario-lock-token:
+        description: >-
+          With dario-image. The lock service's bearer token. Whoever holds it can use every seat
+          in that registry, so it should be a registry made for hosted reviews, not a main pool's.
         required: false
 
 # actions: read lets a fork dispatch list the head's pull_request runs and their jobs (the
@@ -199,6 +223,11 @@ jobs:
       # line break could add a line to the env file. No fallback or pin model is set, so every
       # review is read on model (or deep-model): the script's defaults for those two name models
       # another endpoint may not have.
+      # With dario-image the endpoint is a dario this job starts on loopback: the env file names it
+      # with a key made here for this run, and a second owner-only file carries what the container
+      # is started with (that key, the lock service's address and token, and the two switches that
+      # make dario take its accounts and their rate-limit readings from the registry). The image
+      # must be pinned by digest: it is handed the lock token.
       - name: Check where the review runs
         id: where
         env:
@@ -207,8 +236,11 @@ jobs:
           MODEL_URL: ${{ inputs.model-url }}
           MODEL: ${{ inputs.model }}
           DEEP_MODEL: ${{ inputs.deep-model }}
+          DARIO_IMAGE: ${{ inputs.dario-image }}
+          DARIO_LOCK_URL: ${{ inputs.dario-lock-url }}
           MODEL_API_KEY: ${{ secrets.model-api-key }}
           REVIEWER_PROMPT: ${{ secrets.reviewer-prompt }}
+          DARIO_LOCK_TOKEN: ${{ secrets.dario-lock-token }}
         run: |
           set -euo pipefail
           fail() { echo "::error::$1"; exit 1; }
@@ -221,8 +253,8 @@ jobs:
             fail "pass runner-label (a self-hosted runner) or hosted-runner (a GitHub-hosted one, such as ubuntu-latest)"
           fi
           if [ -z "$HOSTED_RUNNER" ]; then
-            if [ -n "$MODEL_API_KEY" ] || [ -n "$REVIEWER_PROMPT" ]; then
-              fail "the model-api-key and reviewer-prompt secrets are read only in hosted mode (hosted-runner); a self-hosted runner reads env-file and prompt-file on its host"
+            if [ -n "$MODEL_API_KEY" ] || [ -n "$REVIEWER_PROMPT" ] || [ -n "$DARIO_LOCK_TOKEN" ] || [ -n "$DARIO_IMAGE" ] || [ -n "$DARIO_LOCK_URL" ]; then
+              fail "the model-api-key, reviewer-prompt and dario-lock-token secrets and the dario inputs are read only in hosted mode (hosted-runner); a self-hosted runner reads env-file and prompt-file on its host"
             fi
             echo "the review runs on the self-hosted runner ${RUNNER_LABEL}, with the host's env file and prompt file"
             exit 0
@@ -231,16 +263,38 @@ jobs:
           [[ "$MODEL_URL" =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?(/[A-Za-z0-9._~/-]*)?$ ]] || fail "model-url must be an https address with no query; got '${MODEL_URL}'"
           [[ "$MODEL" =~ ^[A-Za-z0-9._:/-]*$ ]] || fail "model must be a model id; got '${MODEL}'"
           [[ "$DEEP_MODEL" =~ ^[A-Za-z0-9._:/-]*$ ]] || fail "deep-model must be a model id; got '${DEEP_MODEL}'"
-          [ -n "$MODEL_API_KEY" ] || fail "the model-api-key secret is empty: hosted mode needs the endpoint's key (a Dependabot pull request reads Dependabot secrets, not Actions secrets)"
-          [[ "$MODEL_API_KEY" =~ $one_line ]] || fail "the model-api-key secret must be one line"
           [ -n "${REVIEWER_PROMPT//[[:space:]]/}" ] || fail "the reviewer-prompt secret is empty: hosted mode needs the caller's own rubric (a Dependabot pull request reads Dependabot secrets, not Actions secrets)"
+          if [ -z "$DARIO_IMAGE" ]; then
+            if [ -n "$DARIO_LOCK_URL" ] || [ -n "$DARIO_LOCK_TOKEN" ]; then
+              fail "dario-lock-url and the dario-lock-token secret are read only with dario-image"
+            fi
+            [ -n "$MODEL_API_KEY" ] || fail "the model-api-key secret is empty: hosted mode needs the endpoint's key, or dario-image for a dario sidecar (a Dependabot pull request reads Dependabot secrets, not Actions secrets)"
+            [[ "$MODEL_API_KEY" =~ $one_line ]] || fail "the model-api-key secret must be one line"
+            endpoint="$MODEL_URL"
+            key="$MODEL_API_KEY"
+          else
+            [[ "$DARIO_IMAGE" =~ ^[a-z0-9][a-z0-9._/-]*@sha256:[0-9a-f]{64}$ ]] || fail "dario-image must be an image pinned by digest (name@sha256:...), since it is handed the lock token; got '${DARIO_IMAGE}'"
+            [[ "$DARIO_LOCK_URL" =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?(/[A-Za-z0-9._~/-]*)?$ ]] || fail "dario-lock-url must be an https address with no query; got '${DARIO_LOCK_URL}'"
+            [ -z "$MODEL_API_KEY" ] || fail "pass the model-api-key secret or dario-image, not both: the sidecar is the endpoint and its key is made for this run"
+            [ -n "$DARIO_LOCK_TOKEN" ] || fail "the dario-lock-token secret is empty: the sidecar needs the lock service's token (a Dependabot pull request reads Dependabot secrets, not Actions secrets)"
+            [[ "$DARIO_LOCK_TOKEN" =~ $one_line ]] || fail "the dario-lock-token secret must be one line"
+            endpoint="http://127.0.0.1:3456"
+            key="$(openssl rand -hex 32)"
+            echo "::add-mask::${key}"
+          fi
           umask 077
           mkdir -p "$dir"
-          printf 'DARIO_URL=%s\nDARIO_API_KEY=%s\nREDLINE_MODEL=%s\nREDLINE_DEEP_MODEL=%s\nREDLINE_PIN_MODEL=\nREDLINE_FALLBACK_MODEL=\n' "$MODEL_URL" "$MODEL_API_KEY" "$MODEL" "$DEEP_MODEL" > "${dir}/redline.env"
+          printf 'DARIO_URL=%s\nDARIO_API_KEY=%s\nREDLINE_MODEL=%s\nREDLINE_DEEP_MODEL=%s\nREDLINE_PIN_MODEL=\nREDLINE_FALLBACK_MODEL=\n' "$endpoint" "$key" "$MODEL" "$DEEP_MODEL" > "${dir}/redline.env"
           printf '%s\n' "$REVIEWER_PROMPT" > "${dir}/prompt.md"
           echo "env-file=${dir}/redline.env" >> "$GITHUB_OUTPUT"
           echo "prompt-file=${dir}/prompt.md" >> "$GITHUB_OUTPUT"
-          echo "the review runs on GitHub's runner ${HOSTED_RUNNER}, against ${MODEL_URL}, with the caller's key and rubric"
+          if [ -n "$DARIO_IMAGE" ]; then
+            printf 'DARIO_API_KEY=%s\nDARIO_REFRESH_LOCK_URL=%s\nDARIO_REFRESH_LOCK_TOKEN=%s\nDARIO_POOL_SHARED_ACCOUNTS=1\nDARIO_POOL_SHARED_STATE=1\n' "$key" "$DARIO_LOCK_URL" "$DARIO_LOCK_TOKEN" > "${dir}/dario.env"
+            echo "dario-env-file=${dir}/dario.env" >> "$GITHUB_OUTPUT"
+            echo "the review runs on GitHub's runner ${HOSTED_RUNNER}, through a dario sidecar with the seats of ${DARIO_LOCK_URL}, and the caller's rubric"
+          else
+            echo "the review runs on GitHub's runner ${HOSTED_RUNNER}, against ${MODEL_URL}, with the caller's key and rubric"
+          fi
 
       # A self-hosted runner carries the node the review needs; GitHub's runner gets it here.
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
@@ -363,6 +417,34 @@ jobs:
           git -C pr -c core.symlinks=false checkout -q --detach FETCH_HEAD
           echo "fork head ${HEAD_SHA} checked out to read"
 
+      # The sidecar: dario from the pinned image, published on the runner's loopback only, started
+      # with the file the runner check wrote, so no secret is in this step or on a command line.
+      # dario answers /health with 200 once it can serve, which it can as soon as the registry has
+      # given it a seat. A container that stopped, or one still not ready after a minute, fails
+      # the review with the container's last lines: an empty registry and a wrong token end here.
+      - name: Start the dario sidecar
+        if: inputs.dario-image != ''
+        env:
+          DARIO_IMAGE: ${{ inputs.dario-image }}
+          DARIO_ENV_FILE: ${{ steps.where.outputs.dario-env-file }}
+        run: |
+          set -euo pipefail
+          docker rm -f -v redline-dario >/dev/null 2>&1 || true
+          docker run -d --name redline-dario --env-file "$DARIO_ENV_FILE" -p 127.0.0.1:3456:3456 "$DARIO_IMAGE" >/dev/null
+          for attempt in $(seq 1 30); do
+            if curl -fsS -o /dev/null -m 3 http://127.0.0.1:3456/health; then
+              echo "the dario sidecar is ready (attempt ${attempt})"
+              exit 0
+            fi
+            if [ "$(docker inspect -f '{{.State.Running}}' redline-dario 2>/dev/null)" != "true" ]; then
+              break
+            fi
+            sleep 2
+          done
+          echo "::error::the dario sidecar did not become ready: check the lock service's address and token, and that its registry holds a seat"
+          docker logs --tail 40 redline-dario 2>&1 || true
+          exit 1
+
       - name: Review
         env:
           REPO: ${{ github.repository }}
@@ -398,3 +480,8 @@ jobs:
       - name: Remove the checkouts
         if: always()
         run: rm -rf pr .redline redline-verdict "${RUNNER_TEMP}/redline-hosted"
+
+      # The container goes with its anonymous volume, which held the seats' credentials.
+      - name: Stop the dario sidecar
+        if: always() && inputs.dario-image != ''
+        run: docker rm -f -v redline-dario >/dev/null 2>&1 || true

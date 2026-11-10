@@ -1057,7 +1057,7 @@ console.log('\n  the reusable workflow');
   check('the upload is the pinned upload-artifact, as redline-verdict, short-lived',
     /uses: actions\/upload-artifact@[0-9a-f]{40} # v7\./.test(upload) && upload.includes('name: redline-verdict\n')
     && upload.includes('path: redline-verdict/verdict.json\n') && /retention-days: [1-7]\n/.test(upload));
-  check('the cleanup removes the verdict too', /run: rm -rf pr \.redline redline-verdict "\$\{RUNNER_TEMP\}\/redline-hosted"\s*$/.test(steps[cleanAt] ?? ''));
+  check('the cleanup removes the verdict too', /run: rm -rf pr \.redline redline-verdict "\$\{RUNNER_TEMP\}\/redline-hosted"\n/.test(steps[cleanAt] ?? ''));
   check('nothing from the PR is interpolated into a run step',!/run:[^\n]*\$\{\{\s*github\.event\.pull_request\.(title|body|head\.ref)/.test(wf));
 
   // Hosted mode: a GitHub runner, with the endpoint's key and the rubric from the caller's secrets.
@@ -1067,6 +1067,7 @@ console.log('\n  the reusable workflow');
   check('runner-label and hosted-runner are both optional and empty by default', def('runner-label', "''") && def('hosted-runner', "''"));
   // The endpoint default is compared as text: no pattern is built from an address.
   const modelUrlInput = /\n      model-url:\n((?:        .*\n)+)/.exec(wf)?.[1] ?? '';
+  check('the sidecar inputs are optional and empty by default, and its token is an optional secret', def('dario-image', "''") && def('dario-lock-url', "''") && optional('dario-lock-token'));
   check('the hosted model settings default to Anthropic\'s endpoint and the script\'s model',
     modelUrlInput.endsWith('        required: false\n        default: https://api.anthropic.com\n        type: string\n') && def('model', "''") && def('deep-model', "''"));
   check('the dispatch account is an input of the review and of the post, askalf by default, and reaches both scripts',
@@ -1076,7 +1077,7 @@ console.log('\n  the reusable workflow');
     /\n    secrets:\n/.test(wf) && optional('model-api-key') && optional('reviewer-prompt') && !wf.slice(wf.indexOf('\n    secrets:\n'), wf.indexOf('\npermissions:\n')).includes('required: true'));
   check('the runner check comes after the ref checks and before anything is fetched', whereAt > mainAt && whereAt < fetchAt);
   check('the secrets reach one step, through env, and no run line interpolates them',
-    (wf.match(/secrets\./g) ?? []).length === 2 && where.includes('          MODEL_API_KEY: ${{ secrets.model-api-key }}\n') && where.includes('          REVIEWER_PROMPT: ${{ secrets.reviewer-prompt }}\n')
+    (wf.match(/secrets\./g) ?? []).length === 3 && where.includes('          DARIO_LOCK_TOKEN: ${{ secrets.dario-lock-token }}\n') && where.includes('          MODEL_API_KEY: ${{ secrets.model-api-key }}\n') && where.includes('          REVIEWER_PROMPT: ${{ secrets.reviewer-prompt }}\n')
     && !where.slice(where.indexOf('run:')).includes('${{'));
   check('node is set up on a hosted runner only, pinned', /- uses: actions\/setup-node@[0-9a-f]{40} # v\d+\.\d+\.\d+\n        if: inputs\.hosted-runner != ''\n/.test(wf));
   const whereRun = /run: \|\n((?: {10}.*\n?)+)/.exec(where)?.[1].replace(/^ {10}/gm, '') ?? 'exit 0';
@@ -1089,7 +1090,8 @@ console.log('\n  the reusable workflow');
       writeFileSync(out, '');
       const r = spawnSync('bash', ['-c', whereRun], { encoding: 'utf8', env: {
         PATH: process.env.PATH, RUNNER_TEMP: temp, GITHUB_OUTPUT: out,
-        RUNNER_LABEL: '', HOSTED_RUNNER: 'ubuntu-latest', MODEL_URL: 'https://api.anthropic.com', MODEL: '', DEEP_MODEL: '', MODEL_API_KEY: 'sk-test-key', REVIEWER_PROMPT: 'Review it.\nSubmit once.', ...over } });
+        RUNNER_LABEL: '', HOSTED_RUNNER: 'ubuntu-latest', MODEL_URL: 'https://api.anthropic.com', MODEL: '', DEEP_MODEL: '', MODEL_API_KEY: 'sk-test-key', REVIEWER_PROMPT: 'Review it.\nSubmit once.',
+        DARIO_IMAGE: '', DARIO_LOCK_URL: '', DARIO_LOCK_TOKEN: '', ...over } });
       return { status: r.status, stdout: r.stdout, outputs: readFileSync(out, 'utf8') };
     };
     const envFile = join(temp, 'redline-hosted', 'redline.env');
@@ -1125,6 +1127,66 @@ console.log('\n  the reusable workflow');
       && ['https://api.example.com', 'https://gateway.example.com:8443/anthropic'].every((u) => run({ MODEL_URL: u }).status === 0));
     check('a model that is not a model id is refused', run({ MODEL: 'a b' }).status === 1 && run({ DEEP_MODEL: 'x\nDARIO_URL=http://evil' }).status === 1 && run({ MODEL: 'vendor/model-1:beta' }).status === 0);
     check('a refused run leaves no file from the run before it', run({ MODEL_API_KEY: '' }).status === 1 && existsSync(envFile) === false);
+
+    // The dario sidecar: the endpoint is a dario this job starts, with its seats from a lock service's registry.
+    const IMAGE = `ghcr.io/askalf/dario@sha256:${'a'.repeat(64)}`;
+    const side = { DARIO_IMAGE: IMAGE, DARIO_LOCK_URL: 'https://lock.example.workers.dev', DARIO_LOCK_TOKEN: 'lock-token-1', MODEL_API_KEY: '' };
+    const darioFile = join(temp, 'redline-hosted', 'dario.env');
+    const sidecar = run({ ...side, MODEL: 'gpt-5.6-terra' });
+    const sideEnv = sidecar.status === 0 ? parseEnvFile(readFileSync(envFile, 'utf8')) : {};
+    const container = sidecar.status === 0 ? parseEnvFile(readFileSync(darioFile, 'utf8')) : {};
+    check('with dario-image the env file names a loopback dario and a key made for this run',
+      sideEnv.DARIO_URL === 'http://127.0.0.1:3456' && /^[0-9a-f]{64}$/.test(sideEnv.DARIO_API_KEY ?? '') && sideEnv.REDLINE_MODEL === 'gpt-5.6-terra' && !darioAccess(sideEnv).error);
+    check('the container file carries that same key, the lock service and the two registry switches, and nothing else',
+      container.DARIO_API_KEY === sideEnv.DARIO_API_KEY && container.DARIO_REFRESH_LOCK_URL === 'https://lock.example.workers.dev' && container.DARIO_REFRESH_LOCK_TOKEN === 'lock-token-1'
+      && container.DARIO_POOL_SHARED_ACCOUNTS === '1' && container.DARIO_POOL_SHARED_STATE === '1' && Object.keys(container).length === 5);
+    check('a third output names the container file', sidecar.outputs === `env-file=${envFile}\nprompt-file=${promptFile}\ndario-env-file=${darioFile}\n`);
+    check('the run key is masked and differs from run to run; the lock token is never printed',
+      sidecar.stdout.includes(`::add-mask::${sideEnv.DARIO_API_KEY}`) && !sidecar.stdout.includes('lock-token-1')
+      && run(side).status === 0 && parseEnvFile(readFileSync(envFile, 'utf8')).DARIO_API_KEY !== sideEnv.DARIO_API_KEY);
+    if (process.platform !== 'win32') check('the container file is the owner\'s alone', (lstatSync(darioFile).mode & 0o077) === 0);
+    check('without dario-image no container file is written and no third output named', run({}).status === 0 && !existsSync(darioFile) && !run({}).outputs.includes('dario-env-file'));
+    check('an image that is not pinned by digest is refused',
+      ['ghcr.io/askalf/dario:latest', 'ghcr.io/askalf/dario', `ghcr.io/askalf/dario@sha256:${'a'.repeat(63)}`, `ghcr.io/askalf/dario:v6@sha256:${'a'.repeat(64)}`, `x@sha256:${'a'.repeat(64)}\n--privileged`, `-v /:/host x@sha256:${'a'.repeat(64)}`]
+        .every((i) => run({ ...side, DARIO_IMAGE: i }).status === 1));
+    check('a lock address that is not https, or carries a query or a line break, is refused',
+      ['http://lock.example.com', 'https://lock.example.com/?t=1', 'https://lock.example.com\nDARIO_HOST=0.0.0.0', ''].every((u) => run({ ...side, DARIO_LOCK_URL: u }).status === 1));
+    check('an empty lock token, and one with a line break, are refused',
+      /dario-lock-token secret is empty/.test(run({ ...side, DARIO_LOCK_TOKEN: '' }).stdout) && run({ ...side, DARIO_LOCK_TOKEN: 'a\nDARIO_ADMIN=1' }).status === 1);
+    check('a model key next to dario-image is refused, and so are the lock settings without the image',
+      /not both/.test(run({ ...side, MODEL_API_KEY: 'sk-test-key' }).stdout) && run({ DARIO_LOCK_URL: side.DARIO_LOCK_URL }).status === 1 && run({ DARIO_LOCK_TOKEN: 'lock-token-1' }).status === 1);
+    check('a self-hosted caller that passes a dario input or the lock token is refused',
+      [{ DARIO_IMAGE: IMAGE }, { DARIO_LOCK_URL: side.DARIO_LOCK_URL }, { DARIO_LOCK_TOKEN: 'lock-token-1' }].every((o) => run({ RUNNER_LABEL: 'redline', HOSTED_RUNNER: '', MODEL_API_KEY: '', REVIEWER_PROMPT: '', ...o }).status === 1));
+
+    // The start step's own shell, against a stub docker and curl: what it runs, and how it ends.
+    const startAt = stepNamed('Start the dario sidecar');
+    const start = steps[startAt] ?? '';
+    const stopAt = stepNamed('Stop the dario sidecar');
+    check('the sidecar starts just before the review, only with dario-image, and holds no secret',
+      startAt === reviewAt - 1 && start.includes("if: inputs.dario-image != ''\n") && !start.includes('secrets.') && start.includes('DARIO_ENV_FILE: ${{ steps.where.outputs.dario-env-file }}\n') && !start.slice(start.indexOf('run:')).includes('${{'));
+    check('the sidecar is removed with its volume whatever the review did, as the last step',
+      stopAt === steps.length - 1 && (steps[stopAt] ?? '').includes("if: always() && inputs.dario-image != ''\n") && (steps[stopAt] ?? '').includes('run: docker rm -f -v redline-dario'));
+    const startRun = /run: \|\n((?: {10}.*\n?)+)/.exec(start)?.[1].replace(/^ {10}/gm, '') ?? 'exit 1';
+    const bin = join(temp, 'bin');
+    mkdirSync(bin);
+    const calls = join(temp, 'calls');
+    const stub = (name, body) => writeFileSync(join(bin, name), `#!/usr/bin/env bash\necho "${name} $*" >> "${calls}"\n${body}\n`, { mode: 0o755 });
+    const startWith = ({ health, running }) => {
+      writeFileSync(calls, '');
+      stub('docker', `case "$1" in inspect) echo ${running};; logs) echo "dario: no accounts in the registry";; esac\nexit 0`);
+      stub('curl', `exit ${health}`);
+      stub('sleep', 'exit 0');
+      const r = spawnSync('bash', ['-c', startRun], { encoding: 'utf8', env: { PATH: `${bin}:${process.env.PATH}`, DARIO_IMAGE: IMAGE, DARIO_ENV_FILE: darioFile } });
+      return { status: r.status, stdout: r.stdout, calls: readFileSync(calls, 'utf8') };
+    };
+    const up = startWith({ health: 0, running: 'true' });
+    check('it runs the pinned image on loopback with the container file, and is ready when /health answers',
+      up.status === 0 && up.calls.includes(`docker run -d --name redline-dario --env-file ${darioFile} -p 127.0.0.1:3456:3456 ${IMAGE}\n`) && up.calls.includes('http://127.0.0.1:3456/health') && /ready/.test(up.stdout));
+    const exited = startWith({ health: 22, running: 'false' });
+    check('a container that stopped fails the step at once, with its last lines',
+      exited.status === 1 && (exited.calls.match(/^curl /gm) ?? []).length === 1 && /did not become ready/.test(exited.stdout) && exited.stdout.includes('no accounts in the registry'));
+    const never = startWith({ health: 22, running: 'true' });
+    check('a container that never answers is given 30 tries, then fails the step', never.status === 1 && (never.calls.match(/^curl /gm) ?? []).length === 30);
     rmSync(temp, { recursive: true, force: true });
   }
 

@@ -124,6 +124,40 @@ The job writes the key and the rubric to two owner-only files under the runner's
 `review.mjs` reads them as it reads a host's; nothing else in the review differs. No pin model and
 no fallback model is set in hosted mode, so every review is read on `model` or `deep-model`.
 
+### With a dario sidecar
+
+A hosted review can be read through [dario](https://github.com/askalf/dario) on subscription
+seats, in place of an API key. The caller passes a dario image and a dario lock service, and
+no `model-api-key`:
+
+```yaml
+    with:
+      redline-ref: <sha>
+      hosted-runner: ubuntu-latest
+      model: <a model id the seats serve>
+      dario-image: ghcr.io/askalf/dario@sha256:<digest>
+      dario-lock-url: https://<your lock service>
+    secrets:
+      dario-lock-token: ${{ secrets.REDLINE_DARIO_LOCK_TOKEN }}
+      reviewer-prompt: ${{ secrets.REDLINE_PROMPT }}
+```
+
+| Input or secret | What it is |
+|---|---|
+| `dario-image` | the dario image, pinned by digest: it is handed the lock token, so a tag is refused |
+| `dario-lock-url` | the dario lock service whose account registry holds the seats (dario's `docs/multi-instance.md`); https only |
+| `dario-lock-token` (secret) | that service's bearer token |
+
+The job starts the image on the runner, published on loopback only, with a key made for that run,
+`DARIO_POOL_SHARED_ACCOUNTS=1` and `DARIO_POOL_SHARED_STATE=1`: dario starts with no accounts of
+its own and takes its seats, and their rate-limit readings, from the registry. The review waits up
+to a minute for dario's `/health`, and fails with the container's last lines if it never answers.
+The container and its volume are removed when the job ends. `model-url` is not read.
+
+**Use a registry made for this.** Whoever holds the lock token can use every seat in the registry
+it opens, and here it is a repository secret. Run a second lock service with the one or two seats
+hosted reviews may spend, and keep a main pool's token out of GitHub.
+
 What to know before choosing it:
 
 - **This repository ships no rubric.** The reviewer's prompt is never committed here, so
@@ -132,7 +166,8 @@ What to know before choosing it:
   the review ends with one `redline_submit` call. A GitHub secret holds up to 48 KB.
 - **The secrets are repository secrets.** On `pull_request` the job runs the workflow files of the
   pull request's own head, so anyone who can push a branch to the repository can write a workflow
-  that reads them, as with any repository secret. Use a key made for this, with a spending limit. A
+  that reads them, as with any repository secret. Use a key made for this, with a spending limit,
+  or a lock token for a registry made for this. A
   fork's pull request gets no secrets and is not reviewed on `pull_request`; a Dependabot pull
   request reads Dependabot secrets, so the two are set there as well or its review fails, saying so.
 - **The post is unchanged.** The verdict still reaches the pull request through

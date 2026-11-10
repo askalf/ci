@@ -19,6 +19,10 @@ names the commit's date and the pull request it came from.
   that answers the Anthropic Messages API (`model-url`, `model`, `deep-model`). No self-hosted
   runner, host file or local model endpoint is needed. `runner-label` is no longer a required
   input; a caller that passes it runs as before.
+- Hosted mode can read the review through a dario sidecar on subscription seats: `dario-image`
+  (pinned by digest), `dario-lock-url` and the `dario-lock-token` secret in place of
+  `model-api-key`. The job starts dario on the runner's loopback with a key made for the run, and
+  dario takes its seats from the lock service's account registry.
 - The account whose dispatched reviews are trusted is an input, `dispatch-actor`, of the review
   and the post (default `askalf`, compared without case). Before, only askalf's dispatch was
   posted or read as history, so no other repository could review a pull request that changes a
