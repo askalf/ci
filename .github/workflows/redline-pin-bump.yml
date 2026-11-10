@@ -4,8 +4,9 @@
 # redline-fix.yml calls redline-fix-run.yml, public-text.yml calls public-text.yml and
 # redline-post.yml calls redline-post-verdict.yml. A workflow pins this repository's actions as steps, in
 # whichever workflow file it lives: uses: askalf/ci/actions/drift-report@<sha> (a watcher's report
-# step), uses: askalf/ci/actions/checkout-with-retry@<sha> (any job's checkout), and
-# uses: askalf/ci/actions/fleet-status@<sha> and fleet-status-check@<sha> (the fleet lanes).
+# step), uses: askalf/ci/actions/checkout-with-retry@<sha> (any job's checkout),
+# uses: askalf/ci/actions/fleet-status@<sha> and fleet-status-check@<sha> (the fleet lanes), and
+# uses: askalf/ci/actions/scorecard-publish-check@<sha> (the check after a Scorecard run).
 # Each pins by SHA so a change reaches it only through a reviewed bump there; this writes those bumps
 # (scripts/redline/pin.mjs), and each repo's own gate reviews and merges them.
 #
@@ -118,6 +119,10 @@ jobs:
         :(exclude)scripts/fleet-status/README.md
         actions/fleet-status
         actions/fleet-status-check
+        scripts/scorecard-publish
+        :(exclude)scripts/scorecard-publish/*.test.mjs
+        :(exclude)scripts/scorecard-publish/README.md
+        actions/scorecard-publish-check
         .github/workflows/redline-review.yml
         .github/workflows/redline-fix-run.yml
         .github/workflows/public-text.yml

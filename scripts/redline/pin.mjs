@@ -54,8 +54,9 @@ export const DRIFT_REPORT_ACTION = `${CI_REPO}/actions/drift-report`;
 export const CHECKOUT_RETRY_ACTION = `${CI_REPO}/actions/checkout-with-retry`;
 export const FLEET_STATUS_ACTION = `${CI_REPO}/actions/fleet-status`;
 export const FLEET_STATUS_CHECK_ACTION = `${CI_REPO}/actions/fleet-status-check`;
+export const SCORECARD_PUBLISH_CHECK_ACTION = `${CI_REPO}/actions/scorecard-publish-check`;
 /** Every action of this repository a workflow pins as a step; `--action` moves them all. */
-export const ACTIONS = [DRIFT_REPORT_ACTION, CHECKOUT_RETRY_ACTION, FLEET_STATUS_ACTION, FLEET_STATUS_CHECK_ACTION];
+export const ACTIONS = [DRIFT_REPORT_ACTION, CHECKOUT_RETRY_ACTION, FLEET_STATUS_ACTION, FLEET_STATUS_CHECK_ACTION, SCORECARD_PUBLISH_CHECK_ACTION];
 /** Every reusable workflow a caller pins, and the caller file that pins it. */
 export const CALLERS = [
   { workflow: REVIEW_WORKFLOW, path: '.github/workflows/redline.yml' },
