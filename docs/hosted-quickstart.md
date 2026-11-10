@@ -27,6 +27,9 @@ In the repository's Actions secrets:
 | `REDLINE_PROMPT` | the rubric: the reviewer's whole system prompt, your own text, up to 48 KB |
 | `REDLINE_REVIEWER_TOKEN` | the reviewer account's token from step 1 |
 
+No rubric yet? [askalf/redline-rubric](https://github.com/askalf/redline-rubric) is a starter to
+copy and edit: `gh secret set REDLINE_PROMPT < rubric.md`.
+
 Anyone who can push a branch to the repository can write a workflow that reads the first two, as
 with any repository secret. The third is read only by a `workflow_run` job, which runs the default
 branch's copy of its file. Dependabot's pull requests read Dependabot secrets, so set the first two

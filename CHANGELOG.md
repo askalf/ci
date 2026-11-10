@@ -13,6 +13,9 @@ names the commit's date and the pull request it came from.
 
 ## November 2026
 
+- A starter rubric for hosted mode is public at
+  [askalf/redline-rubric](https://github.com/askalf/redline-rubric), linked from the README and
+  the hosted quickstart. This repository still ships no prompt.
 - `docs/hosted-quickstart.md`: the whole hosted-mode setup for a repository outside askalf, in
   order: the reviewer account, the three secrets, the two workflow files to copy, the ruleset,
   and how a pull request that changes a workflow or comes from a fork is reviewed by a dispatch.
