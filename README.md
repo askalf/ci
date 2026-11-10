@@ -166,6 +166,8 @@ What to know before choosing it:
   `reviewer-prompt` is yours to write. The contract it writes against is public:
   [`scripts/redline/tools.json`](scripts/redline/tools.json) is every tool the model is given, and
   the review ends with one `redline_submit` call. A GitHub secret holds up to 48 KB.
+  [askalf/redline-rubric](https://github.com/askalf/redline-rubric) is a starter written against
+  that contract, to copy and edit; it is not the rubric our own repositories run.
 - **The secrets are repository secrets.** On `pull_request` the job runs the workflow files of the
   pull request's own head, so anyone who can push a branch to the repository can write a workflow
   that reads them, as with any repository secret. Use a key made for this, with a spending limit,
