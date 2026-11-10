@@ -32,6 +32,15 @@ what ships and an author edits it in seconds. A review that asked for changes on
 findings approves; attribution and a secret in the description still block. `redline_search` runs in a child process killed
 after 10 seconds, so a pattern that backtracks without end cannot stall the review.
 
+Hosted mode. A caller with no runner host passes `hosted-runner` (a GitHub-hosted runner label)
+in place of `runner-label`, and the `model-api-key` and `reviewer-prompt` secrets. The step `Check
+where the review runs` checks that exactly one runner is named and, in hosted mode, writes the two
+files a host would carry under `$RUNNER_TEMP/redline-hosted` (owner-only): an env file with
+`DARIO_URL` (`model-url`, https only), `DARIO_API_KEY`, `REDLINE_MODEL` and `REDLINE_DEEP_MODEL`,
+with `REDLINE_PIN_MODEL` and `REDLINE_FALLBACK_MODEL` set empty, and the rubric. The review step
+reads those paths in place of `env-file` and `prompt-file`. A self-hosted caller that passes either
+secret is refused, and so is a value with a line break, which could add a line to the env file.
+
 Rounds. A round after an earlier verdict reads the delta first: the brief's diff is GitHub's
 compare of the head Redline last judged and this one, and the whole change against the base is one
 `redline_diff` call away (every file, or one path); a finding may quote either, since both are in

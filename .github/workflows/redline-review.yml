@@ -3,6 +3,11 @@
 # It runs on the caller's self-hosted runner, which reaches the model locally and reads its
 # credentials and its system prompt from files on the host, so no secret is stored in GitHub and
 # the reviewer's rubric sits in no public repository.
+# Hosted mode: a caller with no runner host passes hosted-runner (ubuntu-latest) and two secrets, the
+# model endpoint's key and its own rubric. The job then runs on GitHub's runner, writes both to files
+# under the runner's temp directory and reads them as it reads a host's; the rest of the review is
+# the same. The secrets are the caller's repository secrets, within reach of every workflow there,
+# as any repository secret is.
 # The finished review is uploaded as the redline-verdict artifact (verdict.json). When the host file
 # holds no reviewer token the review is not posted here: the ops tick, or the repository's own
 # redline-post.yml, posts it as the reviewer account (reviewer-login, sprayberry-redline by default)
@@ -29,8 +34,37 @@ on:
   workflow_call:
     inputs:
       runner-label:
-        description: The caller's self-hosted runner label.
-        required: true
+        description: >-
+          The caller's self-hosted runner label. Every caller passes this or hosted-runner, never both.
+        required: false
+        default: ''
+        type: string
+      hosted-runner:
+        description: >-
+          Hosted mode: the GitHub-hosted runner label to review on, such as ubuntu-latest, in
+          place of runner-label. The endpoint's key and the rubric then come from the
+          model-api-key and reviewer-prompt secrets, and env-file and prompt-file are not read.
+        required: false
+        default: ''
+        type: string
+      model-url:
+        description: >-
+          Hosted mode only. The address of the model endpoint, which must answer Anthropic
+          Messages API requests at /v1/messages. https only: the key travels with every request.
+        required: false
+        default: https://api.anthropic.com
+        type: string
+      model:
+        description: >-
+          Hosted mode only. The model every review is read on; empty takes review.mjs's default.
+        required: false
+        default: ''
+        type: string
+      deep-model:
+        description: >-
+          Hosted mode only. The model for a large or sensitive pull request; empty reads those on model.
+        required: false
+        default: ''
         type: string
       redline-ref:
         description: >-
@@ -79,6 +113,15 @@ on:
         required: false
         default: false
         type: boolean
+    secrets:
+      model-api-key:
+        description: Hosted mode only. The model endpoint's API key, sent as x-api-key.
+        required: false
+      reviewer-prompt:
+        description: >-
+          Hosted mode only. The reviewer's rubric, the whole system prompt. It is the caller's
+          own text: this repository carries none.
+        required: false
 
 # actions: read lets a fork dispatch list the head's pull_request runs and their jobs (the
 # contributor-gate check). A called workflow gets no more than its caller grants, so each caller's
@@ -93,7 +136,9 @@ jobs:
     # Same-repo PRs only: a fork's code never reaches the self-hosted runner. Drafts wait. A dispatch
     # names its PR in inputs and is checked by the first steps, before anything is fetched.
     if: inputs.pr != '' || (github.event.pull_request.head.repo.full_name == github.repository && !github.event.pull_request.draft)
-    runs-on: [self-hosted, "${{ inputs.runner-label }}"]
+    # The caller's self-hosted label, or in hosted mode the GitHub runner it names. With neither,
+    # the job starts on GitHub's runner only to say so: the runner check below fails it.
+    runs-on: ${{ inputs.hosted-runner != '' && inputs.hosted-runner || inputs.runner-label != '' && fromJSON(format('["self-hosted","{0}"]', inputs.runner-label)) || 'ubuntu-latest' }}
     timeout-minutes: 20
     steps:
       # github.job_workflow_sha is not available to expressions (it evaluates empty, and the
@@ -138,6 +183,62 @@ jobs:
               : `::error::could not compare redline-ref ${ref} with ${repo} main`);
             process.exit(1);
           '
+
+      # One runner, named one way. In hosted mode the endpoint's key and the rubric arrive as the
+      # caller's secrets and are written, owner-only, under the runner's temp directory, as the env
+      # file and the prompt file a host would carry; the review step reads those paths. Every
+      # value reaches the script through env and is checked before it is written: a value with a
+      # line break could add a line to the env file. No fallback or pin model is set, so every
+      # review is read on model (or deep-model): the script's defaults for those two name models
+      # another endpoint may not have.
+      - name: Check where the review runs
+        id: where
+        env:
+          RUNNER_LABEL: ${{ inputs.runner-label }}
+          HOSTED_RUNNER: ${{ inputs.hosted-runner }}
+          MODEL_URL: ${{ inputs.model-url }}
+          MODEL: ${{ inputs.model }}
+          DEEP_MODEL: ${{ inputs.deep-model }}
+          MODEL_API_KEY: ${{ secrets.model-api-key }}
+          REVIEWER_PROMPT: ${{ secrets.reviewer-prompt }}
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$1"; exit 1; }
+          dir="${RUNNER_TEMP}/redline-hosted"
+          rm -rf "$dir"
+          if [ -n "$RUNNER_LABEL" ] && [ -n "$HOSTED_RUNNER" ]; then
+            fail "pass runner-label (a self-hosted runner) or hosted-runner (a GitHub-hosted one), not both"
+          fi
+          if [ -z "$RUNNER_LABEL" ] && [ -z "$HOSTED_RUNNER" ]; then
+            fail "pass runner-label (a self-hosted runner) or hosted-runner (a GitHub-hosted one, such as ubuntu-latest)"
+          fi
+          if [ -z "$HOSTED_RUNNER" ]; then
+            if [ -n "$MODEL_API_KEY" ] || [ -n "$REVIEWER_PROMPT" ]; then
+              fail "the model-api-key and reviewer-prompt secrets are read only in hosted mode (hosted-runner); a self-hosted runner reads env-file and prompt-file on its host"
+            fi
+            echo "the review runs on the self-hosted runner ${RUNNER_LABEL}, with the host's env file and prompt file"
+            exit 0
+          fi
+          one_line='^[^[:cntrl:]]+$'
+          [[ "$MODEL_URL" =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?(/[A-Za-z0-9._~/-]*)?$ ]] || fail "model-url must be an https address with no query; got '${MODEL_URL}'"
+          [[ "$MODEL" =~ ^[A-Za-z0-9._:/-]*$ ]] || fail "model must be a model id; got '${MODEL}'"
+          [[ "$DEEP_MODEL" =~ ^[A-Za-z0-9._:/-]*$ ]] || fail "deep-model must be a model id; got '${DEEP_MODEL}'"
+          [ -n "$MODEL_API_KEY" ] || fail "the model-api-key secret is empty: hosted mode needs the endpoint's key (a Dependabot pull request reads Dependabot secrets, not Actions secrets)"
+          [[ "$MODEL_API_KEY" =~ $one_line ]] || fail "the model-api-key secret must be one line"
+          [ -n "${REVIEWER_PROMPT//[[:space:]]/}" ] || fail "the reviewer-prompt secret is empty: hosted mode needs the caller's own rubric (a Dependabot pull request reads Dependabot secrets, not Actions secrets)"
+          umask 077
+          mkdir -p "$dir"
+          printf 'DARIO_URL=%s\nDARIO_API_KEY=%s\nREDLINE_MODEL=%s\nREDLINE_DEEP_MODEL=%s\nREDLINE_PIN_MODEL=\nREDLINE_FALLBACK_MODEL=\n' "$MODEL_URL" "$MODEL_API_KEY" "$MODEL" "$DEEP_MODEL" > "${dir}/redline.env"
+          printf '%s\n' "$REVIEWER_PROMPT" > "${dir}/prompt.md"
+          echo "env-file=${dir}/redline.env" >> "$GITHUB_OUTPUT"
+          echo "prompt-file=${dir}/prompt.md" >> "$GITHUB_OUTPUT"
+          echo "the review runs on GitHub's runner ${HOSTED_RUNNER}, against ${MODEL_URL}, with the caller's key and rubric"
+
+      # A self-hosted runner carries the node the review needs; GitHub's runner gets it here.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        if: inputs.hosted-runner != ''
+        with:
+          node-version: 22
 
       # A dispatch runs the default branch's workflow files, which is the only reason the ops tick trusts
       # its verdict, so it must be a workflow_dispatch on the default branch. The PR it names must be
@@ -265,10 +366,11 @@ jobs:
           GH_READ_TOKEN: ${{ github.token }}
           REDLINE_CI_REPO: ${{ inputs.ci-repo }}
           REDLINE_REVIEWER_LOGIN: ${{ inputs.reviewer-login }}
-          REDLINE_ENV_FILE: ${{ inputs.env-file }}
+          # Hosted mode's two files, written above from the caller's secrets; otherwise the host's.
+          REDLINE_ENV_FILE: ${{ steps.where.outputs.env-file || inputs.env-file }}
           # The reviewer's rubric lives on the host, root:<runner group> 640, never in a public
           # repository. The script reads it from this file and has no bundled fallback.
-          REDLINE_PROMPT_FILE: ${{ inputs.prompt-file }}
+          REDLINE_PROMPT_FILE: ${{ steps.where.outputs.prompt-file || inputs.prompt-file }}
           REDLINE_VERDICT_FILE: ${{ github.workspace }}/redline-verdict/verdict.json
         run: node .redline/scripts/redline/review.mjs
 
@@ -286,4 +388,4 @@ jobs:
 
       - name: Remove the checkouts
         if: always()
-        run: rm -rf pr .redline redline-verdict
+        run: rm -rf pr .redline redline-verdict "${RUNNER_TEMP}/redline-hosted"

@@ -13,6 +13,12 @@ names the commit's date and the pull request it came from.
 
 ## November 2026
 
+- The review has a hosted mode: a caller passes `hosted-runner` (such as `ubuntu-latest`) in place
+  of `runner-label`, with the model endpoint's key and its own rubric as the `model-api-key` and
+  `reviewer-prompt` secrets, and the review runs on a GitHub-hosted runner against any endpoint
+  that answers the Anthropic Messages API (`model-url`, `model`, `deep-model`). No self-hosted
+  runner, host file or local model endpoint is needed. `runner-label` is no longer a required
+  input; a caller that passes it runs as before.
 - The round cap counts only heads a model read, since Redline's newest approval. A cap verdict
   (`rule:round-cap`) is not a round, not the head a delta is read from, not an earlier request for
   the model to check, and not the request the next cap quotes; before, every push past the cap

@@ -1,7 +1,7 @@
 // Unit and end-to-end tests for scripts/redline/review.mjs. Run: node scripts/redline/review.test.mjs
 // The model and GitHub are stubbed through ctx.fetch; nothing leaves the machine.
 
-import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, readFileSync, rmSync, existsSync, lstatSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -15,7 +15,7 @@ import {
 import { deflateRawSync } from 'node:zlib';
 import * as reviewModule from './review.mjs';
 import { protectedIn, baseAttributes, capturedFindings, PROTECTED_ATTR } from './review.mjs';
-import { withRetry, OutOfTime, darioAccess, socketFetch, withDarioSocket, callModelWith } from './review.mjs';
+import { withRetry, OutOfTime, darioAccess, socketFetch, withDarioSocket, callModelWith, modelContext, DEFAULT_MODEL } from './review.mjs';
 import { createServer as createHttpServer } from 'node:http';
 import { bumpCaller, REVIEW_WORKFLOW } from './pin.mjs';
 
@@ -1013,7 +1013,9 @@ console.log('\n  the reusable workflow');
     check('the guard fails a short sha', guard(HEAD.slice(0, 7)) !== 0);
     check('the guard fails an uppercase or padded sha', guard(HEAD.toUpperCase()) !== 0 && guard(`${HEAD}\nmain`) !== 0 && guard(` ${HEAD}`) !== 0);
   }
-  check('it runs on the caller\'s self-hosted runner label', /runs-on: \[self-hosted, "\$\{\{ inputs\.runner-label \}\}"\]/.test(wf));
+  check('it runs on the caller\'s self-hosted runner label, or in hosted mode on the GitHub runner named',
+    wf.includes(`    runs-on: \${{ inputs.hosted-runner != '' && inputs.hosted-runner || inputs.runner-label != '' && fromJSON(format('["self-hosted","{0}"]', inputs.runner-label)) || 'ubuntu-latest' }}\n`)
+    && (wf.match(/^\s*runs-on:/gm) ?? []).length === 1);
   check('it refuses fork PRs itself', wf.includes('github.event.pull_request.head.repo.full_name == github.repository'));
   check('the PR checkout keeps no credentials', (wf.match(/persist-credentials: false/g) ?? []).length === 2);
   const permBlock = /\npermissions:\n((?: {2}.*\n)+)/.exec(wf)?.[1] ?? '';
@@ -1024,21 +1026,83 @@ console.log('\n  the reusable workflow');
   check('third-party actions are pinned by sha', [...wf.matchAll(/uses: ([^\s]+)/g)].every((m) => /@[0-9a-f]{40}$/.test(m[1])));
   const reviewAt = stepNamed('Review');
   check('the review step takes the endpoint, the rubric, the reviewer and the repository from the inputs',
-    ['REDLINE_CI_REPO: ${{ inputs.ci-repo }}', 'REDLINE_REVIEWER_LOGIN: ${{ inputs.reviewer-login }}', 'REDLINE_ENV_FILE: ${{ inputs.env-file }}', 'REDLINE_PROMPT_FILE: ${{ inputs.prompt-file }}']
+    ['REDLINE_CI_REPO: ${{ inputs.ci-repo }}', 'REDLINE_REVIEWER_LOGIN: ${{ inputs.reviewer-login }}', 'REDLINE_ENV_FILE: ${{ steps.where.outputs.env-file || inputs.env-file }}', 'REDLINE_PROMPT_FILE: ${{ steps.where.outputs.prompt-file || inputs.prompt-file }}']
       .every((l) => (steps[reviewAt] ?? '').includes(`          ${l}\n`)));
   const uploadAt = stepNamed('Upload the verdict');
   const cleanAt = stepNamed('Remove the checkouts');
   const upload = steps[uploadAt] ?? '';
   check('the review step names the verdict file in the workspace', (steps[reviewAt] ?? '').includes('REDLINE_VERDICT_FILE: ${{ github.workspace }}/redline-verdict/verdict.json'));
-  check('the review step names the host prompt file (prompt-file), and no prompt is fetched with the script',
-    (steps[reviewAt] ?? '').includes('REDLINE_PROMPT_FILE: ${{ inputs.prompt-file }}') && !/prompt/.test(steps[fetchAt]));
+  check('the review step names the host prompt file (prompt-file) or hosted mode\'s, and no prompt is fetched with the script',
+    (steps[reviewAt] ?? '').includes('REDLINE_PROMPT_FILE: ${{ steps.where.outputs.prompt-file || inputs.prompt-file }}') && !/prompt/.test(steps[fetchAt]));
   check('the verdict is uploaded after the review, before the cleanup', reviewAt >= 0 && uploadAt === reviewAt + 1 && cleanAt === uploadAt + 1);
   check('the upload runs on pass or fail, only when there is a file', upload.includes("if: always() && hashFiles('redline-verdict/verdict.json') != ''"));
   check('the upload is the pinned upload-artifact, as redline-verdict, short-lived',
     /uses: actions\/upload-artifact@[0-9a-f]{40} # v7\./.test(upload) && upload.includes('name: redline-verdict\n')
     && upload.includes('path: redline-verdict/verdict.json\n') && /retention-days: [1-7]\n/.test(upload));
-  check('the cleanup removes the verdict too', /run: rm -rf pr \.redline redline-verdict\s*$/.test(steps[cleanAt] ?? ''));
+  check('the cleanup removes the verdict too', /run: rm -rf pr \.redline redline-verdict "\$\{RUNNER_TEMP\}\/redline-hosted"\s*$/.test(steps[cleanAt] ?? ''));
   check('nothing from the PR is interpolated into a run step',!/run:[^\n]*\$\{\{\s*github\.event\.pull_request\.(title|body|head\.ref)/.test(wf));
+
+  // Hosted mode: a GitHub runner, with the endpoint's key and the rubric from the caller's secrets.
+  const whereAt = stepNamed('Check where the review runs');
+  const where = steps[whereAt] ?? '';
+  const optional = (name) => new RegExp(`\\n      ${name}:\\n(?:        .*\\n)*?        required: false\\n`).test(wf);
+  check('runner-label and hosted-runner are both optional and empty by default', def('runner-label', "''") && def('hosted-runner', "''"));
+  check('the hosted model settings default to Anthropic\'s endpoint and the script\'s model', def('model-url', 'https://api.anthropic.com') && def('model', "''") && def('deep-model', "''"));
+  check('the key and the rubric are optional secrets, so a self-hosted caller passes none',
+    /\n    secrets:\n/.test(wf) && optional('model-api-key') && optional('reviewer-prompt') && !wf.slice(wf.indexOf('\n    secrets:\n'), wf.indexOf('\npermissions:\n')).includes('required: true'));
+  check('the runner check comes after the ref checks and before anything is fetched', whereAt > mainAt && whereAt < fetchAt);
+  check('the secrets reach one step, through env, and no run line interpolates them',
+    (wf.match(/secrets\./g) ?? []).length === 2 && where.includes('          MODEL_API_KEY: ${{ secrets.model-api-key }}\n') && where.includes('          REVIEWER_PROMPT: ${{ secrets.reviewer-prompt }}\n')
+    && !where.slice(where.indexOf('run:')).includes('${{'));
+  check('node is set up on a hosted runner only, pinned', /- uses: actions\/setup-node@[0-9a-f]{40} # v\d+\.\d+\.\d+\n        if: inputs\.hosted-runner != ''\n/.test(wf));
+  const whereRun = /run: \|\n((?: {10}.*\n?)+)/.exec(where)?.[1].replace(/^ {10}/gm, '') ?? 'exit 0';
+  if (bash.error) {
+    console.log('  skip the runner check\'s shell: no bash here');
+  } else {
+    const temp = mkdtempSync(join(tmpdir(), 'redline-where-'));
+    const out = join(temp, 'output');
+    const run = (over) => {
+      writeFileSync(out, '');
+      const r = spawnSync('bash', ['-c', whereRun], { encoding: 'utf8', env: {
+        PATH: process.env.PATH, RUNNER_TEMP: temp, GITHUB_OUTPUT: out,
+        RUNNER_LABEL: '', HOSTED_RUNNER: 'ubuntu-latest', MODEL_URL: 'https://api.anthropic.com', MODEL: '', DEEP_MODEL: '', MODEL_API_KEY: 'sk-test-key', REVIEWER_PROMPT: 'Review it.\nSubmit once.', ...over } });
+      return { status: r.status, stdout: r.stdout, outputs: readFileSync(out, 'utf8') };
+    };
+    const envFile = join(temp, 'redline-hosted', 'redline.env');
+    const promptFile = join(temp, 'redline-hosted', 'prompt.md');
+    const selfHosted = run({ RUNNER_LABEL: 'redline', HOSTED_RUNNER: '', MODEL_API_KEY: '', REVIEWER_PROMPT: '' });
+    check('a self-hosted caller passes, writes nothing and leaves the outputs empty, so the host files are read',
+      selfHosted.status === 0 && selfHosted.outputs === '' && !existsSync(join(temp, 'redline-hosted')));
+    check('neither runner, and both, are refused',
+      run({ HOSTED_RUNNER: '' }).status === 1 && /not both/.test(run({ RUNNER_LABEL: 'redline' }).stdout));
+    check('a self-hosted caller that passes a hosted secret is refused',
+      run({ RUNNER_LABEL: 'redline', HOSTED_RUNNER: '', REVIEWER_PROMPT: '' }).status === 1 && run({ RUNNER_LABEL: 'redline', HOSTED_RUNNER: '', MODEL_API_KEY: '' }).status === 1);
+    const hosted = run({ MODEL: 'claude-opus-5-5', DEEP_MODEL: 'claude-fable-5-2' });
+    const written = hosted.status === 0 ? parseEnvFile(readFileSync(envFile, 'utf8')) : {};
+    check('hosted mode writes the env file the script reads: the endpoint, the key and the models',
+      written.DARIO_URL === 'https://api.anthropic.com' && written.DARIO_API_KEY === 'sk-test-key' && written.REDLINE_MODEL === 'claude-opus-5-5' && written.REDLINE_DEEP_MODEL === 'claude-fable-5-2');
+    const access = darioAccess(written);
+    const built = hosted.status === 0 ? modelContext(written, access) : {};
+    check('with it every review is read on model: no pin model, no fallback, no socket',
+      !access.error && access.darioSocket === '' && built.model === 'claude-opus-5-5' && built.pinModel === '' && built.fallbackModel === '' && built.deepModel === 'claude-fable-5-2');
+    check('an empty model takes the script\'s default', modelContext(parseEnvFile(run({}).status === 0 ? readFileSync(envFile, 'utf8') : ''), access).model === DEFAULT_MODEL);
+    check('hosted mode writes the rubric whole, and readPrompt reads it', run({}).status === 0 && readPrompt({ P: promptFile }, 'P') === 'Review it.\nSubmit once.\n');
+    check('the two outputs name the two files', hosted.outputs === `env-file=${envFile}\nprompt-file=${promptFile}\n`);
+    if (process.platform !== 'win32') {
+      check('the directory and both files are the owner\'s alone',
+        [join(temp, 'redline-hosted'), envFile, promptFile].every((f) => (lstatSync(f).mode & 0o077) === 0));
+    }
+    check('the key is never printed', !hosted.stdout.includes('sk-test-key') && !run({ MODEL_API_KEY: 'sk-a\nREDLINE_MODEL=x' }).stdout.includes('sk-a'));
+    check('an empty key or an empty rubric is refused, naming the secret',
+      /model-api-key secret is empty/.test(run({ MODEL_API_KEY: '' }).stdout) && /reviewer-prompt secret is empty/.test(run({ REVIEWER_PROMPT: ' \n\t' }).stdout));
+    check('a key with a line break is refused: it would add a line to the env file', run({ MODEL_API_KEY: 'sk-a\nREDLINE_MODEL=x' }).status === 1);
+    check('an endpoint that is not https, or carries a query or a line break, is refused',
+      ['http://api.example.com', 'https://api.example.com/?k=v', 'https://api.example.com\nDARIO_API_KEY=x', 'api.example.com', ''].every((u) => run({ MODEL_URL: u }).status === 1)
+      && ['https://api.example.com', 'https://gateway.example.com:8443/anthropic'].every((u) => run({ MODEL_URL: u }).status === 0));
+    check('a model that is not a model id is refused', run({ MODEL: 'a b' }).status === 1 && run({ DEEP_MODEL: 'x\nDARIO_URL=http://evil' }).status === 1 && run({ MODEL: 'vendor/model-1:beta' }).status === 0);
+    check('a refused run leaves no file from the run before it', run({ MODEL_API_KEY: '' }).status === 1 && existsSync(envFile) === false);
+    rmSync(temp, { recursive: true, force: true });
+  }
 
   // Dispatch mode: the ops tick dispatches the caller on the default branch with pr, head and reread.
   check('pr and head are optional string inputs, reread an optional boolean',

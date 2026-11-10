@@ -21,8 +21,10 @@ unset, the default in
 `REDLINE_MODEL`, and `claude-opus-5-5` for the pin and fallback models, so those two paths run on
 Claude unless a host sets them.
 
-**Who this is for.** The askalf repositories call it today. Another repository can adopt it by
-forking this one: [Who can use this](#who-can-use-this) lists what a fork needs and what it changes.
+**Who this is for.** The askalf repositories call it today. Another repository can call the review
+on a GitHub-hosted runner with a model API key and a rubric of its own, and no runner host
+([Without a runner host](#without-a-runner-host)), or run all of it on its own hosts:
+[Who can use this](#who-can-use-this) lists what that needs and what a fork changes.
 
 A calling repository's `.github/workflows/redline.yml`, in short ([Calling it](#calling-it) has the
 details):
@@ -55,7 +57,8 @@ One CI setup in four layers, and this repository is the gate.
 These workflows are built for the askalf repositories, and the values in them that name ours are
 inputs with ours as the defaults. An outside repository can call them as they are and pass its own
 values in `with:`, or fork this repository and point its callers at the fork with `ci-repo`.
-Either way it provides:
+Either way it provides the rows below. In hosted mode the first four become one input and two
+secrets ([Without a runner host](#without-a-runner-host)); the last three stay.
 
 | What it needs | Why | Here |
 |---|---|---|
@@ -85,6 +88,58 @@ askalf/ci only), on the runner labels in `REDLINE_PIN_BUMP_RUNS_ON` (a JSON list
 `["self-hosted","ci-exec"]`), with a GitHub App of its own installed on its callers: its client id in the
 variable `REDLINE_PIN_BUMP_CLIENT_ID` and its private key in the secret `REDLINE_PIN_BUMP_APP_KEY`. One value is still
 fixed: the fleet statuses (`actions/fleet-status`) count `sprayberry-redline`'s reviews.
+
+## Without a runner host
+
+`redline-review.yml` has a hosted mode: the review job runs on a GitHub-hosted runner, and the two
+files a runner host would carry come from the calling repository's secrets. The caller passes
+`hosted-runner` in place of `runner-label`:
+
+```yaml
+jobs:
+  review:
+    if: github.event.pull_request.draft == false && github.event.pull_request.head.repo.full_name == github.repository
+    uses: askalf/ci/.github/workflows/redline-review.yml@<sha>
+    with:
+      redline-ref: <sha>
+      hosted-runner: ubuntu-latest
+      model: <a model id the endpoint serves>
+    secrets:
+      model-api-key: ${{ secrets.REDLINE_MODEL_API_KEY }}
+      reviewer-prompt: ${{ secrets.REDLINE_PROMPT }}
+```
+
+| Input or secret | Default | What it is |
+|---|---|---|
+| `hosted-runner` | none | the GitHub-hosted runner label; passing it turns hosted mode on, and `runner-label`, `env-file` and `prompt-file` are then not used |
+| `model-url` | `https://api.anthropic.com` | the endpoint, which must answer Anthropic Messages API requests at `/v1/messages`; https only |
+| `model` | the default in `review.mjs` | the model every review is read on |
+| `deep-model` | none | the model for a large or sensitive pull request; unset, those are read on `model` |
+| `model-api-key` (secret) | none, required in hosted mode | the endpoint's key, sent as `x-api-key` |
+| `reviewer-prompt` (secret) | none, required in hosted mode | the rubric: the whole system prompt, your own text |
+
+The job writes the key and the rubric to two owner-only files under the runner's temp directory and
+`review.mjs` reads them as it reads a host's; nothing else in the review differs. No pin model and
+no fallback model is set in hosted mode, so every review is read on `model` or `deep-model`.
+
+What to know before choosing it:
+
+- **This repository ships no rubric.** The reviewer's prompt is never committed here, so
+  `reviewer-prompt` is yours to write. The contract it writes against is public:
+  [`scripts/redline/tools.json`](scripts/redline/tools.json) is every tool the model is given, and
+  the review ends with one `redline_submit` call. A GitHub secret holds up to 48 KB.
+- **The secrets are repository secrets.** On `pull_request` the job runs the workflow files of the
+  pull request's own head, so anyone who can push a branch to the repository can write a workflow
+  that reads them, as with any repository secret. Use a key made for this, with a spending limit. A
+  fork's pull request gets no secrets and is not reviewed on `pull_request`; a Dependabot pull
+  request reads Dependabot secrets, so the two are set there as well or its review fails, saying so.
+- **The post is unchanged.** The verdict still reaches the pull request through
+  `redline-post.yml`, as the reviewer account, and a ruleset that requires an approving review is
+  still what holds a merge ([Calling it](#calling-it), [What holds a merge](#what-holds-a-merge)).
+- **Dispatch mode is ours.** A dispatched review is trusted, by the post and as review history,
+  only when the account `askalf` dispatched it (`DISPATCH_ACTOR` in `review.mjs`). Another
+  repository gets the `pull_request` path: a pull request that changes a workflow there is not
+  posted on and waits for a person.
 
 ## Words used here
 
@@ -178,7 +233,9 @@ empty file fails the job with an error naming the variable. The tests use the th
 definition, whatever it says.
 
 Next to the prompts the hosts hold the credential files the scripts read (`/etc/askalf/redline.env`,
-`/etc/askalf/fix-exec.env`): no secret is stored in GitHub.
+`/etc/askalf/fix-exec.env`): no secret is stored in GitHub. Hosted mode is the exception a caller
+chooses: there the review's key and rubric are that caller's repository secrets
+([Without a runner host](#without-a-runner-host)). The fix lane has no hosted mode.
 
 `fix-exec.env` may also set `FIX_EFFORT` (`low`, `medium`, `high`, `xhigh` or `max`). A fix run
 answering the reviewer's first change request on a pull request sends that level as
