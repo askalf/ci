@@ -94,8 +94,9 @@ fixed: the fleet statuses (`actions/fleet-status`) count `sprayberry-redline`'s 
 ## Without a runner host
 
 `redline-review.yml` has a hosted mode: the review job runs on a GitHub-hosted runner, and the two
-files a runner host would carry come from the calling repository's secrets. The caller passes
-`hosted-runner` in place of `runner-label`:
+files a runner host would carry come from the calling repository's secrets.
+[docs/hosted-quickstart.md](docs/hosted-quickstart.md) is the whole setup in order, with both
+workflow files to copy. In short, the caller passes `hosted-runner` in place of `runner-label`:
 
 ```yaml
 jobs:
