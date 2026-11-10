@@ -39,12 +39,14 @@ files a host would carry under `$RUNNER_TEMP/redline-hosted` (owner-only): an en
 `DARIO_URL` (`model-url`, https only), `DARIO_API_KEY`, `REDLINE_MODEL` and `REDLINE_DEEP_MODEL`,
 with `REDLINE_PIN_MODEL` and `REDLINE_FALLBACK_MODEL` set empty, and the rubric. The review step
 reads those paths in place of `env-file` and `prompt-file`. A self-hosted caller that passes either
-secret is refused, and so is a value with a line break, which could add a line to the env file.
+secret, `model` or `deep-model` is refused (`model-url` has a default and is not checked there), and
+so is a value with a line break, which could add a line to the env file.
 With `dario-image` (pinned by digest), `dario-lock-url` and the `dario-lock-token` secret in place
 of `model-api-key`, the endpoint is a dario sidecar: the env file names `http://127.0.0.1:3456`
 with a key made for the run, a third owner-only file, `dario.env`, carries that key, the lock
 service's address and token and the two shared-registry switches, and the step `Start the dario
-sidecar` runs the image with it on loopback and waits for `/health`. `Stop the dario sidecar`
+sidecar` runs the image with it on loopback and waits for `/health`, with no try started once a
+minute has passed. `Stop the dario sidecar`
 removes the container and its volume.
 
 Rounds. A round after an earlier verdict reads the delta first: the brief's diff is GitHub's

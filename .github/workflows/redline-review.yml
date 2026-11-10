@@ -253,14 +253,13 @@ jobs:
             fail "pass runner-label (a self-hosted runner) or hosted-runner (a GitHub-hosted one, such as ubuntu-latest)"
           fi
           if [ -z "$HOSTED_RUNNER" ]; then
-            if [ -n "$MODEL_API_KEY" ] || [ -n "$REVIEWER_PROMPT" ] || [ -n "$DARIO_LOCK_TOKEN" ] || [ -n "$DARIO_IMAGE" ] || [ -n "$DARIO_LOCK_URL" ]; then
-              fail "the model-api-key, reviewer-prompt and dario-lock-token secrets and the dario inputs are read only in hosted mode (hosted-runner); a self-hosted runner reads env-file and prompt-file on its host"
+            if [ -n "$MODEL_API_KEY" ] || [ -n "$REVIEWER_PROMPT" ] || [ -n "$DARIO_LOCK_TOKEN" ] || [ -n "$DARIO_IMAGE" ] || [ -n "$DARIO_LOCK_URL" ] || [ -n "$MODEL" ] || [ -n "$DEEP_MODEL" ]; then
+              fail "the model-api-key, reviewer-prompt and dario-lock-token secrets and the model, deep-model and dario inputs are read only in hosted mode (hosted-runner); a self-hosted runner reads env-file and prompt-file on its host"
             fi
             echo "the review runs on the self-hosted runner ${RUNNER_LABEL}, with the host's env file and prompt file"
             exit 0
           fi
           one_line='^[^[:cntrl:]]+$'
-          [[ "$MODEL_URL" =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?(/[A-Za-z0-9._~/-]*)?$ ]] || fail "model-url must be an https address with no query; got '${MODEL_URL}'"
           [[ "$MODEL" =~ ^[A-Za-z0-9._:/-]*$ ]] || fail "model must be a model id; got '${MODEL}'"
           [[ "$DEEP_MODEL" =~ ^[A-Za-z0-9._:/-]*$ ]] || fail "deep-model must be a model id; got '${DEEP_MODEL}'"
           [ -n "${REVIEWER_PROMPT//[[:space:]]/}" ] || fail "the reviewer-prompt secret is empty: hosted mode needs the caller's own rubric (a Dependabot pull request reads Dependabot secrets, not Actions secrets)"
@@ -268,6 +267,7 @@ jobs:
             if [ -n "$DARIO_LOCK_URL" ] || [ -n "$DARIO_LOCK_TOKEN" ]; then
               fail "dario-lock-url and the dario-lock-token secret are read only with dario-image"
             fi
+            [[ "$MODEL_URL" =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?(/[A-Za-z0-9._~/-]*)?$ ]] || fail "model-url must be an https address with no query; got '${MODEL_URL}'"
             [ -n "$MODEL_API_KEY" ] || fail "the model-api-key secret is empty: hosted mode needs the endpoint's key, or dario-image for a dario sidecar (a Dependabot pull request reads Dependabot secrets, not Actions secrets)"
             [[ "$MODEL_API_KEY" =~ $one_line ]] || fail "the model-api-key secret must be one line"
             endpoint="$MODEL_URL"
@@ -420,8 +420,9 @@ jobs:
       # The sidecar: dario from the pinned image, published on the runner's loopback only, started
       # with the file the runner check wrote, so no secret is in this step or on a command line.
       # dario answers /health with 200 once it can serve, which it can as soon as the registry has
-      # given it a seat. A container that stopped, or one still not ready after a minute, fails
-      # the review with the container's last lines: an empty registry and a wrong token end here.
+      # given it a seat. It is asked every 2 s, each try cut off at 3 s, and no try starts once a
+      # minute has passed. A container that stopped, or one still not ready by then, fails the
+      # review with the container's last lines: an empty registry and a wrong token end here.
       - name: Start the dario sidecar
         if: inputs.dario-image != ''
         env:
@@ -431,7 +432,11 @@ jobs:
           set -euo pipefail
           docker rm -f -v redline-dario >/dev/null 2>&1 || true
           docker run -d --name redline-dario --env-file "$DARIO_ENV_FILE" -p 127.0.0.1:3456:3456 "$DARIO_IMAGE" >/dev/null
+          deadline=$((SECONDS + 60))
           for attempt in $(seq 1 30); do
+            if [ "$SECONDS" -ge "$deadline" ]; then
+              break
+            fi
             if curl -fsS -o /dev/null -m 3 http://127.0.0.1:3456/health; then
               echo "the dario sidecar is ready (attempt ${attempt})"
               exit 0

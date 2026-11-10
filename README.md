@@ -150,9 +150,10 @@ no `model-api-key`:
 
 The job starts the image on the runner, published on loopback only, with a key made for that run,
 `DARIO_POOL_SHARED_ACCOUNTS=1` and `DARIO_POOL_SHARED_STATE=1`: dario starts with no accounts of
-its own and takes its seats, and their rate-limit readings, from the registry. The review waits up
-to a minute for dario's `/health`, and fails with the container's last lines if it never answers.
-The container and its volume are removed when the job ends. `model-url` is not read.
+its own and takes its seats, and their rate-limit readings, from the registry. The job asks
+dario's `/health` every 2 s, each try cut off at 3 s, and starts no try once a minute has passed;
+it fails with the container's last lines if dario stopped or never answered. The container and its
+volume are removed when the job ends. `model-url` is neither read nor checked.
 
 **Use a registry made for this.** Whoever holds the lock token can use every seat in the registry
 it opens, and here it is a repository secret. Run a second lock service with the one or two seats

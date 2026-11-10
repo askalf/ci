@@ -1155,8 +1155,9 @@ console.log('\n  the reusable workflow');
       /dario-lock-token secret is empty/.test(run({ ...side, DARIO_LOCK_TOKEN: '' }).stdout) && run({ ...side, DARIO_LOCK_TOKEN: 'a\nDARIO_ADMIN=1' }).status === 1);
     check('a model key next to dario-image is refused, and so are the lock settings without the image',
       /not both/.test(run({ ...side, MODEL_API_KEY: 'sk-test-key' }).stdout) && run({ DARIO_LOCK_URL: side.DARIO_LOCK_URL }).status === 1 && run({ DARIO_LOCK_TOKEN: 'lock-token-1' }).status === 1);
-    check('a self-hosted caller that passes a dario input or the lock token is refused',
-      [{ DARIO_IMAGE: IMAGE }, { DARIO_LOCK_URL: side.DARIO_LOCK_URL }, { DARIO_LOCK_TOKEN: 'lock-token-1' }].every((o) => run({ RUNNER_LABEL: 'redline', HOSTED_RUNNER: '', MODEL_API_KEY: '', REVIEWER_PROMPT: '', ...o }).status === 1));
+    check('with dario-image, model-url is neither read nor checked', ['', 'http://not-https.example.com', 'not a url'].every((u) => run({ ...side, MODEL_URL: u }).status === 0 && parseEnvFile(readFileSync(envFile, 'utf8')).DARIO_URL === 'http://127.0.0.1:3456'));
+    check('a self-hosted caller that passes a dario input, the lock token, model or deep-model is refused',
+      [{ DARIO_IMAGE: IMAGE }, { DARIO_LOCK_URL: side.DARIO_LOCK_URL }, { DARIO_LOCK_TOKEN: 'lock-token-1' }, { MODEL: 'custom' }, { DEEP_MODEL: 'custom' }].every((o) => run({ RUNNER_LABEL: 'redline', HOSTED_RUNNER: '', MODEL_API_KEY: '', REVIEWER_PROMPT: '', ...o }).status === 1));
 
     // The start step's own shell, against a stub docker and curl: what it runs, and how it ends.
     const startAt = stepNamed('Start the dario sidecar');
@@ -1187,6 +1188,8 @@ console.log('\n  the reusable workflow');
       exited.status === 1 && (exited.calls.match(/^curl /gm) ?? []).length === 1 && /did not become ready/.test(exited.stdout) && exited.stdout.includes('no accounts in the registry'));
     const never = startWith({ health: 22, running: 'true' });
     check('a container that never answers is given 30 tries, then fails the step', never.status === 1 && (never.calls.match(/^curl /gm) ?? []).length === 30);
+    check('each try is cut off at 3 s, and no try starts once a minute has passed',
+      startRun.includes('curl -fsS -o /dev/null -m 3 ') && /deadline=\$\(\(SECONDS \+ 60\)\)\nfor attempt in \$\(seq 1 30\); do\n  if \[ "\$SECONDS" -ge "\$deadline" \]; then\n    break\n  fi\n  if curl /.test(startRun));
     rmSync(temp, { recursive: true, force: true });
   }
 
