@@ -152,9 +152,12 @@ console.log('\n  the action');
   check('the action runs main.mjs on the runner\'s Node, with the job token by default', /\nruns:\n  using: node24\n  main: main\.mjs\n/.test(yml) && yml.includes('    default: ${{ github.token }}\n') && yml.includes("  dry-run:\n") && !/uses:\s+\S+@/.test(yml.replace(/^\s*#.*$/gm, '')));
   const defaults = { 'run-id': 'github.event.workflow_run.id', 'run-event': 'github.event.workflow_run.event', 'run-conclusion': 'github.event.workflow_run.conclusion', 'run-branch': 'github.event.workflow_run.head_branch',
     'run-started-at': 'github.event.workflow_run.run_started_at', 'run-path': 'github.event.workflow_run.path', 'default-branch': 'github.event.repository.default_branch', private: 'github.event.repository.private' };
+  // Each input's block, as text: the action's inputs split at each two-space key. No pattern is built from a name.
+  const blocks = yml.slice(yml.indexOf('\ninputs:\n'), yml.indexOf('\nruns:\n')).split(/\n {2}(?=[a-z-]+:\n)/);
+  const block = (name) => blocks.find((b) => b.startsWith(`${name}:\n`)) ?? '';
+  const entrySrc = readFileSync(entry, 'utf8');
   check('every run fact is an input that defaults to the event\'s own field, and the entry reads each',
-    Object.entries(defaults).every(([name, from]) => yml.includes(`  ${name}:\n`) && new RegExp(`\\n  ${name}:\\n    description: .*\\n    required: false\\n    default: \\$\\{\\{ ${from.replace(/\./g, '\\.')} \\}\\}\\n`).test(yml))
-    && Object.keys(defaults).every((name) => readFileSync(entry, 'utf8').includes(`input('${name}')`)));
+    Object.entries(defaults).every(([name, from]) => block(name).includes(`    required: false\n    default: \${{ ${from} }}`) && entrySrc.includes(`input('${name}')`)));
   const src = readFileSync(fileURLToPath(new URL('./check.mjs', import.meta.url)), 'utf8');
   check('the script reads no file: nothing from one can reach a request', !/node:fs|readFileSync|GITHUB_EVENT_PATH/.test(src.replace(/^\/\/.*$/gm, '')));
 }
