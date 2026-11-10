@@ -219,6 +219,7 @@ full commit sha of `main`, so a change here reaches it only through a reviewed b
 | `redline-self-test.yml` | The Redline, public-text, drift-report, fleet-status and pin-bump tests on every pull request: a required check. |
 | `checkout-with-retry-self-test.yml` | Proves the retry action on a runner: a healthy checkout, the retry paths through a stub, and the act path under act. |
 | `fleet-status-self-test.yml` | Runs the two fleet-status actions from the checkout as a caller would, the status one as a dry run. |
+| `scorecard-publish.yml` | This repository's caller of the Scorecard publish check, after each run of `scorecard.yml`. |
 | `truecopy-gate.yml` | Verifies `truecopy.lock`, the pins on the reviewer's and the fixer's tools, on every pull request and push to `main`. |
 
 ## Calling it
