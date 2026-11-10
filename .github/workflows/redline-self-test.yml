@@ -39,6 +39,8 @@ jobs:
       # fleet-status-check action holds a caller's workflows to, over a fixture caller.
       - run: node scripts/fleet-status/fleet-status.test.mjs
       - run: node scripts/fleet-status/check.test.mjs
+      # The check after a Scorecard run, and its action's entry, against a stubbed network.
+      - run: node scripts/scorecard-publish/check.test.mjs
       # The pin bump workflow's bump step, run as the workflow runs it, against a fake gh.
       - run: node scripts/redline/pin-bump.test.mjs
       # Every fuzz seed through its target, so a target that rots fails here and not only in the weekly fuzz run.

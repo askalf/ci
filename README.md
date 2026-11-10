@@ -208,6 +208,7 @@ full commit sha of `main`, so a change here reaches it only through a reviewed b
 | [`actions/checkout-with-retry`](actions/checkout-with-retry/action.yml) | `actions/checkout` as up to three steps, so a job that starts before its runner's credential is in place still checks out. |
 | [`actions/drift-report`](actions/drift-report/action.yml) | The report step of a drift watcher: one issue under a label, one bot pull request carrying the changed files, and the issue closed on a clean run. |
 | [`actions/fleet-status`](actions/fleet-status/action.yml) | Posts the `fleet/verify` and `fleet/review` commit statuses a merge waits on; the lane rules are in [scripts/fleet-status/README.md](scripts/fleet-status/README.md). |
+| [`actions/scorecard-publish-check`](actions/scorecard-publish-check/action.yml) | After a Scorecard run: checks that its result reached scorecard.dev, and dispatches Scorecard once more when it did not ([the Scorecard publish check](#the-scorecard-publish-check)). |
 | [`actions/fleet-status-check`](actions/fleet-status-check/action.yml) | Checks a repository's fleet-status workflows, its self-hosted `runs-on` labels and its review relay, as that repository's self-test job. |
 
 | This repository's own | What it does |
@@ -288,10 +289,10 @@ effort.
 
 `redline-pin-bump.yml` runs hourly and on dispatch, and picks the newest `main` commit that changed
 what a caller runs: the scripts the reusable workflows and actions fetch (their tests, test fixtures
-and READMEs aside), one of the four actions, or one of the reusable workflows. It rewrites, in every
+and READMEs aside), one of the five actions, or one of the reusable workflows. It rewrites, in every
 repository in its `CALLERS` list,
 the reusable-workflow pins in `redline.yml`, `redline-fix.yml`, `public-text.yml` and
-`redline-post.yml` where the repository has them, and every pin of one of the four actions in any workflow file there, through
+`redline-post.yml` where the repository has them, and every pin of one of the five actions in any workflow file there, through
 `pin.mjs`: one commit per file on `bot/redline-pin`, one pull request per repository. Each
 repository's own gate reviews and merges the bump. This repository is in the list: its own callers
 move the same way. A repository with no pin of any kind is reported as wrong.
@@ -322,6 +323,40 @@ bot pull request with the diff in its body, and closes the issues on a clean run
 with a PAT so that CI runs on it, and the issue is handled with the job token so that a PAT without
 Issues rights is enough. The mechanics and the token split are in
 [scripts/drift-report/README.md](scripts/drift-report/README.md).
+
+## The Scorecard publish check
+
+`scorecard-action` reports a failed publish to scorecard.dev as a warning, and the run stays
+green. On 2026-11-09 a publish from askalf/pitlane was answered 500 three times; scorecard.dev
+then served "not found" for the repository for fifteen hours, the README badge read "invalid repo
+path", and no run was red. `actions/scorecard-publish-check` is the check for that, as a workflow
+of its own beside a repository's `scorecard.yml`:
+
+```yaml
+name: Scorecard publish check
+on:
+  workflow_run:
+    workflows: [Scorecard]
+    types: [completed]
+permissions: {}
+jobs:
+  check:
+    if: github.event.workflow_run.conclusion == 'success' && !github.event.repository.private
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write # the one dispatch of the Scorecard workflow
+    steps:
+      - uses: askalf/ci/actions/scorecard-publish-check@<sha>
+```
+
+For a Scorecard run that succeeded on the default branch, it reads what scorecard.dev serves for
+the repository, four times at most, 15 s apart. A result dated, to the second, no earlier than a
+minute before the run's start is published; the minute allows for clock skew. Otherwise it dispatches the Scorecard workflow on the default branch once; when the
+unpublished run was itself a dispatch, it fails the job, so a failed publish costs one extra run
+and ends as a red run, not a stale badge. It cannot be a step of the Scorecard job: scorecard.dev
+accepts results only from a job whose steps it recognises. The rules are in
+[scripts/scorecard-publish/README.md](scripts/scorecard-publish/README.md).
 
 ## Checkout with retry
 
@@ -369,6 +404,8 @@ GitHub and model, `local.test.mjs` runs the pre-push review against a throwaway 
 stubbed model, `public-text.test.mjs` runs the dash and credit rules,
 `report.test.mjs` runs the drift report against a fake `gh` and `git`, `fleet-status.test.mjs` and
 `check.test.mjs` run the fleet lanes and their checker against a stubbed GitHub and a fixture caller,
+`scorecard-publish/check.test.mjs` runs the Scorecard publish check against a stubbed scorecard.dev
+and GitHub,
 and `pin-bump.test.mjs` runs the pin bump's bump step against a fake `gh`. The same job runs the
 `tools.json` and `fix-tools.json` drift check.
 

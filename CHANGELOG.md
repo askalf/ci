@@ -13,6 +13,11 @@ names the commit's date and the pull request it came from.
 
 ## November 2026
 
+- A new action, `actions/scorecard-publish-check`: on `workflow_run` of a repository's Scorecard
+  workflow it checks that the run's result reached scorecard.dev, dispatches Scorecard once more
+  when it did not, and fails when a dispatched run is unpublished too. A failed publish was a
+  warning on a green run, and left askalf/pitlane's badge reading "invalid repo path" for fifteen
+  hours on 2026-11-09. The pin bump moves its pins like the other actions'.
 - The review has a hosted mode: a caller passes `hosted-runner` (such as `ubuntu-latest`) in place
   of `runner-label`, with the model endpoint's key and its own rubric as the `model-api-key` and
   `reviewer-prompt` secrets, and the review runs on a GitHub-hosted runner against any endpoint
