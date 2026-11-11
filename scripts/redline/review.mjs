@@ -64,6 +64,11 @@
 //   - A model dario refuses as unroutable (a 400 marked model_unroutable: no provider lists it) goes
 //     to REDLINE_FALLBACK_MODEL the same way: the same turn is sent again, with the history kept.
 //     A 400 without that marker still fails the run.
+//   - A fallback stays inside the reviewer's model family (modelFamily). Which family reads a
+//     repository is the host's choice: where one vendor's coding agent writes the pull requests,
+//     another vendor's model reads them, so the reviewer does not share the author's blind spots.
+//     A parked or unroutable model must not undo that choice, so a REDLINE_FALLBACK_MODEL of
+//     another family is not used: the run says why and fails as it does with no fallback.
 //
 // CLI (the workflow's review step):
 //   REPO=owner/name PR=<n> HEAD_SHA=<sha> CHECKOUT=<dir> GH_READ_TOKEN=... [REDLINE_REREAD=1] \
@@ -71,8 +76,9 @@
 // The env file holds DARIO_API_KEY, or DARIO_SOCKET (a dario key socket: the socket is the key, and
 // no key is stored or sent), and optionally REDLINE_GITHUB_TOKEN (or GITHUB_PAT_REVIEWER),
 // DARIO_URL (default http://127.0.0.1:3456), REDLINE_MODEL and REDLINE_FALLBACK_MODEL (default
-// claude-opus-5-5; set it empty for no fallback), and REDLINE_PIN_MODEL (default claude-opus-5-5,
-// the model for a PR that only moves Redline pins; set it empty to read those on REDLINE_MODEL), and
+// claude-opus-5-5, used only for a model of its own family; set it empty for no fallback), and
+// REDLINE_PIN_MODEL (default claude-opus-5-5, the model for a PR that only moves Redline pins; set
+// it empty to read those on REDLINE_MODEL), and
 // REDLINE_DEEP_MODEL (default empty, which turns it off: the model for a PR that deepReview() picks,
 // one touching workflows, auth, crypto, secrets or the like, or a large one), and REDLINE_DEEP_API_KEY
 // (default empty: the deep model's reads go on DARIO_API_KEY; set, they go on this dario key, so a
@@ -134,6 +140,23 @@ export function metaPhrase(text) {
 }
 export const DEFAULT_MODEL = 'claude-fable-5-1';
 export const DEFAULT_FALLBACK_MODEL = 'claude-opus-5-5';
+// The ids that name a vendor family outright. `o3` and `o4-mini` are OpenAI ids with no `gpt-`.
+const MODEL_FAMILIES = [['claude', /^claude-/], ['gpt', /^(?:gpt-|chatgpt-|codex-|o[0-9]+(?![a-z0-9]))/]];
+/**
+ * The family of a model id, lowercase: `claude` or `gpt` for an id MODEL_FAMILIES lists, else the
+ * id's leading run of letters and digits (`gemini-3-pro` is `gemini`). A provider path before the
+ * id (`vendor/claude-opus-5-5`) is not part of it. Empty when nothing is left to name one.
+ */
+export function modelFamily(model) {
+  const id = String(model ?? '').trim().toLowerCase().split('/').pop();
+  for (const [family, re] of MODEL_FAMILIES) if (re.test(id)) return family;
+  return /^[a-z0-9]+/.exec(id)?.[0] ?? '';
+}
+/** Whether two model ids are of one family. An id with no family is of none, not even its own. */
+export function sameModelFamily(a, b) {
+  const family = modelFamily(a);
+  return family !== '' && family === modelFamily(b);
+}
 // A PR that only moves Redline pins (redline-pin-bump.yml opens one in every caller) is read on
 // this model instead of REDLINE_MODEL: it changes one commit sha per caller file, and every bump
 // wave is a review in each caller, so it does not spend the reviewer model's seat.
@@ -1297,9 +1320,15 @@ export async function reviewChange(ctx, { pr, files, commits, reviews = [], prot
       });
     } catch (e) {
       if (!(e instanceof ModelParked || e instanceof ModelUnroutable) || !ctx.fallbackModel || ctx.fallbackModel === ctx.model) throw e;
-      ctx.log?.(e instanceof ModelParked
-        ? `${ctx.model} is parked in dario for ${Math.ceil(e.retryAfterMs / 1000)}s; the review continues on ${ctx.fallbackModel}`
-        : `no provider in dario lists ${ctx.model}; the review continues on ${ctx.fallbackModel}`);
+      const why = e instanceof ModelParked
+        ? `${ctx.model} is parked in dario for ${Math.ceil(e.retryAfterMs / 1000)}s`
+        : `no provider in dario lists ${ctx.model}`;
+      // The reviewer's family is the host's choice; a fallback does not change it.
+      if (!sameModelFamily(ctx.fallbackModel, ctx.model)) {
+        ctx.log?.(`${why}; the fallback ${ctx.fallbackModel} is of another model family, so it is not used and the review stops`);
+        throw e;
+      }
+      ctx.log?.(`${why}; the review continues on ${ctx.fallbackModel}`);
       ctx.model = ctx.fallbackModel;
       turn--;
       continue;
