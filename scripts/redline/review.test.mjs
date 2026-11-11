@@ -316,6 +316,19 @@ console.log('\n  a fork: ci-repo and reviewer-login');
   const today = ours.status === 0 ? JSON.parse(ours.stdout) : null;
   check('unset, it is today\'s: askalf/ci, sprayberry-redline, and askalf/askalf still accepted', today !== null && today.paths.every((p) => p.startsWith('askalf/ci/'))
     && JSON.stringify(today.tooling) === '["askalf/ci","askalf/askalf"]' && today.login === 'sprayberry-redline');
+  const { lensOf, LENS, VERDICT_ARTIFACT } = reviewModule;
+  check('unset, this is Redline\'s own review and its artifact is redline-verdict', lensOf(undefined) === '' && lensOf('') === '' && LENS === '' && VERDICT_ARTIFACT === 'redline-verdict');
+  check('second is the only other lens', lensOf('second') === 'second' && ['Second', 'third', 'second ', '2', '../x'].every((v) => throws(lensOf, v)));
+  const lensProbe = (lens) => spawnSync(process.execPath, ['--input-type=module', '-e', [
+    `const r = await import(${JSON.stringify(new URL('./review.mjs', import.meta.url).href)});`,
+    `const s = await import(${JSON.stringify(new URL('./post.mjs', import.meta.url).href)});`,
+    'console.log(JSON.stringify({ lens: r.LENS, artifact: r.VERDICT_ARTIFACT, post: s.VERDICT_ARTIFACT }));',
+  ].join('\n')], { env: { ...process.env, REDLINE_CI_REPO: '', REDLINE_REVIEWER_LOGIN: '', REDLINE_LENS: lens }, encoding: 'utf8' });
+  const secondLens = lensProbe('second');
+  check('as the second lens, the review and the post both read and write redline-verdict-second',
+    secondLens.status === 0 && secondLens.stdout.trim() === JSON.stringify({ lens: 'second', artifact: 'redline-verdict-second', post: 'redline-verdict-second' }));
+  const badLens = lensProbe('redline-verdict');
+  check('a lens that is not one stops the script as it loads', badLens.status !== 0 && /REDLINE_LENS must be empty or second/.test(badLens.stderr));
   const bad = probe({ REDLINE_CI_REPO: 'nope' });
   check('a malformed REDLINE_CI_REPO stops the script when it loads', bad.status !== 0 && /REDLINE_CI_REPO must be owner\/name/.test(bad.stderr));
   const H = 'c'.repeat(40);
@@ -348,7 +361,9 @@ const PATCH = '@@ -1 +1,2 @@\n+export const token = process.env.X;\n const y = 2
 // bytes (a Buffer), or an HTTP status.
 // compare: the files GitHub's compare of the last judged head and this one lists (null: the route
 // 404s, and the whole change is shown).
-function world({ reviews = [], heads = [HEAD], turns, modelStatus = [], draft = false, files = null, attributes = null, headRepo = 'askalf/r', runs = [], artifacts = {}, zips = {}, compare = null } = {}) {
+// pins: commit -> the status GitHub's compare of it and askalf/ci main gives, or an HTTP status
+// (null: the route 404s).
+function world({ reviews = [], heads = [HEAD], turns, modelStatus = [], draft = false, files = null, attributes = null, headRepo = 'askalf/r', runs = [], artifacts = {}, zips = {}, compare = null, pins = null } = {}) {
   const calls = { posted: [], model: [], keys: [], sleeps: 0 };
   let headReads = 0;
   const json = (body, status = 200, headers = {}) => ({ ok: status < 300, status, headers: new Headers(headers), json: async () => body, text: async () => JSON.stringify(body) });
@@ -376,6 +391,8 @@ function world({ reviews = [], heads = [HEAD], turns, modelStatus = [], draft = 
     if (p.endsWith('/commits')) return json(u.searchParams.get('page') === '1' ? [{ sha: HEAD, commit: { message: 'feat: add token' } }] : []);
     if (p.endsWith('/actions/workflows/redline.yml/runs') && runs) return json({ workflow_runs: runs.filter((r) => u.searchParams.get('event') ? r.event === u.searchParams.get('event') : true) });
     if (/\/compare\/[0-9a-f]{40}\.\.\.[0-9a-f]{40}$/.test(p) && compare) { calls.compares = (calls.compares ?? 0) + 1; return json({ status: 'ahead', files: compare }); }
+    const onMain = /^\/repos\/askalf\/ci\/compare\/([0-9a-f]{40})\.\.\.main$/.exec(p);
+    if (onMain && pins) { calls.pinCompares = (calls.pinCompares ?? 0) + 1; const st = pins[onMain[1]] ?? 'diverged'; return typeof st === 'number' ? json({ message: 'down' }, st) : json({ status: st }); }
     const arts = /\/actions\/runs\/(\d+)\/artifacts$/.exec(p);
     if (arts && runs) { const rows = artifacts[arts[1]]; return typeof rows === 'number' ? json({ message: 'down' }, rows) : json({ artifacts: rows ?? [] }); }
     const zipOf = /\/actions\/artifacts\/(\d+)\/zip$/.exec(p);
@@ -1102,12 +1119,37 @@ console.log('\n  the reusable workflow');
   check('the review step names the verdict file in the workspace', (steps[reviewAt] ?? '').includes('REDLINE_VERDICT_FILE: ${{ github.workspace }}/redline-verdict/verdict.json'));
   check('the review step names the host prompt file (prompt-file) or hosted mode\'s, and no prompt is fetched with the script',
     (steps[reviewAt] ?? '').includes('REDLINE_PROMPT_FILE: ${{ steps.where.outputs.prompt-file || inputs.prompt-file }}') && !/prompt/.test(steps[fetchAt]));
-  check('the verdict is uploaded after the review, before the cleanup', reviewAt >= 0 && uploadAt === reviewAt + 1 && cleanAt === uploadAt + 1);
+  const secondAt = stepNamed('Second lens');
+  const secondUploadAt = stepNamed('Upload the second lens\'s verdict');
+  const second = steps[secondAt] ?? '';
+  const secondUpload = steps[secondUploadAt] ?? '';
+  check('the verdict is uploaded after the review; the second lens and its upload follow, then the cleanup',
+    reviewAt >= 0 && uploadAt === reviewAt + 1 && secondAt === uploadAt + 1 && secondUploadAt === secondAt + 1 && cleanAt === secondUploadAt + 1);
+  check('the second lens runs only for a caller that names its account, and only after everything before it passed',
+    second.includes("\n        if: success() && inputs.second-reviewer-login != ''\n") && def('second-reviewer-login', "''"));
+  check('it cannot fail or stall the job: the job\'s result stays the first review\'s verdict',
+    second.includes('\n        continue-on-error: true\n') && /\n        timeout-minutes: (1[0-9])\n/.test(second)
+    && wf.includes("\n    timeout-minutes: ${{ inputs.second-reviewer-login != '' && 40 || 20 }}\n"));
+  check('it is the same script, as the second account, with the second env file and rubric and its own verdict file',
+    second.includes('run: node .redline/scripts/redline/review.mjs')
+    && ['REDLINE_LENS: second', "REDLINE_PIN_APPROVAL: '1'", 'REDLINE_REVIEWER_LOGIN: ${{ inputs.second-reviewer-login }}', 'REDLINE_ENV_FILE: ${{ inputs.second-env-file }}',
+      'REDLINE_PROMPT_FILE: ${{ inputs.second-prompt-file }}', 'REDLINE_VERDICT_FILE: ${{ github.workspace }}/redline-verdict-second/verdict.json']
+      .every((l) => second.includes(`          ${l}\n`)));
+  check('it reads the same PR, head and mode as the review step',
+    ['REPO', 'PR', 'HEAD_SHA', 'REDLINE_REREAD', 'REDLINE_FORK', 'CHECKOUT', 'GH_READ_TOKEN', 'REDLINE_CI_REPO', 'REDLINE_DISPATCH_ACTOR']
+      .every((k) => { const line = new RegExp(`\\n          ${k}: (.*)\\n`); const a = line.exec(steps[reviewAt] ?? '')?.[1]; return a !== undefined && a === line.exec(second)?.[1]; }));
+  check('the second lens holds no secret', !second.includes('secrets.') && !secondUpload.includes('secrets.'));
+  check('the second files default to host paths next to the first',
+    def('second-env-file', '/etc/askalf/redline-second.env') && def('second-prompt-file', '/etc/askalf/redline-second-prompt.md'));
+  check('its verdict goes up as redline-verdict-second, only when the step ran and left a file',
+    secondUpload.includes("if: always() && steps.second.outcome != 'skipped' && hashFiles('redline-verdict-second/verdict.json') != ''")
+    && second.includes('\n        id: second\n') && secondUpload.includes('name: redline-verdict-second\n') && secondUpload.includes('path: redline-verdict-second/verdict.json\n')
+    && /uses: actions\/upload-artifact@[0-9a-f]{40} # v7\./.test(secondUpload) && /retention-days: [1-7]\n/.test(secondUpload));
   check('the upload runs on pass or fail, only when there is a file', upload.includes("if: always() && hashFiles('redline-verdict/verdict.json') != ''"));
   check('the upload is the pinned upload-artifact, as redline-verdict, short-lived',
     /uses: actions\/upload-artifact@[0-9a-f]{40} # v7\./.test(upload) && upload.includes('name: redline-verdict\n')
     && upload.includes('path: redline-verdict/verdict.json\n') && /retention-days: [1-7]\n/.test(upload));
-  check('the cleanup removes the verdict too', /run: rm -rf pr \.redline redline-verdict "\$\{RUNNER_TEMP\}\/redline-hosted"\n/.test(steps[cleanAt] ?? ''));
+  check('the cleanup removes both verdicts too', /run: rm -rf pr \.redline redline-verdict redline-verdict-second "\$\{RUNNER_TEMP\}\/redline-hosted"\n/.test(steps[cleanAt] ?? ''));
   check('nothing from the PR is interpolated into a run step',!/run:[^\n]*\$\{\{\s*github\.event\.pull_request\.(title|body|head\.ref)/.test(wf));
 
   // Hosted mode: a GitHub runner, with the endpoint's key and the rubric from the caller's secrets.
@@ -1141,7 +1183,7 @@ console.log('\n  the reusable workflow');
       const r = spawnSync('bash', ['-c', whereRun], { encoding: 'utf8', env: {
         PATH: process.env.PATH, RUNNER_TEMP: temp, GITHUB_OUTPUT: out,
         RUNNER_LABEL: '', HOSTED_RUNNER: 'ubuntu-latest', MODEL_URL: 'https://api.anthropic.com', MODEL: '', DEEP_MODEL: '', MODEL_API_KEY: 'sk-test-key', REVIEWER_PROMPT: 'Review it.\nSubmit once.',
-        DARIO_IMAGE: '', DARIO_LOCK_URL: '', DARIO_LOCK_TOKEN: '', ...over } });
+        DARIO_IMAGE: '', DARIO_LOCK_URL: '', DARIO_LOCK_TOKEN: '', SECOND_REVIEWER_LOGIN: '', ...over } });
       return { status: r.status, stdout: r.stdout, outputs: readFileSync(out, 'utf8') };
     };
     const envFile = join(temp, 'redline-hosted', 'redline.env');
@@ -1149,6 +1191,13 @@ console.log('\n  the reusable workflow');
     const selfHosted = run({ RUNNER_LABEL: 'redline', HOSTED_RUNNER: '', MODEL_API_KEY: '', REVIEWER_PROMPT: '' });
     check('a self-hosted caller passes, writes nothing and leaves the outputs empty, so the host files are read',
       selfHosted.status === 0 && selfHosted.outputs === '' && !existsSync(join(temp, 'redline-hosted')));
+    {
+      const lensHosted = run({ SECOND_REVIEWER_LOGIN: 'second-bot' });
+      const lensHost = run({ RUNNER_LABEL: 'redline', HOSTED_RUNNER: '', MODEL_API_KEY: '', REVIEWER_PROMPT: '', SECOND_REVIEWER_LOGIN: 'second-bot' });
+      check('a second lens is refused in hosted mode, before anything is written, and passes on a self-hosted runner',
+        lensHosted.status === 1 && /second-reviewer-login is for a self-hosted runner/.test(lensHosted.stdout) && lensHosted.outputs === '' && !existsSync(join(temp, 'redline-hosted'))
+        && lensHost.status === 0 && lensHost.outputs === '');
+    }
     check('neither runner, and both, are refused',
       run({ HOSTED_RUNNER: '' }).status === 1 && /not both/.test(run({ RUNNER_LABEL: 'redline' }).stdout));
     check('a self-hosted caller that passes a hosted secret is refused',
@@ -1455,6 +1504,74 @@ console.log('\n  pin bump');
     patch: `@@ -9,4 +9,4 @@\n-    uses: ${c.workflow}@${A} # main 2026-10-24, askalf/ci#120\n+    uses: ${c.workflow}@${B} # main 2026-10-24, askalf/ci#123\n     with:\n-      redline-ref: ${A}\n+      redline-ref: ${B}` }])));
   check('the public-text pin outside its caller file is not', !pinOnly([step('askalf/ci/.github/workflows/public-text.yml', '.github/workflows/ci.yml')]));
   check('a lookalike action path is not', !pinOnly([step('askalf/ci/actions/fleet-status-evil')]) && !pinOnly([step('askalf/ci/actionsXfleet-status')]));
+
+  // The second lens's approval of a pin-only change, with no model call.
+  {
+    const { pinnedShas, pinApproval, renderPinApprovalBody, isDeterministicApproval, verdictProblem } = reviewModule;
+    const readTurns = [submit({ ...APPROVE, summary: 'Moves the pin; read .github/workflows/redline.yml.' })];
+    check('the pinned commits are the shas on added lines, once each', JSON.stringify(pinnedShas([bump(), bump('.github/workflows/redline-fix.yml')])) === JSON.stringify([B]));
+    check('a removed sha, a short one and a longer hex run are not pinned commits',
+      pinnedShas([{ patch: `-    uses: x/y@${A}\n+    uses: x/y@${B.slice(0, 39)}\n+    key: ${B}0` }]).length === 0 && pinnedShas([{}]).length === 0 && pinnedShas(null).length === 0);
+    const body = renderPinApprovalBody([B], HEAD);
+    check('the approval opens as a deterministic approval, names the commit and carries the head marker',
+      isDeterministicApproval({ state: 'APPROVED', body }) && body.includes(`\`${B.slice(0, 7)}\``) && body.includes('askalf/ci main') && body.endsWith(`<!-- redline:head=${HEAD} -->`));
+    {
+      const { ctx } = world({ files: [bump()], pins: { [B]: 'ahead' } });
+      const ok = await pinApproval(ctx, [bump()]);
+      const notPins = await pinApproval(ctx, [bump(), { filename: 'src/b.js', status: 'modified', patch: PATCH }]);
+      check('a pin-only change whose commit is on main can be approved; one with any other file cannot', ok.ok && ok.shas[0] === B && !notPins.ok);
+    }
+    {
+      const { ctx, calls } = world({ files: [bump()], pins: { [B]: 'identical' }, turns: readTurns });
+      ctx.pinApproval = true;
+      const lines = [];
+      ctx.log = (l) => lines.push(l);
+      const r = await runReview(ctx);
+      check('with pin approval on, a pin-only PR is approved without a model call and posted as the reviewer',
+        r.outcome === 'pin-approved' && r.verdict === 'APPROVE' && calls.model.length === 0 && calls.pinCompares === 1
+        && calls.posted.length === 1 && calls.posted[0].event === 'APPROVE' && calls.posted[0].commit_id === HEAD && calls.posted[0].body === body && calls.posted[0].auth === 'Bearer review');
+      check('its record is a verdict that says it was posted', verdictProblem(r.record) === null && r.record.posted === true && r.record.event === 'APPROVE' && r.record.head_sha === HEAD);
+      check('and the log says why no model read it', lines.some((l) => l.includes('each pinned commit is on askalf/ci main; approved without a model call')));
+    }
+    {
+      const { ctx, calls } = world({ files: [bump()], pins: { [B]: 'ahead' }, turns: readTurns });
+      ctx.pinApproval = true; ctx.reviewToken = '';
+      const r = await runReview(ctx);
+      check('with no reviewer token the approval is left in the record for the post', r.outcome === 'pin-approved' && calls.posted.length === 0 && calls.model.length === 0 && r.record.posted === false && r.record.body === body);
+    }
+    {
+      const { ctx, calls } = world({ files: [bump()], pins: { [B]: 'ahead' }, turns: readTurns });
+      ctx.pinApproval = true; ctx.dryRun = true;
+      const r = await runReview(ctx);
+      check('a dry run reports the approval and posts and records nothing', r.outcome === 'dry-run' && r.verdict === 'APPROVE' && r.body === body && r.record === undefined && calls.posted.length === 0);
+    }
+    for (const [name, pins] of [['a pinned commit that is not on main', { [B]: 'diverged' }], ['a pinned commit main is behind', { [B]: 'behind' }], ['a compare that cannot be read', { [B]: 404 }]]) {
+      const { ctx, calls } = world({ files: [bump()], pins, turns: readTurns });
+      ctx.pinApproval = true;
+      const lines = [];
+      ctx.log = (l) => lines.push(l);
+      const r = await runReview(ctx);
+      check(`${name} gets no approval without a read: the model reads the head`, r.outcome === 'posted' && calls.model.length > 0 && lines.some((l) => l.startsWith('no approval without a read: ')));
+    }
+    {
+      const { ctx, calls } = world({ files: [bump()], pins: { [B]: 'ahead' }, turns: readTurns });
+      const r = await runReview(ctx);
+      check('without pin approval a pin-only PR is read by the model as before', r.outcome === 'posted' && calls.model.length > 0 && (calls.pinCompares ?? 0) === 0);
+    }
+    {
+      const { ctx, calls } = world({ files: [bump(), { filename: 'src/b.js', status: 'modified', additions: 1, deletions: 0, patch: PATCH }], pins: { [B]: 'ahead' }, turns: [submit(APPROVE)] });
+      ctx.pinApproval = true;
+      const r = await runReview(ctx);
+      check('with pin approval on, a PR that changes anything else is read by the model', r.outcome === 'posted' && calls.model.length > 0 && (calls.pinCompares ?? 0) === 0);
+    }
+    {
+      const given = { user: { login: REVIEWER_LOGIN }, state: 'APPROVED', commit_id: HEAD, body, html_url: 'https://x/review/9' };
+      const { ctx, calls } = world({ files: [bump()], pins: { [B]: 'ahead' }, reviews: [given], turns: readTurns });
+      ctx.pinApproval = true;
+      const r = await runReview(ctx);
+      check('a re-run does not give the approval twice', r.outcome === 'existing' && r.verdict === 'APPROVE' && r.url === 'https://x/review/9' && calls.posted.length === 0 && calls.model.length === 0);
+    }
+  }
 
   {
     const { ctx, calls } = world({ files: [bump()], turns: [submit({ ...APPROVE, summary: 'Moves the pin; read .github/workflows/redline.yml.' })] });

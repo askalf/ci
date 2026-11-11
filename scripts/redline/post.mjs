@@ -45,6 +45,16 @@
 // is sent once, never retried: a retry after an answer that was lost on the way back would post the
 // review twice. Two posts for one head never overlap: redline-post-verdict.yml runs one at a time.
 //
+// The second lens (REDLINE_LENS=second). A run whose caller turned the second lens on carries a
+// second verdict, in the redline-verdict-second artifact. redline-post-verdict.yml runs this script
+// once more for it, with the second reviewer's login and token, and every rule above is applied to
+// that artifact and that login as written, with two differences in rule 4. The second lens reads
+// only a head the first review approved, and its own verdict never changes the job's result, so
+// the run must have concluded success whatever the second verdict says: there is no agreement of
+// event and conclusion to check, and a run that failed is not one to post. And a run with no
+// second artifact is a skip, not a refusal: the lens was off, or could not finish, and a re-run of
+// the review is what gives that head its second verdict.
+//
 // The outcome. A posted review, and a run that is not one to post (rules 1, 2 and 5), end with exit
 // 0. A verdict refused under rule 3 or 4 also ends with exit 0, and with a warning: no later run of
 // this job decides otherwise, and our ops automation, which applies the same rules, hands that head
@@ -56,8 +66,8 @@
 
 import { appendFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
-import { gh, verdictProblem, REVIEWER_LOGIN, DISPATCH_ACTOR, isDispatchActor } from './review.mjs';
-export { DISPATCH_ACTOR };
+import { gh, verdictProblem, REVIEWER_LOGIN, DISPATCH_ACTOR, isDispatchActor, LENS, VERDICT_ARTIFACT } from './review.mjs';
+export { DISPATCH_ACTOR, VERDICT_ARTIFACT };
 import { CI_REPO } from './pin.mjs';
 import { zipEntry, MAX_ARTIFACT_BYTES } from './zip.mjs';
 export { zipEntry, MAX_ARTIFACT_BYTES };
@@ -70,7 +80,6 @@ export const CALLER_PATH = '.github/workflows/redline.yml';
  */
 export const TOOLING_REPOS = CI_REPO === 'askalf/ci' ? ['askalf/ci', 'askalf/askalf'] : [CI_REPO];
 export const REVIEW_WORKFLOW_FILE = '.github/workflows/redline-review.yml';
-export const VERDICT_ARTIFACT = 'redline-verdict';
 export const VERDICT_FILE = 'verdict.json';
 // DISPATCH_ACTOR, the identity that dispatches a review, is review.mjs's: both readers of a run hold the one rule.
 /**
@@ -296,9 +305,10 @@ export function rulePinnedOnMain({ run, caller, where, patch, pinCompare }) {
   return null;
 }
 
-/** Rule 4. On success, the review to post. */
-export function ruleVerdictMatches({ repo, pr, prHead, run, artifact, verdictText }) {
-  if (!artifact) return refuse(`run ${run.id} has no ${VERDICT_ARTIFACT} artifact`);
+/** Rule 4. On success, the review to post. `lens` is LENS: '' for Redline's verdict, 'second' for the second lens's. */
+export function ruleVerdictMatches({ repo, pr, prHead, run, artifact, verdictText, lens = LENS }) {
+  if (lens && String(run.conclusion ?? '') !== 'success') return skip(`run ${run.id} concluded ${run.conclusion || 'nothing'}: the second lens reads only a head the first review approved`);
+  if (!artifact) return lens ? skip(`run ${run.id} has no ${VERDICT_ARTIFACT} artifact: the second lens left no verdict`) : refuse(`run ${run.id} has no ${VERDICT_ARTIFACT} artifact`);
   if (artifact.runId !== run.id || artifact.headSha !== run.headSha) return refuse(`the ${VERDICT_ARTIFACT} artifact is not from run ${run.id} at ${short(run.headSha)}`);
   if (artifact.expired) return refuse(`the ${VERDICT_ARTIFACT} artifact of run ${run.id} has expired`);
   if (artifact.sizeInBytes > MAX_ARTIFACT_BYTES) return refuse(`the ${VERDICT_ARTIFACT} artifact of run ${run.id} is ${artifact.sizeInBytes} bytes, over the ${MAX_ARTIFACT_BYTES} byte cap`);
@@ -314,7 +324,7 @@ export function ruleVerdictMatches({ repo, pr, prHead, run, artifact, verdictTex
   if (v.posted !== false) return refuse('the review job posted this verdict itself');
   const conclusion = String(run.conclusion ?? '');
   if (conclusion !== 'success' && conclusion !== 'failure') return refuse(`run ${run.id} concluded ${conclusion || 'nothing'}`);
-  if ((v.event === 'APPROVE') !== (conclusion === 'success')) return refuse(`${VERDICT_FILE} says ${v.event} but run ${run.id} concluded ${conclusion}`);
+  if (!lens && (v.event === 'APPROVE') !== (conclusion === 'success')) return refuse(`${VERDICT_FILE} says ${v.event} but run ${run.id} concluded ${conclusion}`);
   return {
     action: 'post',
     review: {
@@ -547,12 +557,15 @@ export async function postRun(ctx) {
   const none = (outcome, reason) => [{ outcome, pr: 0, reason }];
   if (!/^[\w.-]+\/[\w.-]+$/.test(ctx.repo ?? '')) return none('failed', 'REPO must be owner/name');
   if (!/^[1-9]\d*$/.test(String(ctx.runId ?? ''))) return none('failed', 'RUN_ID must be a run id');
-  if (!ctx.reviewToken) return none('failed', 'no reviewer token: the caller passes the REDLINE_REVIEWER_TOKEN secret as reviewer-token');
+  if (!ctx.reviewToken) return none('failed', LENS
+    ? 'no token for the second reviewer: the caller passes it as the second-reviewer-token secret'
+    : 'no reviewer token: the caller passes the REDLINE_REVIEWER_TOKEN secret as reviewer-token');
   const raw = await read(ctx, `/repos/${ctx.repo}/actions/runs/${ctx.runId}`);
   if (!raw) return none('failed', `could not read run ${ctx.runId}`);
   const run = runFromApi(raw);
   if (run.path !== CALLER_PATH) return none('skipped', `run ${run.id} is ${run.path || 'no workflow'}, not ${CALLER_PATH}`);
   if (run.conclusion !== 'success' && run.conclusion !== 'failure') return none('skipped', `run ${run.id} concluded ${run.conclusion ?? 'nothing yet'}`);
+  if (LENS && run.conclusion !== 'success') return none('skipped', `run ${run.id} concluded ${run.conclusion}: the second lens reads only a head the first review approved`);
 
   if (run.event === 'pull_request') {
     const prs = await prsOfRun(ctx, raw, run);

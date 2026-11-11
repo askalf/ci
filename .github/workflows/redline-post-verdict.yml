@@ -11,6 +11,11 @@
 #
 # It runs on GitHub's runners: a fresh machine, never a self-hosted runner a pull request's job has
 # used, holds the token.
+#
+# The second lens: a caller whose review runs a second lens (redline-review.yml's
+# second-reviewer-login) passes the same login here with that account's token as
+# second-reviewer-token. The post script then runs once more, for the run's second verdict, under
+# the same rules; its header says where they differ.
 name: Redline post
 
 on:
@@ -44,10 +49,20 @@ on:
         required: false
         default: askalf
         type: string
+      second-reviewer-login:
+        description: >-
+          The account the second lens's verdict is posted as, the same login the review caller
+          passes as second-reviewer-login. Empty, the default, posts no second verdict.
+        required: false
+        default: ''
+        type: string
     secrets:
       reviewer-token:
         description: The token that posts as reviewer-login.
         required: true
+      second-reviewer-token:
+        description: The token that posts as second-reviewer-login. Read only when that input is set.
+        required: false
 
 # actions: read lists and downloads the run's artifact; contents: read reads redline.yml at the
 # commit the run used; pull-requests: read reads the PR, its files and its reviews. The post itself
@@ -172,5 +187,20 @@ jobs:
           REDLINE_REVIEWER_TOKEN: ${{ secrets.reviewer-token }}
           REDLINE_CI_REPO: ${{ inputs.ci-repo }}
           REDLINE_REVIEWER_LOGIN: ${{ inputs.reviewer-login }}
+          REDLINE_DISPATCH_ACTOR: ${{ inputs.dispatch-actor }}
+        run: node .redline/scripts/redline/post.mjs
+
+      # The run's second verdict, when the caller runs a second lens. It is tried whatever the
+      # first post came to, since each verdict is judged and posted on its own; the same exit codes.
+      - name: Post the second lens's verdict
+        if: ${{ !cancelled() && inputs.second-reviewer-login != '' }}
+        env:
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          GH_READ_TOKEN: ${{ github.token }}
+          REDLINE_LENS: second
+          REDLINE_REVIEWER_TOKEN: ${{ secrets.second-reviewer-token }}
+          REDLINE_CI_REPO: ${{ inputs.ci-repo }}
+          REDLINE_REVIEWER_LOGIN: ${{ inputs.second-reviewer-login }}
           REDLINE_DISPATCH_ACTOR: ${{ inputs.dispatch-actor }}
         run: node .redline/scripts/redline/post.mjs

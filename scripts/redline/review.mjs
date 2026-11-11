@@ -13,6 +13,17 @@
 // checking where the run came from, so the reviewer
 // token never has to sit on a CI runner that a pull request's own workflow files can reach.
 //
+// A second lens (REDLINE_LENS=second). The workflow can run this script a second time in the same
+// job, after a review that approved, as another reviewer account with its own env file and rubric:
+// a second reader with a narrower brief, on a model of the host's choosing. Everything below holds
+// for it as it does for the first review; three things differ. Its verdict goes up as the
+// redline-verdict-second artifact, and the earlier verdicts it reads from the runs are that
+// artifact's, so each lens has its own history and its own round cap. Its exit code is not the
+// job's result: the step may fail and the job still reports the first review's verdict. And with
+// REDLINE_PIN_APPROVAL=1 a pull request that only moves pins is approved without a model call once
+// every commit it pins is found on the tooling repository's main (pinApproval): the first review
+// read that head, and what a second reader would check there is exactly that.
+//
 // Hardening, each with a reason:
 //   - A verdict already posted at this head is reused, never posted twice (re-runs are free),
 //     except in a re-read (REDLINE_REREAD=1, the ops tick's dispatch after a description-only finding
@@ -98,7 +109,7 @@ import { pathToFileURL, fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { request as httpRequest } from 'node:http';
 import { randomUUID } from 'node:crypto';
-import { ACTIONS, CALLERS } from './pin.mjs';
+import { ACTIONS, CALLERS, CI_REPO } from './pin.mjs';
 import { zipEntry } from './zip.mjs';
 
 /**
@@ -112,6 +123,17 @@ export function reviewerLogin(value) {
   return value.toLowerCase();
 }
 export const REVIEWER_LOGIN = reviewerLogin(process.env.REDLINE_REVIEWER_LOGIN);
+/**
+ * Which review of the job this process is: '' for Redline's own, 'second' for the second lens
+ * (REDLINE_LENS, set by the workflow's second-lens step). Anything else is refused when the module
+ * loads: the lens names the artifact a verdict is read from and written to.
+ */
+export function lensOf(value) {
+  if (value === undefined || value === '') return '';
+  if (value !== 'second') throw new Error(`REDLINE_LENS must be empty or second; got ${JSON.stringify(value)}`);
+  return value;
+}
+export const LENS = lensOf(process.env.REDLINE_LENS);
 // A low-risk approval that another automation posts under the reviewer's login, from a PR's file
 // list alone, opens its body with this. No model read that head, so it is never Redline's verdict:
 // not a standing verdict to reuse, not a judged head to read a delta from, not a round. Counting it
@@ -556,8 +578,11 @@ export function saveVerdict(file, record) {
 
 // ---------- earlier verdicts from the runs, and the round cap ----------
 
-/** The verdict artifact every Redline run uploads (redline-review.yml), and the file in it. */
-export const VERDICT_ARTIFACT = 'redline-verdict';
+/**
+ * The verdict artifact a review uploads (redline-review.yml), and the file in it. Each lens has its
+ * own artifact, so one lens never reads or posts the other's verdict.
+ */
+export const VERDICT_ARTIFACT = LENS ? `redline-verdict-${LENS}` : 'redline-verdict';
 export const VERDICT_FILE = 'verdict.json';
 /** Request-changes rounds on one PR after which a new head is not reviewed and a person takes it. */
 export const DEFAULT_ROUND_CAP = 4;
@@ -1192,6 +1217,48 @@ export function pinOnly(files) {
   });
 }
 
+/** The commits a change moves its pins to: every full sha on an added line, once each. Pure. */
+export function pinnedShas(files) {
+  const out = new Set();
+  for (const f of files ?? []) {
+    for (const l of String(f?.patch ?? '').split('\n')) {
+      if (!l.startsWith('+') || l.startsWith('+++ ')) continue;
+      for (const m of l.matchAll(/(?<![0-9a-f])[0-9a-f]{40}(?![0-9a-f])/g)) out.add(m[0]);
+    }
+  }
+  return [...out];
+}
+
+/**
+ * Whether a pin-only change can be approved without a model read: it adds at least one pin, and
+ * every commit it pins is on the tooling repository's main (the compare of that commit and main
+ * says main is ahead of it or identical to it). A pin line names a workflow or action of that
+ * repository, so a commit on its main is one that was reviewed and merged there; a sha GitHub can
+ * resolve through the repository but that is on no branch of it, such as a fork's, is not. Returns
+ * { ok, shas, why }; a failed read is not ok, and the head is then read by the model as any other.
+ */
+export async function pinApproval(ctx, files) {
+  const shas = pinnedShas(files);
+  if (!pinOnly(files) || shas.length === 0) return { ok: false, shas, why: 'the change is not only pin moves' };
+  for (const sha of shas) {
+    let status = '';
+    try { status = String((await gh(ctx, `/repos/${CI_REPO}/compare/${sha}...main`))?.status ?? ''); } catch (e) {
+      return { ok: false, shas, why: `could not compare ${sha.slice(0, 7)} with ${CI_REPO} main (${e.message})` };
+    }
+    if (status !== 'ahead' && status !== 'identical') return { ok: false, shas, why: `${sha.slice(0, 7)} is not on ${CI_REPO} main (${status || 'no status'})` };
+  }
+  return { ok: true, shas, why: '' };
+}
+
+/** The approval pinApproval earns. It opens as a deterministic approval does, so no reader takes it for a model's verdict. Pure. */
+export function renderPinApprovalBody(shas, headSha) {
+  const list = shas.map((s) => '`' + s.slice(0, 7) + '`').join(', ');
+  return [
+    `${DETERMINISTIC_APPROVAL}.** This pull request only moves pins of ${CI_REPO} workflows and actions, and every commit it pins (${list}) is on ${CI_REPO} main. No model read this head.`,
+    `<!-- redline:head=${headSha} -->`,
+  ].join('\n\n');
+}
+
 // An action pinned to a full commit sha (a trailing version comment allowed), and an image pinned to
 // a sha256 digest. The captures are the whole line without its version (indentation, platform and
 // stage name kept, case kept since action paths are case-sensitive), so a bump (same line, new sha)
@@ -1413,8 +1480,8 @@ export async function reviewChange(ctx, { pr, files, commits, reviews = [], prot
 
 /**
  * Review one PR head. ctx: { repo, pr, headSha, checkout, readToken, reviewToken, darioUrl, darioKey,
- * model, fallbackModel, pinModel?, deepModel?, system, context?, fetch, sleep, now, log }. With no reviewToken the review is built but not posted.
- * Returns { outcome: 'posted'|'unposted'|'existing'|'skipped'|'dry-run', verdict?, url?, reason?, record? };
+ * model, fallbackModel, pinModel?, deepModel?, pinApproval?, system, context?, fetch, sleep, now, log }. With no reviewToken the review is built but not posted.
+ * Returns { outcome: 'posted'|'unposted'|'existing'|'skipped'|'capped'|'pin-approved'|'dry-run', verdict?, url?, reason?, record? };
  * record (verdict.json) is set when a review was built for this head, posted or not.
  */
 export async function runReview(ctx) {
@@ -1459,6 +1526,26 @@ export async function runReview(ctx) {
     if (!ctx.reviewToken) return { outcome: 'capped', verdict: 'REQUEST_CHANGES', rounds, cap, body, record: record(false) };
     const p = await gh(ctx, `/repos/${repo}/pulls/${n}/reviews`, { token: ctx.reviewToken, method: 'POST', body: { commit_id: headSha, event: 'REQUEST_CHANGES', body } });
     return { outcome: 'capped', verdict: 'REQUEST_CHANGES', rounds, cap, body, url: p.html_url, record: record(true) };
+  }
+
+  // A second lens set to approve pin moves does so here, with no model call, once every pinned
+  // commit is on the tooling repository's main. Anything short of that is read like any other head.
+  if (ctx.pinApproval && pinOnly(files)) {
+    const pins = await pinApproval(ctx, files);
+    if (pins.ok) {
+      // It is no standing verdict (verdictAtHead passes a deterministic approval over), so a
+      // re-run comes here again: the approval already at this head is kept, not given twice.
+      const given = postedReviews.find((r) => String(r?.user?.login ?? '').toLowerCase() === REVIEWER_LOGIN && r.commit_id === headSha && isDeterministicApproval(r));
+      if (given) return { outcome: 'existing', verdict: 'APPROVE', url: given.html_url };
+      const body = renderPinApprovalBody(pins.shas, headSha);
+      ctx.log?.(`the PR only moves pins and each pinned commit is on ${CI_REPO} main; approved without a model call`);
+      if (ctx.dryRun) return { outcome: 'dry-run', verdict: 'APPROVE', body };
+      const record = (wasPosted) => verdictRecord({ repo, pr: n, headSha, event: 'APPROVE', body, comments: [], posted: wasPosted });
+      if (!ctx.reviewToken) return { outcome: 'pin-approved', verdict: 'APPROVE', record: record(false) };
+      const p = await gh(ctx, `/repos/${repo}/pulls/${n}/reviews`, { token: ctx.reviewToken, method: 'POST', body: { commit_id: headSha, event: 'APPROVE', body } });
+      return { outcome: 'pin-approved', verdict: 'APPROVE', url: p.html_url, record: record(true) };
+    }
+    ctx.log?.(`no approval without a read: ${pins.why}`);
   }
 
   routeModel(ctx, files);
@@ -1532,23 +1619,26 @@ async function main() {
     context,
     dryRun: env.REDLINE_DRY_RUN === '1',
     reread: env.REDLINE_REREAD === '1',
+    pinApproval: env.REDLINE_PIN_APPROVAL === '1',
     roundCap: roundCapOf(secrets.REDLINE_ROUND_CAP ?? env.REDLINE_ROUND_CAP),
     fork: env.REDLINE_FORK === '1',
     log: (line) => console.log(line),
   };
   let result;
   try { result = await runReview(ctx); } catch (e) {
-    console.error(`::error::Redline could not finish the review: ${e.message}`);
+    console.error(`::error::${LENS ? 'Redline second lens' : 'Redline'} could not finish the review: ${e.message}`);
     process.exit(2);
   }
   try { if (result.record && verdictFile) saveVerdict(verdictFile, result.record); } catch (e) {
     console.error(`::error::Redline could not write ${verdictFile}: ${e.message}`); process.exit(2);
   }
-  const line = result.outcome === 'skipped' ? `Redline skipped: ${result.reason}`
-    : result.outcome === 'capped' ? `Redline stopped at the round cap (${result.rounds} rounds, cap ${result.cap}), ${result.url ? 'posted' : 'not posted from this run'}: ${result.verdict} ${result.url ?? ''}`
-    : result.outcome === 'dry-run' ? `Redline dry run (nothing posted): ${result.verdict}`
-      : result.outcome === 'unposted' ? `Redline verdict, not posted from this run: ${result.verdict}`
-        : `Redline ${result.outcome === 'existing' ? 'already reviewed' : 'posted'}: ${result.verdict} ${result.url ?? ''}`;
+  const who = LENS ? 'Redline second lens' : 'Redline';
+  const line = result.outcome === 'skipped' ? `${who} skipped: ${result.reason}`
+    : result.outcome === 'capped' ? `${who} stopped at the round cap (${result.rounds} rounds, cap ${result.cap}), ${result.url ? 'posted' : 'not posted from this run'}: ${result.verdict} ${result.url ?? ''}`
+    : result.outcome === 'dry-run' ? `${who} dry run (nothing posted): ${result.verdict}`
+      : result.outcome === 'pin-approved' ? `${who} approved a pin-only change without a model call, ${result.url ? `posted: ${result.url}` : 'not posted from this run'}`
+        : result.outcome === 'unposted' ? `${who} verdict, not posted from this run: ${result.verdict}`
+          : `${who} ${result.outcome === 'existing' ? 'already reviewed' : 'posted'}: ${result.verdict} ${result.url ?? ''}`;
   console.log(line);
   if (result.body) console.log(`\n${result.body}`);
   if (env.GITHUB_STEP_SUMMARY) appendFileSync(env.GITHUB_STEP_SUMMARY, `${line}\n`);

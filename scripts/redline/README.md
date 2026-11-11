@@ -71,6 +71,33 @@ the last request and leaves the PR to a person, under the rule `round-cap`. A di
 artifact, is reused, and the run writes it to its own `verdict.json` so every finished run carries
 the verdict of its head.
 
+### A second lens
+
+A caller on a self-hosted runner can have every head the review approves read once more, in the
+same job, by a second reviewer account: it passes `second-reviewer-login` to
+`redline-review.yml` and to `redline-post-verdict.yml`, and that account's token to the post as the
+`second-reviewer-token` secret. The second read is `review.mjs` again with `REDLINE_LENS=second`:
+the same tools and the same hardening, as the second account, with the env file and rubric the
+host keeps for it (`second-env-file`, default `/etc/askalf/redline-second.env`, and
+`second-prompt-file`, default `/etc/askalf/redline-second-prompt.md`). The env file takes the
+same keys as the first, so the host chooses the second reader's model, fallback and round cap
+there. A second lens is worth its turns when it differs from the first: another vendor's model, a
+narrower rubric, or both.
+
+- Its verdict is the `redline-verdict-second` artifact, and its history is its own: the earlier
+  verdicts it reads, and the rounds its cap counts, are the second account's.
+- It never changes the job's result, which stays the first review's verdict. A second lens that
+  asks for changes says so in its posted review; one that could not finish leaves no verdict, and
+  a re-run of the job gives the head one.
+- A pull request that only moves pins is approved without a model call once every commit it pins
+  is on `ci-repo`'s main. That approval opens with "Deterministic approval" and says no model
+  read the head. A pin to a commit that is not on main, or a compare that cannot be read, sends
+  the head to the model like any other.
+- Hosted mode has no second lens: it reads host files, and the workflow refuses the input there.
+
+With a second account that has write access, a ruleset can require two approving reviews: the
+first review's and the second lens's, each at the current head.
+
 ## The post: `redline-post-verdict.yml` and `post.mjs`
 
 The review job runs the workflow files a pull request brings with it, so it never holds the
@@ -90,6 +117,13 @@ conclusion, and `sprayberry-redline` has not reviewed the head yet. The last is 
 before the post, which is sent once and never retried. A verdict refused under these rules ends
 with a warning, a failed read or post fails the run so a re-run decides again, and
 `post.test.mjs` runs it all against a stubbed GitHub.
+
+For a caller that runs a second lens, the post job runs `post.mjs` once more with
+`REDLINE_LENS=second`, the second account's login and its token. The rules are the same, read
+against the `redline-verdict-second` artifact and the second account's reviews, except that the
+second verdict is posted only from a run that concluded success (the second lens reads only a
+head the first review approved, and its own verdict never sets the run's conclusion), and a run
+with no second artifact is skipped without a warning.
 
 ## Before the push: `local.mjs`
 

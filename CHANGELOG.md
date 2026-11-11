@@ -13,6 +13,15 @@ names the commit's date and the pull request it came from.
 
 ## November 2026
 
+- A second lens, off unless a caller turns it on. A caller on a self-hosted runner that passes
+  `second-reviewer-login` gets every head the review approves read once more in the same job, as
+  that account, with a second env file and rubric the host keeps for it, and
+  `redline-post-verdict.yml` posts that verdict with the `second-reviewer-token` secret. The
+  second lens has its own artifact (`redline-verdict-second`), history and round cap, never
+  changes the job's result, and approves a pull request that only moves pins without a model call
+  once every commit it pins is on `ci-repo`'s main. With it a ruleset can require two approving
+  reviews. Callers that pass nothing new run exactly as before. See "A second lens" in
+  `scripts/redline/README.md`.
 - A fallback stays inside the reviewer's model family. A review whose model was parked or
   unroutable continued on `REDLINE_FALLBACK_MODEL` whatever that model was, so a host that read on
   one vendor's models could have a review finished by another vendor's without anyone choosing
