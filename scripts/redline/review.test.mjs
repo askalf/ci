@@ -637,6 +637,19 @@ console.log('\n  captured data (redline-protected)');
   check('429 and 5xx from the model are retried with backoff', r.verdict === 'APPROVE' && calls.sleeps === 2);
 }
 {
+  const f = reviewModule.modelFamily;
+  const same = reviewModule.sameModelFamily;
+  check('modelFamily names the vendor family of a listed id, whatever its case, date or effort suffix',
+    f('claude-fable-5-1') === 'claude' && f(' Claude-Opus-5-5-20261001 ') === 'claude' && f('gpt-5.6-terra') === 'gpt' && f('gpt-6-astra:high') === 'gpt'
+      && f('chatgpt-5') === 'gpt' && f('codex-2') === 'gpt' && f('o3') === 'gpt' && f('o4-mini') === 'gpt' && f('o3:high') === 'gpt');
+  check('an unlisted id is its leading run of letters and digits, and a provider path is not part of the family',
+    f('gemini-3-pro') === 'gemini' && f('opus') === 'opus' && f('o3x-1') === 'o3x' && f('m') === 'm' && f('vendor/claude-opus-5-5') === 'claude' && f('a/b/gpt-6-astra') === 'gpt');
+  check('an id that names nothing has no family', f('') === '' && f(null) === '' && f(undefined) === '' && f('vendor/') === '' && f('-x') === '');
+  check('sameModelFamily: one family is the same, two are not, and no family is never the same',
+    same('claude-fable-5-1', 'claude-opus-4-6') && same('gpt-5.6-terra', 'o3') && same('gemini-3-pro', 'gemini-3-flash')
+      && !same('gpt-6-astra', 'claude-opus-5-5') && !same('claude-opus-5-5', 'gpt-6-astra') && !same('', '') && !same('claude-opus-5-5', '') && !same(null, 'claude-opus-5-5'));
+}
+{
   const parked = (retryAfter) => [429, { 'x-dario-upstream-rejection': 'pool_parked', 'retry-after': String(retryAfter) }];
   {
     const { ctx, calls } = world({ modelStatus: [parked(351838)], turns: [submit(APPROVE)] });
@@ -670,17 +683,54 @@ console.log('\n  captured data (redline-protected)');
     check('with no fallback a park fails the run at once', e instanceof reviewModule.ModelParked && calls.model.length === 1 && calls.sleeps === 0);
   }
   {
+    const { ctx, calls } = world({ modelStatus: [parked(351838)], turns: [submit(APPROVE)] });
+    ctx.model = 'gpt-5.6-terra'; ctx.fallbackModel = 'claude-opus-5-5';
+    const lines = [];
+    ctx.log = (l) => lines.push(l);
+    const e = await throws(() => runReview(ctx));
+    check('a parked model does not hand the review to a fallback of another family: the run fails on the one call',
+      e instanceof reviewModule.ModelParked && calls.model.map((b) => b.model).join() === 'gpt-5.6-terra' && calls.sleeps === 0 && calls.posted.length === 0);
+    check('the refusal is logged with the park',
+      lines.some((l) => l.includes('gpt-5.6-terra is parked in dario for 351838s; the fallback claude-opus-5-5 is of another model family, so it is not used and the review stops'))
+        && !lines.some((l) => l.includes('the review continues on')));
+  }
+  {
+    const { ctx, calls } = world({ modelStatus: [parked(351838)], turns: [submit(APPROVE)] });
+    ctx.model = 'claude-fable-5-1'; ctx.fallbackModel = 'gpt-6-astra';
+    const e = await throws(() => runReview(ctx));
+    check('the rule holds the other way round: a parked Claude model does not fall back to a GPT one',
+      e instanceof reviewModule.ModelParked && calls.model.map((b) => b.model).join() === 'claude-fable-5-1' && calls.posted.length === 0);
+  }
+  {
+    const { ctx, calls } = world({ modelStatus: [parked(351838)], turns: [submit(APPROVE)] });
+    ctx.model = 'gpt-5.6-terra'; ctx.fallbackModel = 'gpt-6-astra';
+    const r = await runReview(ctx);
+    check('a fallback of the parked model\'s own family is used, whatever the family',
+      r.verdict === 'APPROVE' && calls.sleeps === 0 && calls.model.map((b) => b.model).join() === 'gpt-5.6-terra,gpt-6-astra');
+  }
+  {
     const unroutable = [400, { 'x-dario-upstream-rejection': 'model_unroutable' }];
+    {
+      const { ctx, calls } = world({ modelStatus: [200, unroutable], turns: [use('redline_list', {}), submit(APPROVE)] });
+      ctx.model = 'gpt-6-astra'; ctx.fallbackModel = 'gpt-5.6-terra';
+      const lines = [];
+      ctx.log = (l) => lines.push(l);
+      const r = await runReview(ctx);
+      check('a model dario stops listing mid-review is not retried: the turn goes again on the fallback',
+        r.verdict === 'APPROVE' && calls.sleeps === 0 && calls.model.map((b) => b.model).join() === 'gpt-6-astra,gpt-6-astra,gpt-5.6-terra'
+          && JSON.stringify(calls.model[2].messages) === JSON.stringify(calls.model[1].messages));
+      check('the switch is logged with the reason', lines.some((l) => l.includes('no provider in dario lists gpt-6-astra; the review continues on gpt-5.6-terra')));
+    }
     {
       const { ctx, calls } = world({ modelStatus: [200, unroutable], turns: [use('redline_list', {}), submit(APPROVE)] });
       ctx.model = 'gpt-6-astra'; ctx.fallbackModel = 'claude-opus-5-5';
       const lines = [];
       ctx.log = (l) => lines.push(l);
-      const r = await runReview(ctx);
-      check('a model dario stops listing mid-review is not retried: the turn goes again on the fallback',
-        r.verdict === 'APPROVE' && calls.sleeps === 0 && calls.model.map((b) => b.model).join() === 'gpt-6-astra,gpt-6-astra,claude-opus-5-5'
-          && JSON.stringify(calls.model[2].messages) === JSON.stringify(calls.model[1].messages));
-      check('the switch is logged with the reason', lines.some((l) => l.includes('no provider in dario lists gpt-6-astra; the review continues on claude-opus-5-5')));
+      const e = await throws(() => runReview(ctx));
+      check('an unroutable model does not hand the review to a fallback of another family either',
+        e instanceof reviewModule.ModelUnroutable && calls.model.map((b) => b.model).join() === 'gpt-6-astra,gpt-6-astra' && calls.sleeps === 0 && calls.posted.length === 0);
+      check('the refusal is logged with the reason',
+        lines.some((l) => l.includes('no provider in dario lists gpt-6-astra; the fallback claude-opus-5-5 is of another model family, so it is not used and the review stops')));
     }
     {
       const { ctx, calls } = world({ modelStatus: [unroutable], turns: [submit(APPROVE)] });

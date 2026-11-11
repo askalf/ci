@@ -95,6 +95,11 @@ jobs:
 The endpoint defaults to `https://api.anthropic.com`; pass `model-url` for another one that
 answers the Anthropic Messages API.
 
+Choose the model by who writes your pull requests. If a coding agent writes them, a model from
+another vendor is the stronger reviewer, since one of the author's own family tends to share its
+blind spots; `model-url` takes any endpoint that serves such a model over the Anthropic Messages
+API. Hosted mode sets no fallback model, so a review is never read on a model you did not name.
+
 ## 4. `.github/workflows/redline-post.yml`
 
 The same `<sha>`, the same `reviewer-login` and the same `dispatch-actor` as above.

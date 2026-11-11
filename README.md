@@ -15,11 +15,15 @@ On our hosts, routine and deep reviews run on OpenAI models through a ChatGPT su
 `REDLINE_MODEL=gpt-5.6-terra` reads routine pull requests and `REDLINE_DEEP_MODEL=gpt-6-astra` reads
 large or sensitive ones. Two paths have their own settings: a pull request that only moves Redline
 pins is read on `REDLINE_PIN_MODEL`, and a review whose model the endpoint has parked or cannot
-route moves to `REDLINE_FALLBACK_MODEL` (any other model error fails the review). When a setting is
-unset, the default in
-[`scripts/redline/review.mjs`](scripts/redline/review.mjs) applies: `claude-fable-5-1` for
-`REDLINE_MODEL`, and `claude-opus-5-5` for the pin and fallback models, so those two paths run on
-Claude unless a host sets them.
+route moves to `REDLINE_FALLBACK_MODEL` when that is a model of the same family (any other model
+error fails the review). A fallback of another family is never used. Which family reads a repository
+is a choice: where a coding agent writes the pull requests, another vendor's model reads them, so
+the reviewer does not share the author's blind spots. A parked model does not undo that choice: the
+review fails, and a new run reads the pull request once its model is back. When a setting is unset,
+the default in [`scripts/redline/review.mjs`](scripts/redline/review.mjs) applies: `claude-fable-5-1` for
+`REDLINE_MODEL`, and `claude-opus-5-5` for the pin and fallback models. So a pull request that only
+moves pins is read on Claude unless a host sets another model, and a host that reads on another
+family has no fallback until it names one of that family.
 
 **Who this is for.** The askalf repositories call it today. Another repository can call the review
 on a GitHub-hosted runner with a model API key and a rubric of its own, and no runner host

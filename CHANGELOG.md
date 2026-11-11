@@ -13,6 +13,14 @@ names the commit's date and the pull request it came from.
 
 ## November 2026
 
+- A fallback stays inside the reviewer's model family. A review whose model was parked or
+  unroutable continued on `REDLINE_FALLBACK_MODEL` whatever that model was, so a host that read on
+  one vendor's models could have a review finished by another vendor's without anyone choosing
+  that. `review.mjs` now uses the fallback only when it is of the stopped model's family
+  (`modelFamily`: `claude`, `gpt`, or an unlisted id's leading name); otherwise the run logs why
+  and fails, as it does with no fallback. A host that reads on a family other than Claude sets
+  `REDLINE_FALLBACK_MODEL` to a model of that family: the default, `claude-opus-5-5`, no longer
+  serves it. The hosted quickstart says how to choose the reviewer's family.
 - A starter rubric for hosted mode is public at
   [askalf/redline-rubric](https://github.com/askalf/redline-rubric), linked from the README and
   the hosted quickstart. This repository still ships no prompt.
