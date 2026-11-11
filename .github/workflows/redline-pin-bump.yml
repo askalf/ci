@@ -166,7 +166,7 @@ jobs:
 
       - name: Fetch the pin rewriter and main's history
         if: steps.guard.outputs.ok == 'true'
-        uses: askalf/ci/actions/checkout-with-retry@50ee9df5838810bc23cd202c7da9da64a39e69f2 # main 2026-11-10, askalf/ci#199
+        uses: askalf/ci/actions/checkout-with-retry@19e815912eb0dc85202723bb42c0e76f4786c157 # main 2026-11-11, askalf/ci#205
         with:
           fetch-depth: 0
           # The called workflows too: the bump checks each caller grants what they ask for. The
