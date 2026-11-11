@@ -19,6 +19,17 @@
 # current head and that the PR changes no workflow or action definitions.
 # The PR's code is checked out only to be read by the review's read-only tools; nothing from it runs.
 #
+# A second lens: a caller on a self-hosted runner that passes second-reviewer-login gets a second
+# review of every head the first one approved, in the same job: the same script, read as that
+# account, with the env file and rubric the host keeps for it (second-env-file and
+# second-prompt-file), so a second reader with its own brief, on a model of the host's choosing.
+# Its verdict is uploaded as the redline-verdict-second artifact and posted by the post caller as
+# the second account. The step never changes the job's result, which stays the first review's
+# verdict: a second lens that asks for changes says so in its posted review, and one that could
+# not finish leaves no verdict, which a re-run of the job gives it. A pull request that only moves
+# pins is approved by the second lens without a model call, once every pin is seen to move in
+# place to a commit on ci-repo's main that is ahead of the one it replaces.
+#
 # Dispatch mode: a caller's redline.yml also takes workflow_dispatch, and the ops tick dispatches it on the
 # default branch with the PR, the head to review and whether this is a re-read of a head already
 # reviewed. The run then executes the default branch's workflow files, not the PR's, so its verdict
@@ -125,6 +136,29 @@ on:
         required: false
         default: /etc/askalf/redline-prompt.md
         type: string
+      second-reviewer-login:
+        description: >-
+          Self-hosted runners only. The account of a second lens: set, every head the review
+          approves is read once more in the same job as this account, with second-env-file and
+          second-prompt-file, and the post caller posts that verdict with the account's token.
+          Empty, the default, runs one review as before.
+        required: false
+        default: ''
+        type: string
+      second-env-file:
+        description: >-
+          The host file with the second lens's model endpoint, key and model settings: the same
+          keys as env-file. An absolute path on the runner host. Read only with second-reviewer-login.
+        required: false
+        default: /etc/askalf/redline-second.env
+        type: string
+      second-prompt-file:
+        description: >-
+          The host file with the second lens's rubric. An absolute path on the runner host; it is
+          never committed. Read only with second-reviewer-login.
+        required: false
+        default: /etc/askalf/redline-second-prompt.md
+        type: string
       pr:
         description: Dispatch mode only. The pull request number; empty on pull_request.
         required: false
@@ -171,7 +205,9 @@ jobs:
     # The caller's self-hosted label, or in hosted mode the GitHub runner it names. With neither,
     # the job starts on GitHub's runner only to say so: the runner check below fails it.
     runs-on: ${{ inputs.hosted-runner != '' && inputs.hosted-runner || inputs.runner-label != '' && fromJSON(format('["self-hosted","{0}"]', inputs.runner-label)) || 'ubuntu-latest' }}
-    timeout-minutes: 20
+    # One review ends inside 20 minutes (review.mjs stops itself at 18). With a second lens the job
+    # holds two, and the second has a step timeout of its own.
+    timeout-minutes: ${{ inputs.second-reviewer-login != '' && 40 || 20 }}
     steps:
       # github.job_workflow_sha is not available to expressions (it evaluates empty, and the
       # checkout then falls back to the default branch), so the caller passes the sha it pins as
@@ -241,11 +277,15 @@ jobs:
           MODEL_API_KEY: ${{ secrets.model-api-key }}
           REVIEWER_PROMPT: ${{ secrets.reviewer-prompt }}
           DARIO_LOCK_TOKEN: ${{ secrets.dario-lock-token }}
+          SECOND_REVIEWER_LOGIN: ${{ inputs.second-reviewer-login }}
         run: |
           set -euo pipefail
           fail() { echo "::error::$1"; exit 1; }
           dir="${RUNNER_TEMP}/redline-hosted"
           rm -rf "$dir"
+          if [ -n "$HOSTED_RUNNER" ] && [ -n "$SECOND_REVIEWER_LOGIN" ]; then
+            fail "second-reviewer-login is for a self-hosted runner: the second lens reads its env file and rubric on the runner host, and hosted mode has neither"
+          fi
           if [ -n "$RUNNER_LABEL" ] && [ -n "$HOSTED_RUNNER" ]; then
             fail "pass runner-label (a self-hosted runner) or hosted-runner (a GitHub-hosted one), not both"
           fi
@@ -482,9 +522,52 @@ jobs:
           retention-days: 7
           overwrite: true
 
+      # The second lens: the same script and the same head, read as the second account with the
+      # host's second env file and rubric, only when everything above passed (the review approved,
+      # or found the head already approved). It may fail without failing the job: the job's result
+      # is the first review's verdict, which the post and the ops tick read from the run's
+      # conclusion. Its own timeout keeps a stalled second read from cancelling the job, which
+      # would leave the first verdict unposted.
+      - name: Second lens
+        id: second
+        if: success() && inputs.second-reviewer-login != ''
+        continue-on-error: true
+        timeout-minutes: 19
+        env:
+          REPO: ${{ github.repository }}
+          PR: ${{ inputs.pr || github.event.pull_request.number }}
+          HEAD_SHA: ${{ inputs.head || github.event.pull_request.head.sha }}
+          REDLINE_REREAD: ${{ inputs.pr != '' && inputs.reread && '1' || '0' }}
+          REDLINE_FORK: ${{ steps.pr.outputs.fork == 'true' && '1' || '0' }}
+          CHECKOUT: ${{ github.workspace }}/pr
+          GH_READ_TOKEN: ${{ github.token }}
+          REDLINE_CI_REPO: ${{ inputs.ci-repo }}
+          REDLINE_LENS: second
+          REDLINE_PIN_APPROVAL: '1'
+          REDLINE_REVIEWER_LOGIN: ${{ inputs.second-reviewer-login }}
+          REDLINE_DISPATCH_ACTOR: ${{ inputs.dispatch-actor }}
+          REDLINE_ENV_FILE: ${{ inputs.second-env-file }}
+          REDLINE_PROMPT_FILE: ${{ inputs.second-prompt-file }}
+          REDLINE_VERDICT_FILE: ${{ github.workspace }}/redline-verdict-second/verdict.json
+        run: node .redline/scripts/redline/review.mjs
+
+      # Only when the step ran: a file an earlier job left in the workspace is not this run's.
+      # An upload that fails must not fail the job either: the first verdict is already up, and a
+      # failed job would disagree with its approval and leave it unposted.
+      - name: Upload the second lens's verdict
+        if: always() && steps.second.outcome != 'skipped' && hashFiles('redline-verdict-second/verdict.json') != ''
+        continue-on-error: true
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: redline-verdict-second
+          path: redline-verdict-second/verdict.json
+          if-no-files-found: ignore
+          retention-days: 7
+          overwrite: true
+
       - name: Remove the checkouts
         if: always()
-        run: rm -rf pr .redline redline-verdict "${RUNNER_TEMP}/redline-hosted"
+        run: rm -rf pr .redline redline-verdict redline-verdict-second "${RUNNER_TEMP}/redline-hosted"
 
       # The container goes with its anonymous volume, which held the seats' credentials.
       - name: Stop the dario sidecar

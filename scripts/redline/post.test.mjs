@@ -243,6 +243,18 @@ console.log('\n  the rules');
   check('rule 4 refuses an artifact of another run', r4({ artifact: { runId: 1, headSha: HEAD, expired: false, sizeInBytes: 500 } }).action === 'refuse');
   check('rule 4 refuses a missing artifact', r4({ artifact: null }).action === 'refuse');
   check('rule 4 refuses text that is not JSON', r4({ verdictText: '{' }).action === 'refuse');
+  // The second lens: its verdict never set the run's conclusion, and it reads only an approved head.
+  const asks = verdict({ event: 'REQUEST_CHANGES' });
+  check('rule 4, second lens: an approval and a request are both posted from a run that succeeded',
+    r4({ lens: 'second' }).action === 'post' && r4({ lens: 'second' }, asks).action === 'post' && r4({ lens: 'second' }, asks).review.event === 'REQUEST_CHANGES');
+  check('rule 4, second lens: a run that failed is not one to post, whatever the artifact says',
+    r4({ lens: 'second', run: { ...run, conclusion: 'failure' } }).action === 'skip' && r4({ lens: 'second', run: { ...run, conclusion: 'failure' } }, asks).action === 'skip'
+    && r4({ lens: 'second', run: { ...run, conclusion: 'cancelled' } }).action === 'skip');
+  check('rule 4, second lens: a run with no second artifact is a skip, not a refusal', r4({ lens: 'second', artifact: null }).action === 'skip');
+  check('rule 4, second lens: every other check still refuses',
+    [r4({ lens: 'second' }, verdict({ head_sha: Y })), r4({ lens: 'second' }, verdict({ pr: 6 })), r4({ lens: 'second' }, verdict({ posted: true })),
+      r4({ lens: 'second', artifact: { runId: 1, headSha: HEAD, expired: false, sizeInBytes: 500 } }), r4({ lens: 'second', verdictText: '{' })].every((d) => d.action === 'refuse'));
+  check('rule 4 without a lens is unchanged by it: a request on a successful run is still refused', r4({ lens: '' }, asks).action === 'refuse');
 }
 
 console.log('\n  baseCallerChoice');
@@ -469,6 +481,22 @@ console.log('\n  redline-post-verdict.yml');
   const group = /\n    concurrency:\n      group: (.+)\n      cancel-in-progress: (.+)\n/.exec(job);
   check('the post job waits on the key job', /\n    needs: key\n/.test(job));
   check('a running post is never cancelled', group?.[2].trim() === 'false');
+  {
+    const steps = job.split(/\n      - /).slice(1);
+    const firstAt = steps.findIndex((s) => s.startsWith('name: Post the verdict\n'));
+    const secondAt = steps.findIndex((s) => s.startsWith('name: Post the second lens\'s verdict\n'));
+    const first = steps[firstAt] ?? '';
+    const second = steps[secondAt] ?? '';
+    check('the second verdict is posted after the first, by the same script, only for a caller that names the second account',
+      firstAt >= 0 && secondAt === firstAt + 1 && second.includes('run: node .redline/scripts/redline/post.mjs')
+      && second.includes("\n        if: ${{ !cancelled() && inputs.second-reviewer-login != '' }}\n"));
+    check('it posts as the second account with the second token, and names the lens',
+      ['REDLINE_LENS: second', 'REDLINE_REVIEWER_TOKEN: ${{ secrets.second-reviewer-token }}', 'REDLINE_REVIEWER_LOGIN: ${{ inputs.second-reviewer-login }}']
+        .every((l) => second.includes(`          ${l}\n`)) && !second.includes('secrets.reviewer-token'));
+    check('the first post never sees the second token or the lens', !first.includes('secrets.second-reviewer-token') && !first.includes('inputs.second-reviewer-login') && !first.includes('REDLINE_LENS'));
+    check('the second token is an optional secret and the second login defaults to none',
+      /\n      second-reviewer-token:\n(?:        .*\n)*?        required: false\n/.test(yml) && /\n      second-reviewer-login:\n(?:        .*\n)*?        required: false\n        default: ''\n        type: string\n/.test(yml));
+  }
   check('the group is the repository and the key job\'s head, nothing else',
     group?.[1].trim() === 'redline-post-${{ github.repository }}-${{ needs.key.outputs.head }}');
 
