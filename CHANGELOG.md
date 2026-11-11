@@ -19,8 +19,8 @@ names the commit's date and the pull request it came from.
   `redline-post-verdict.yml` posts that verdict with the `second-reviewer-token` secret. The
   second lens has its own artifact (`redline-verdict-second`), history and round cap, never
   changes the job's result, and approves a pull request that only moves pins without a model call
-  once every commit it pins is on `ci-repo`'s main. With it a ruleset can require two approving
-  reviews. Callers that pass nothing new run exactly as before. See "A second lens" in
+  once every pin is seen to move in place to a commit on `ci-repo`'s main that is ahead of the
+  one it replaces. With it a ruleset can require two approving reviews. Callers that pass nothing new run exactly as before. See "A second lens" in
   `scripts/redline/README.md`.
 - A fallback stays inside the reviewer's model family. A review whose model was parked or
   unroutable continued on `REDLINE_FALLBACK_MODEL` whatever that model was, so a host that read on

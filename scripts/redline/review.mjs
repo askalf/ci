@@ -21,8 +21,9 @@
 // artifact's, so each lens has its own history and its own round cap. Its exit code is not the
 // job's result: the step may fail and the job still reports the first review's verdict. And with
 // REDLINE_PIN_APPROVAL=1 a pull request that only moves pins is approved without a model call once
-// every commit it pins is found on the tooling repository's main (pinApproval): the first review
-// read that head, and what a second reader would check there is exactly that.
+// every pin is seen to move in place, to a commit on the tooling repository's main that is ahead
+// of the one it replaces (pinApproval): the first review read that head, and what a second reader
+// would check there is exactly that.
 //
 // Hardening, each with a reason:
 //   - A verdict already posted at this head is reused, never posted twice (re-runs are free),
@@ -1217,35 +1218,77 @@ export function pinOnly(files) {
   });
 }
 
-/** The commits a change moves its pins to: every full sha on an added line, once each. Pure. */
-export function pinnedShas(files) {
-  const out = new Set();
+// A pin line as pinMoves reads it: what stays (indentation, the workflow or action path, or the
+// redline-ref key and its quote), the commit, and a comment that is free to change.
+const MOVED_PIN_LINE = /^(\s*(?:- )?uses: [\w.-]+\/[\w./-]+@|\s*redline-ref: ['"]?)([0-9a-f]{40})(['"]?)\s*(?:#.*)?$/;
+
+/**
+ * The pins a change moves, as [{ from, to }] in patch order, or null when any changed line is
+ * anything else. Every changed line must be a pin at a full commit sha, and each run of removed
+ * lines must be replaced in place, line for line, by the same lines at another commit: the same
+ * indentation, the same workflow or action path, the same key. So a pin swapped for another
+ * action's, a pin added or deleted, a moved step, a changed comment line and a pin line whose
+ * commit stays the same are all not moves.
+ * pinOnly says which paths count as pins; this says nothing but their commits changed. Pure.
+ */
+export function pinMoves(files) {
+  const moves = [];
   for (const f of files ?? []) {
-    for (const l of String(f?.patch ?? '').split('\n')) {
-      if (!l.startsWith('+') || l.startsWith('+++ ')) continue;
-      for (const m of l.matchAll(/(?<![0-9a-f])[0-9a-f]{40}(?![0-9a-f])/g)) out.add(m[0]);
+    if (f?.status !== 'modified' || typeof f.patch !== 'string') return null;
+    let removed = [];
+    let added = [];
+    const closeRun = () => {
+      const same = added.length === removed.length && added.every((a, i) => a.key === removed[i].key && a.sha !== removed[i].sha);
+      if (same) added.forEach((a, i) => moves.push({ from: removed[i].sha, to: a.sha }));
+      removed = [];
+      added = [];
+      return same;
+    };
+    for (const l of f.patch.split('\n')) {
+      if (l.startsWith('\\')) continue;
+      if (!/^[+-]/.test(l) || /^(\+\+\+|---) /.test(l)) {
+        if (!closeRun()) return null;
+        continue;
+      }
+      const m = MOVED_PIN_LINE.exec(l.slice(1));
+      if (!m) return null;
+      (l[0] === '+' ? added : removed).push({ key: m[1] + m[3], sha: m[2] });
     }
+    if (!closeRun()) return null;
   }
-  return [...out];
+  return moves;
 }
 
 /**
- * Whether a pin-only change can be approved without a model read: it adds at least one pin, and
- * every commit it pins is on the tooling repository's main (the compare of that commit and main
- * says main is ahead of it or identical to it). A pin line names a workflow or action of that
- * repository, so a commit on its main is one that was reviewed and merged there; a sha GitHub can
- * resolve through the repository but that is on no branch of it, such as a fork's, is not. Returns
- * { ok, shas, why }; a failed read is not ok, and the head is then read by the model as any other.
+ * Whether a pin-only change can be approved without a model read. Three things must hold. The
+ * change only moves pins of the tooling repository, each in place (pinOnly and pinMoves). Every
+ * commit it pins is on that repository's main: the compare of the commit and main says main is
+ * ahead of it or identical to it, so it was reviewed and merged there, and a sha GitHub can resolve
+ * through the repository but that is on no branch of it, such as a fork's, is not. And every pin
+ * moves forward: the compare of the commit it replaces and the new one says the new one is ahead,
+ * so a pin taken back to an older commit, which may bring back a defect since fixed, is read.
+ * Returns { ok, shas, why }, shas the commits pinned; a failed read is not ok, and the head is
+ * then read by the model as any other.
  */
 export async function pinApproval(ctx, files) {
-  const shas = pinnedShas(files);
-  if (!pinOnly(files) || shas.length === 0) return { ok: false, shas, why: 'the change is not only pin moves' };
-  for (const sha of shas) {
-    let status = '';
-    try { status = String((await gh(ctx, `/repos/${CI_REPO}/compare/${sha}...main`))?.status ?? ''); } catch (e) {
-      return { ok: false, shas, why: `could not compare ${sha.slice(0, 7)} with ${CI_REPO} main (${e.message})` };
+  const moves = pinOnly(files) ? pinMoves(files) : null;
+  const shas = [...new Set((moves ?? []).map((m) => m.to))];
+  if (!moves || moves.length === 0) return { ok: false, shas, why: 'the change is not only pins moved in place' };
+  const status = async (base, head) => String((await gh(ctx, `/repos/${CI_REPO}/compare/${base}...${head}`))?.status ?? '');
+  try {
+    for (const sha of shas) {
+      const st = await status(sha, 'main');
+      if (st !== 'ahead' && st !== 'identical') return { ok: false, shas, why: `${sha.slice(0, 7)} is not on ${CI_REPO} main (${st || 'no status'})` };
     }
-    if (status !== 'ahead' && status !== 'identical') return { ok: false, shas, why: `${sha.slice(0, 7)} is not on ${CI_REPO} main (${status || 'no status'})` };
+    const seen = new Set();
+    for (const { from, to } of moves) {
+      if (seen.has(`${from} ${to}`)) continue;
+      seen.add(`${from} ${to}`);
+      const st = await status(from, to);
+      if (st !== 'ahead') return { ok: false, shas, why: `${to.slice(0, 7)} is not ahead of ${from.slice(0, 7)}, the commit it replaces (${st || 'no status'})` };
+    }
+  } catch (e) {
+    return { ok: false, shas, why: `could not compare the pinned commits on ${CI_REPO} (${e.message})` };
   }
   return { ok: true, shas, why: '' };
 }
@@ -1254,7 +1297,7 @@ export async function pinApproval(ctx, files) {
 export function renderPinApprovalBody(shas, headSha) {
   const list = shas.map((s) => '`' + s.slice(0, 7) + '`').join(', ');
   return [
-    `${DETERMINISTIC_APPROVAL}.** This pull request only moves pins of ${CI_REPO} workflows and actions, and every commit it pins (${list}) is on ${CI_REPO} main. No model read this head.`,
+    `${DETERMINISTIC_APPROVAL}.** This pull request only moves pins of ${CI_REPO} workflows and actions, each in place. Every commit it pins (${list}) is on ${CI_REPO} main and ahead of the commit it replaces. No model read this head.`,
     `<!-- redline:head=${headSha} -->`,
   ].join('\n\n');
 }
@@ -1528,8 +1571,9 @@ export async function runReview(ctx) {
     return { outcome: 'capped', verdict: 'REQUEST_CHANGES', rounds, cap, body, url: p.html_url, record: record(true) };
   }
 
-  // A second lens set to approve pin moves does so here, with no model call, once every pinned
-  // commit is on the tooling repository's main. Anything short of that is read like any other head.
+  // A second lens set to approve pin moves does so here, with no model call, once every pin is
+  // seen to move in place and forward along the tooling repository's main. Anything short of
+  // that is read like any other head.
   if (ctx.pinApproval && pinOnly(files)) {
     const pins = await pinApproval(ctx, files);
     if (pins.ok) {
@@ -1538,7 +1582,7 @@ export async function runReview(ctx) {
       const given = postedReviews.find((r) => String(r?.user?.login ?? '').toLowerCase() === REVIEWER_LOGIN && r.commit_id === headSha && isDeterministicApproval(r));
       if (given) return { outcome: 'existing', verdict: 'APPROVE', url: given.html_url };
       const body = renderPinApprovalBody(pins.shas, headSha);
-      ctx.log?.(`the PR only moves pins and each pinned commit is on ${CI_REPO} main; approved without a model call`);
+      ctx.log?.(`the PR only moves pins, in place and forward along ${CI_REPO} main; approved without a model call`);
       if (ctx.dryRun) return { outcome: 'dry-run', verdict: 'APPROVE', body };
       const record = (wasPosted) => verdictRecord({ repo, pr: n, headSha, event: 'APPROVE', body, comments: [], posted: wasPosted });
       if (!ctx.reviewToken) return { outcome: 'pin-approved', verdict: 'APPROVE', record: record(false) };

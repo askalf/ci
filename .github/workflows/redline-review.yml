@@ -27,8 +27,8 @@
 # the second account. The step never changes the job's result, which stays the first review's
 # verdict: a second lens that asks for changes says so in its posted review, and one that could
 # not finish leaves no verdict, which a re-run of the job gives it. A pull request that only moves
-# pins is approved by the second lens without a model call, once every commit it pins is on
-# ci-repo's main.
+# pins is approved by the second lens without a model call, once every pin is seen to move in
+# place to a commit on ci-repo's main that is ahead of the one it replaces.
 #
 # Dispatch mode: a caller's redline.yml also takes workflow_dispatch, and the ops tick dispatches it on the
 # default branch with the PR, the head to review and whether this is a re-read of a head already
@@ -552,8 +552,11 @@ jobs:
         run: node .redline/scripts/redline/review.mjs
 
       # Only when the step ran: a file an earlier job left in the workspace is not this run's.
+      # An upload that fails must not fail the job either: the first verdict is already up, and a
+      # failed job would disagree with its approval and leave it unposted.
       - name: Upload the second lens's verdict
         if: always() && steps.second.outcome != 'skipped' && hashFiles('redline-verdict-second/verdict.json') != ''
+        continue-on-error: true
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: redline-verdict-second

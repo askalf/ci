@@ -89,10 +89,12 @@ narrower rubric, or both.
 - It never changes the job's result, which stays the first review's verdict. A second lens that
   asks for changes says so in its posted review; one that could not finish leaves no verdict, and
   a re-run of the job gives the head one.
-- A pull request that only moves pins is approved without a model call once every commit it pins
-  is on `ci-repo`'s main. That approval opens with "Deterministic approval" and says no model
-  read the head. A pin to a commit that is not on main, or a compare that cannot be read, sends
-  the head to the model like any other.
+- A pull request that only moves pins is approved without a model call once three things are
+  seen: every changed line is a pin of `ci-repo` replaced in place by the same pin at another
+  commit, every commit it pins is on `ci-repo`'s main, and each is ahead of the commit it
+  replaces. That approval opens with "Deterministic approval" and says no model read the head. A
+  pin swapped for another action's, added, deleted or taken back to an older commit, a commit that
+  is not on main, or a compare that cannot be read, sends the head to the model like any other.
 - Hosted mode has no second lens: it reads host files, and the workflow refuses the input there.
 
 With a second account that has write access, a ruleset can require two approving reviews: the
