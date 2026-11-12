@@ -14,7 +14,9 @@
 // The caller says so, with the action's same-on-pull-request input set to true, and with nothing set
 // the answer is always false. It holds when the job's steps, their commands and their inputs do not
 // depend on the event: no step or command that runs only on push, no matrix that a push widens, no
-// checkout of anything but the event's own commit. What the rules below can check, they check.
+// checkout of anything but the event's own commit, and nothing after that checkout that moves the
+// tests onto other files (a branch switch, a reset, a second checkout). What the rules below can
+// check, they check; the rest is the caller's word.
 //
 // The rule, all of it read from the GitHub API with the job's own token:
 //   0. The caller declared the job the same on push and on pull request (above).
@@ -31,14 +33,17 @@
 //      of this run has, and exactly one job of that run has it. A job the push runs and the pull
 //      request did not is not there, and two jobs under one display name (a matrix whose entries
 //      share a name) cannot be told apart, so neither is taken.
-//   6. That job's log shows what its tests ran on. It has exactly one actions/checkout step, and
-//      exactly one "HEAD is now at" line in the whole log (git prints one for every checkout,
-//      switch or hard reset, so a later one, or a test that prints one, makes two), and that line
-//      is inside the checkout step and reads "Merge <head> into <base>": GitHub's merge of the pull
-//      request. The head there is the pull request's head, and that base is inside the head by
-//      GitHub's compare. A merge of a base the head already holds is the head's own tree, so the
-//      job tested exactly the pushed tree, whatever branch the pull request pointed at then and
-//      whatever main did after. Anything else, and what was tested is not known.
+//   6. That job's log shows what its checkout made. It has exactly one actions/checkout step, and
+//      exactly one "HEAD is now at" line in the whole log, and that line is inside the checkout
+//      step and reads "Merge <head> into <base>": GitHub's merge of the pull request. The head
+//      there is the pull request's head, and that base is inside the head by GitHub's compare. A
+//      merge of a base the head already holds is the head's own tree, so the checkout was exactly
+//      the pushed tree, whatever branch the pull request pointed at then and whatever main did
+//      after. A second visible "HEAD is now at" line (a later detached checkout or hard reset, or
+//      a test that prints one) is caught. Not everything that moves a checkout prints that line:
+//      a switch to a branch prints "Switched to branch", and a quiet checkout or reset prints
+//      nothing. That the tests ran on what the checkout made is the caller's declaration above,
+//      not something this log can show.
 // Every read that fails, and every rule that does not hold, is tested=false: the job runs in full.
 // Nothing here can turn a red run green; at worst it runs a test it could have skipped.
 //
@@ -153,7 +158,7 @@ export function checkoutMerge(log) {
     if (HEAD_LINE.test(line)) heads.push({ line, step });
   }
   if (checkouts !== 1) return { why: `the job has ${checkouts} actions/checkout steps, not one` };
-  if (heads.length !== 1) return { why: `the log has ${heads.length} "HEAD is now at" lines, not one, so a later checkout, switch or reset may have moved what the tests ran on` };
+  if (heads.length !== 1) return { why: `the log has ${heads.length} "HEAD is now at" lines, not one, so something after the checkout may have moved what the tests ran on` };
   if (!CHECKOUT_STEP.test(heads[0].step)) return { why: 'its one "HEAD is now at" line is not in the checkout step' };
   const m = MERGE_LINE.exec(heads[0].line);
   if (!m) return { why: 'the checkout did not check out a pull request merge' };
