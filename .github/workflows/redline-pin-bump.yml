@@ -83,6 +83,7 @@ jobs:
         askalf/sprayberrylabs-site askalf/unscathed-site askalf/airprint-bridge
         askalf/pitlane
         askalf/ci-wizard
+        askalf/redline-rubric
       # A fork's own list (repository variable REDLINE_CALLERS) replaces CALLERS when it is set.
       CALLERS_OVERRIDE: ${{ vars.REDLINE_CALLERS }}
       # The repository whose pins the bump moves: this one, askalf/ci here, a fork in a fork (pin.mjs).
