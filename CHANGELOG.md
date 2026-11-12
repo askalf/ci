@@ -13,6 +13,15 @@ names the commit's date and the pull request it came from.
 
 ## November 2026
 
+- A new action, `actions/tree-tested`: on a push to the default branch it says whether the
+  pull request merged as that commit already passed the same workflow, with every job and every
+  step green, at a head whose tree is the pushed tree byte for byte, and whether the job asking
+  ran there too, with one checkout its log shows was the head merged into a base the head holds. A
+  caller declares the job the same on push and on pull request (`same-on-pull-request: true`) and
+  skips its build and test steps when the action says so. A direct push, a moved main, a skipped
+  or failed job or step, a job the pull request did not run, two checkouts, or a read that fails
+  runs the job in full, as before. Replayed job by job against the last eight pushes of four
+  repositories on 2026-11-12, it would have skipped 75 of 170 runner minutes. The pin bump moves it like the other actions.
 - A second lens, off unless a caller turns it on. A caller on a self-hosted runner that passes
   `second-reviewer-login` gets every head the review approves read once more in the same job, as
   that account, with a second env file and rubric the host keeps for it, and

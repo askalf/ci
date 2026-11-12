@@ -12,6 +12,7 @@ const RUNS = [
   ['scripts/fleet-status/fleet-status.test.mjs'],
   ['scripts/fleet-status/check.test.mjs'],
   ['scripts/scorecard-publish/check.test.mjs'],
+  ['scripts/tree-tested/check.test.mjs'],
   ['scripts/redline/pin-bump.test.mjs'],
   // Every fuzz seed through its target, and the helpers that keep a broken contract apart from a refusal.
   ['fuzz/seeds.test.mjs'],

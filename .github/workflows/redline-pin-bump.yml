@@ -6,7 +6,8 @@
 # whichever workflow file it lives: uses: askalf/ci/actions/drift-report@<sha> (a watcher's report
 # step), uses: askalf/ci/actions/checkout-with-retry@<sha> (any job's checkout),
 # uses: askalf/ci/actions/fleet-status@<sha> and fleet-status-check@<sha> (the fleet lanes), and
-# uses: askalf/ci/actions/scorecard-publish-check@<sha> (the check after a Scorecard run).
+# uses: askalf/ci/actions/scorecard-publish-check@<sha> (the check after a Scorecard run), and
+# uses: askalf/ci/actions/tree-tested@<sha> (the skip for a tree a pull request already tested).
 # Each pins by SHA so a change reaches it only through a reviewed bump there; this writes those bumps
 # (scripts/redline/pin.mjs), and each repo's own gate reviews and merges them.
 #
@@ -123,6 +124,9 @@ jobs:
         :(exclude)scripts/scorecard-publish/*.test.mjs
         :(exclude)scripts/scorecard-publish/README.md
         actions/scorecard-publish-check
+        scripts/tree-tested
+        :(exclude)scripts/tree-tested/*.test.mjs
+        actions/tree-tested
         .github/workflows/redline-review.yml
         .github/workflows/redline-fix-run.yml
         .github/workflows/public-text.yml
