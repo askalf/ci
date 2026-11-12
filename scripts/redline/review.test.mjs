@@ -311,7 +311,7 @@ console.log('\n  a fork: ci-repo and reviewer-login');
   const fork = probe({ REDLINE_CI_REPO: 'someone/ci', REDLINE_REVIEWER_LOGIN: 'Fork-Bot' });
   const got = fork.status === 0 ? JSON.parse(fork.stdout) : null;
   check('in a fork every pinned workflow and action is the fork\'s, and the poster trusts the fork alone',
-    got !== null && got.paths.length === 9 && got.paths.every((p) => p.startsWith('someone/ci/')) && JSON.stringify(got.tooling) === '["someone/ci"]' && got.login === 'fork-bot');
+    got !== null && got.paths.length === 10 && got.paths.every((p) => p.startsWith('someone/ci/')) && JSON.stringify(got.tooling) === '["someone/ci"]' && got.login === 'fork-bot');
   const ours = probe({});
   const today = ours.status === 0 ? JSON.parse(ours.stdout) : null;
   check('unset, it is today\'s: askalf/ci, sprayberry-redline, and askalf/askalf still accepted', today !== null && today.paths.every((p) => p.startsWith('askalf/ci/'))

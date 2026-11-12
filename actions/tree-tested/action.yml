@@ -1,0 +1,38 @@
+# Says whether a push to the default branch carries a tree that this workflow already tested green
+# on the pull request that merged it, so the job can skip its build and test steps instead of
+# running them a second time on the same files. The rules are scripts/tree-tested/check.mjs (its
+# header says each one), tested without the network by check.test.mjs.
+#
+# Pinned like the other actions here: a caller names one full commit sha of this repository's main,
+#   - id: tree
+#     uses: askalf/ci/actions/tree-tested@<sha>
+# as an early step of a job, and puts `if: steps.tree.outputs.tested != 'true'` on the steps that
+# install, build and test. On anything but a push to the default branch it answers false without a
+# request. Every read that fails, and every rule that does not hold, answers false too: the job then
+# runs in full, as it did before. The step never fails the job.
+#
+# It checks out nothing and runs on the Node the runner ships. The job's token needs actions: read,
+# contents: read and pull-requests: read, which a workflow's default token has unless its
+# permissions block leaves one out.
+name: Tree tested
+description: Say whether this push's tree already passed this workflow on the pull request that merged it.
+
+inputs:
+  token:
+    description: A token that reads the repository's commits, pull requests and Actions runs.
+    required: false
+    default: ${{ github.token }}
+  default-branch:
+    description: The repository's default branch. A caller passes none.
+    required: false
+    default: ${{ github.event.repository.default_branch }}
+
+outputs:
+  tested:
+    description: "true when this tree already passed this workflow, with every job, at the merged pull request's head; else false."
+  run:
+    description: The run that tested it, when tested is true.
+
+runs:
+  using: node24
+  main: main.mjs

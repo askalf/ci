@@ -217,6 +217,7 @@ full commit sha of `main`, so a change here reaches it only through a reviewed b
 | [`actions/fleet-status`](actions/fleet-status/action.yml) | Posts the `fleet/verify` and `fleet/review` commit statuses a merge waits on; the lane rules are in [scripts/fleet-status/README.md](scripts/fleet-status/README.md). |
 | [`actions/scorecard-publish-check`](actions/scorecard-publish-check/action.yml) | After a Scorecard run: checks that its result reached scorecard.dev, and dispatches Scorecard once more when it did not ([the Scorecard publish check](#the-scorecard-publish-check)). |
 | [`actions/fleet-status-check`](actions/fleet-status-check/action.yml) | Checks a repository's fleet-status workflows, its self-hosted `runs-on` labels and its review relay, as that repository's self-test job. |
+| [`actions/tree-tested`](actions/tree-tested/action.yml) | On a push to the default branch: says whether the pull request that merged it already passed this workflow, with every job, on exactly this tree, so the job can skip its build and test steps instead of running them twice. Any doubt, or any read that fails, runs the job in full. |
 
 | This repository's own | What it does |
 |---|---|
