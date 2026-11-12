@@ -13,6 +13,10 @@ names the commit's date and the pull request it came from.
 
 ## November 2026
 
+- `actions/tree-tested` also requires the pull request's job to have asked for the same runner
+  labels as the job asking. A workflow whose `runs-on` depends on who opened the pull request (a
+  bot's or a fork's pull request on a hosted runner, its push on a self-hosted one) tested on
+  another machine than the push would, so that push runs in full.
 - A new action, `actions/tree-tested`: on a push to the default branch it says whether the
   pull request merged as that commit already passed the same workflow, with every job and every
   step green, at a head whose tree is the pushed tree byte for byte, and whether the job asking

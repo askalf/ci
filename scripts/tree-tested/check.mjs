@@ -32,7 +32,10 @@
 //   5. This job, the one asking (found in this run by its runner's name), has a name no other job
 //      of this run has, and exactly one job of that run has it. A job the push runs and the pull
 //      request did not is not there, and two jobs under one display name (a matrix whose entries
-//      share a name) cannot be told apart, so neither is taken.
+//      share a name) cannot be told apart, so neither is taken. That job asked for the same runner
+//      labels as this one: a job whose runs-on depends on who opened the pull request (a fork's or
+//      a bot's pull request on a hosted runner, its push on a self-hosted one) tested on another
+//      machine than the push would, and is not taken.
 //   6. That job's log shows what its checkout made. It has exactly one actions/checkout step, and
 //      exactly one "HEAD is now at" line in the whole log, and that line is inside the checkout
 //      step and reads "Merge <head> into <base>": GitHub's merge of the pull request. The head
@@ -135,6 +138,21 @@ export const MAX_LOG_BYTES = 32 * 1024 * 1024;
 export function thisJob(jobs, runnerName) {
   const mine = (Array.isArray(jobs) ? jobs : []).filter((j) => j?.status === 'in_progress' && j?.runner_name === runnerName);
   return mine.length === 1 ? mine[0] : null;
+}
+
+/** The runner labels a job asked for (its runs-on), lower case and sorted, or null when none are listed. */
+const labelsOf = (j) => (Array.isArray(j?.labels) && j.labels.length
+  ? [...new Set(j.labels.map((l) => String(l).toLowerCase()))].sort() : null);
+
+/**
+ * Why the pull request's job ran on another kind of runner than the job asking, or ''. Labels are
+ * compared as a set, ignoring case, as GitHub matches them. Pure.
+ */
+export function runnerProblem(me, twin) {
+  const mine = labelsOf(me), theirs = labelsOf(twin);
+  if (!mine || !theirs) return `the runner labels of "${me?.name ?? '?'}" are not listed for both runs`;
+  if (mine.join('\n') !== theirs.join('\n')) return `"${me?.name ?? '?'}" there ran on [${theirs.join(', ')}], this job on [${mine.join(', ')}]: another machine`;
+  return '';
 }
 
 const STEP_START = /##\[group\]Run (.*)$/;
@@ -243,6 +261,8 @@ export async function decide(env, io = { fetch: globalThis.fetch }) {
     if (namesakes !== 1) return { tested: false, why: `${namesakes} jobs of this run are named "${me.name}", so the one the pull request ran cannot be told apart` };
     const twins = theirs.jobs.filter((j) => j?.name === me.name);
     if (twins.length !== 1) return { tested: false, why: `the job "${me.name}" is ${twins.length ? 'not one job' : 'not a job'} in ${run.html_url ?? run.id}: the pull request did not run it` };
+    const elsewhere = runnerProblem(me, twins[0]);
+    if (elsewhere) return { tested: false, why: `${elsewhere} (${run.html_url ?? run.id})` };
     // What that job checked out.
     const seen = checkoutMerge(await getLog(io, env, f.repo, twins[0].id));
     if (seen.why) return { tested: false, why: `in the log of "${me.name}" there, ${seen.why}; what it tested is not known` };
