@@ -13,6 +13,10 @@ names the commit's date and the pull request it came from.
 
 ## November 2026
 
+- The pin bump moves `askalf/redline-rubric` too: it is the twentieth repository in `CALLERS`
+  in `redline-pin-bump.yml`, since the rubric is reviewed on the runner host like the others and
+  the `askalf-pin-bump` App is installed there. Its review, public-text and post callers are bumped
+  with each wave.
 - `actions/tree-tested` also requires the pull request's job to have asked for the same runner
   labels as the job asking. A workflow whose `runs-on` depends on who opened the pull request (a
   bot's or a fork's pull request on a hosted runner, its push on a self-hosted one) tested on
