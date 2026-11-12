@@ -4,7 +4,7 @@
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { factsOf, notEligible, mergedAs, runAtHead, jobsProblem, contains, thisJob, checkoutMerge, decide, main } from './check.mjs';
+import { factsOf, notEligible, mergedAs, runAtHead, jobsProblem, contains, thisJob, runnerProblem, checkoutMerge, decide, main } from './check.mjs';
 
 let pass = 0;
 let fail = 0;
@@ -30,8 +30,9 @@ const pr = (o = {}) => ({ number: 7, merged_at: '2026-11-12T00:00:00Z', merge_co
 const run = (o = {}) => ({ id: 900, event: 'pull_request', status: 'completed', conclusion: 'success', head_sha: HEAD, created_at: '2026-11-11T23:00:00Z', html_url: 'https://x/run/900', pull_requests: [], ...o });
 const step = (name, conclusion = 'success') => ({ name, conclusion, status: 'completed' });
 let jobIds = 1000;
-const job = (name, conclusion = 'success', steps = [step('Set up job'), step('Test'), step('Complete job')]) => ({ id: jobIds++, name, conclusion, status: 'completed', steps });
-const mine = (name, runner = 'pool-e3') => ({ id: 1, name, status: 'in_progress', runner_name: runner });
+const LABELS = ['self-hosted', 'pool-exec'];
+const job = (name, conclusion = 'success', steps = [step('Set up job'), step('Test'), step('Complete job')], labels = LABELS) => ({ id: jobIds++, name, conclusion, status: 'completed', steps, labels });
+const mine = (name, runner = 'pool-e3', labels = LABELS) => ({ id: 1, name, status: 'in_progress', runner_name: runner, labels });
 // A job log as GitHub writes it: each step opens with "##[group]Run <step>".
 const T = '2026-11-12T02:58:14.1195074Z ';
 const checkoutStep = (head = HEAD, base = BASE) => [`${T}##[group]Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1`, `${T}with:`, `${T}##[endgroup]`,
@@ -104,6 +105,12 @@ console.log('\n  the pure rules');
   check('this job is the one in progress on this runner, and only when there is one',
     thisJob([mine('a', 'other'), mine('b'), { name: 'c', status: 'queued', runner_name: 'pool-e3' }], 'pool-e3')?.name === 'b'
       && thisJob([mine('a'), mine('b')], 'pool-e3') === null && thisJob([], 'pool-e3') === null);
+  check('the same runner labels, in any order or case, are the same runner',
+    runnerProblem(mine('a'), job('a', 'success', undefined, ['POOL-EXEC', 'self-hosted', 'pool-exec'])) === '');
+  check('a hosted runner there and a self-hosted one here are not',
+    /ran on \[ubuntu-latest\], this job on \[pool-exec, self-hosted\]: another machine/.test(runnerProblem(mine('a'), job('a', 'success', undefined, ['ubuntu-latest']))));
+  check('a job with no labels listed, on either side, is not taken',
+    /not listed for both runs/.test(runnerProblem(mine('a', 'pool-e3', []), job('a'))) && /not listed for both runs/.test(runnerProblem(mine('a'), { name: 'a' })));
   check('the merge the one checkout made is read from its step', JSON.stringify(checkoutMerge(checkoutLog())) === JSON.stringify({ head: HEAD, base: BASE }));
   const lines = (...parts) => parts.flat().join('\n');
   // A merge checkout, then a step that checks out an older ordinary commit before the tests.
@@ -148,6 +155,9 @@ for (const [name, over, re, envOver] of [
   ['two jobs of this run share the display name of the job asking (a wider push matrix under name: test)',
     { [`/repos/${REPO}/actions/runs/${RUN_ID}/jobs`]: { total_count: 2, jobs: [mine('unit'), { id: 3, name: 'unit', status: 'queued' }] } }, /2 jobs of this run are named "unit"/],
   ['the caller has not declared the job the same on push', {}, /has not declared/, { SAME_ON_PULL_REQUEST: '' }],
+  // A bot's or a fork's pull request runs on a hosted runner; the push after it runs on ours.
+  ['the pull request\'s job ran on another runner than this push does',
+    { [`/repos/${REPO}/actions/runs/900/jobs`]: { total_count: 2, jobs: [job('unit', 'success', undefined, ['ubuntu-latest']), job('e2e')] } }, /"unit" there ran on \[ubuntu-latest\], this job on \[pool-exec, self-hosted\]/],
   ['the log shows a merge of another head', { LOG: { text: checkoutLog(OTHER, BASE) } }, /merge of ddddddd, not of #7's head/],
   // Tested against a release branch, then retargeted to main with no new run: the base it merged
   // is not in the head, so the job tested the head plus that branch, not the pushed tree.
