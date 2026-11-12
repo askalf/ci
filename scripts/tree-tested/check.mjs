@@ -9,7 +9,15 @@
 // was about 300 of a day's CPU-heavy runner minutes (restore-desk, claude-re, platform, dario), on a
 // host whose runner slice was waiting on CPU a quarter of the time.
 //
+// The caller's declaration. GitHub does not record what a job's steps did with their inputs, so the
+// one thing this cannot read is whether a job runs the same commands on a push as on a pull request.
+// The caller says so, with the action's same-on-pull-request input set to true, and with nothing set
+// the answer is always false. It holds when the job's steps, their commands and their inputs do not
+// depend on the event: no step or command that runs only on push, no matrix that a push widens, no
+// checkout of anything but the event's own commit. What the rules below can check, they check.
+//
 // The rule, all of it read from the GitHub API with the job's own token:
+//   0. The caller declared the job the same on push and on pull request (above).
 //   1. The event is a push to the default branch. Anything else is tested=false.
 //   2. A pull request of this repository was merged as this commit (its merge_commit_sha is the
 //      pushed sha). A direct push has none, and is tested=false.
@@ -19,16 +27,18 @@
 //      on its latest attempt, and every job in it, and every step of every job, concluded success,
 //      all pages of them. A job or a step that was skipped did not test anything (a step that runs
 //      only on push, a job a change did not need), so a run with one is not taken.
-//   5. This job, the one asking (found in this run by its runner's name), has the name of a job in
-//      that run. A job the push runs and the pull request did not, such as a matrix entry only a
-//      push expands, is never in that run, so it runs in full. Steps that run only on push are a
-//      skipped step there, which rule 4 does not take.
-//   6. That job's log shows what it checked out: GitHub's merge of the head into the base, written
-//      by the checkout as "Merge <head> into <base>". The head there is the pull request's head,
-//      and that base is inside the head by GitHub's compare. A merge of a base the head already
-//      holds is the head's own tree, so the job tested exactly the pushed tree, whatever branch
-//      the pull request pointed at then and whatever main did after. With no such line, or more
-//      than one, what was tested is not known.
+//   5. This job, the one asking (found in this run by its runner's name), has a name no other job
+//      of this run has, and exactly one job of that run has it. A job the push runs and the pull
+//      request did not is not there, and two jobs under one display name (a matrix whose entries
+//      share a name) cannot be told apart, so neither is taken.
+//   6. That job's log shows what its tests ran on. It has exactly one actions/checkout step, and
+//      exactly one "HEAD is now at" line in the whole log (git prints one for every checkout,
+//      switch or hard reset, so a later one, or a test that prints one, makes two), and that line
+//      is inside the checkout step and reads "Merge <head> into <base>": GitHub's merge of the pull
+//      request. The head there is the pull request's head, and that base is inside the head by
+//      GitHub's compare. A merge of a base the head already holds is the head's own tree, so the
+//      job tested exactly the pushed tree, whatever branch the pull request pointed at then and
+//      whatever main did after. Anything else, and what was tested is not known.
 // Every read that fails, and every rule that does not hold, is tested=false: the job runs in full.
 // Nothing here can turn a red run green; at worst it runs a test it could have skipped.
 //
@@ -56,11 +66,13 @@ export function factsOf(env) {
     defaultBranch: text('DEFAULT_BRANCH'),
     runId: text('GITHUB_RUN_ID'),
     runnerName: text('RUNNER_NAME'),
+    declared: text('SAME_ON_PULL_REQUEST'),
   };
 }
 
 /** Why this run is not one to look up at all, or '' when it is. Pure. */
 export function notEligible(f) {
+  if (f.declared !== 'true') return 'the caller has not declared this job the same on a push as on a pull request (same-on-pull-request: true)';
   if (!REPO_RE.test(f.repo)) return `GITHUB_REPOSITORY is not owner/name (${JSON.stringify(f.repo)})`;
   if (f.event !== 'push') return `a ${f.event || 'run with no event'} is tested in full`;
   if (!f.defaultBranch || f.ref !== `refs/heads/${f.defaultBranch}`) return `a push to ${f.ref || 'no ref'} is tested in full; only a push to the default branch repeats a pull request's run`;
@@ -120,12 +132,32 @@ export function thisJob(jobs, runnerName) {
   return mine.length === 1 ? mine[0] : null;
 }
 
-const MERGE_LINE = /HEAD is now at [0-9a-f]{7,40} Merge ([0-9a-f]{40}) into ([0-9a-f]{40})/g;
-/** The merges a job's log says it checked out, as { head, base }, once each. Pure. */
-export function mergesIn(log) {
-  const seen = new Map();
-  for (const m of String(log ?? '').matchAll(MERGE_LINE)) seen.set(`${m[1]} ${m[2]}`, { head: m[1], base: m[2] });
-  return [...seen.values()];
+const STEP_START = /##\[group\]Run (.*)$/;
+const CHECKOUT_STEP = /^actions\/checkout@/;
+const HEAD_LINE = /HEAD is now at [0-9a-f]{7,40} /;
+const MERGE_LINE = /HEAD is now at [0-9a-f]{7,40} Merge ([0-9a-f]{40}) into ([0-9a-f]{40})\s*$/;
+/**
+ * What a job's log shows its tests ran on: { head, base } of the pull request merge its one
+ * checkout made, or { why }. The log is cut into steps at each "##[group]Run <step>" line; there
+ * must be exactly one actions/checkout step, exactly one "HEAD is now at" line in the whole log,
+ * and that line inside the checkout step, naming a merge. Pure.
+ */
+export function checkoutMerge(log) {
+  const lines = String(log ?? '').split(/\r?\n/);
+  let step = '';
+  let checkouts = 0;
+  const heads = [];
+  for (const line of lines) {
+    const s = STEP_START.exec(line);
+    if (s) { step = s[1].trim(); if (CHECKOUT_STEP.test(step)) checkouts++; continue; }
+    if (HEAD_LINE.test(line)) heads.push({ line, step });
+  }
+  if (checkouts !== 1) return { why: `the job has ${checkouts} actions/checkout steps, not one` };
+  if (heads.length !== 1) return { why: `the log has ${heads.length} "HEAD is now at" lines, not one, so a later checkout, switch or reset may have moved what the tests ran on` };
+  if (!CHECKOUT_STEP.test(heads[0].step)) return { why: 'its one "HEAD is now at" line is not in the checkout step' };
+  const m = MERGE_LINE.exec(heads[0].line);
+  if (!m) return { why: 'the checkout did not check out a pull request merge' };
+  return { head: m[1], base: m[2] };
 }
 
 /** GET from the API as the token. Throws on a status that is not 2xx. */
@@ -202,12 +234,14 @@ export async function decide(env, io = { fetch: globalThis.fetch }) {
     if (ours.why) return { tested: false, why: ours.why };
     const me = thisJob(ours.jobs, f.runnerName);
     if (!me) return { tested: false, why: `this job was not found in run ${f.runId} by its runner ${f.runnerName}` };
+    const namesakes = ours.jobs.filter((j) => j?.name === me.name).length;
+    if (namesakes !== 1) return { tested: false, why: `${namesakes} jobs of this run are named "${me.name}", so the one the pull request ran cannot be told apart` };
     const twins = theirs.jobs.filter((j) => j?.name === me.name);
     if (twins.length !== 1) return { tested: false, why: `the job "${me.name}" is ${twins.length ? 'not one job' : 'not a job'} in ${run.html_url ?? run.id}: the pull request did not run it` };
     // What that job checked out.
-    const merges = mergesIn(await getLog(io, env, f.repo, twins[0].id));
-    if (merges.length !== 1) return { tested: false, why: `the log of "${me.name}" there shows ${merges.length ? 'more than one merge' : 'no merge'} checked out, so what it tested is not known` };
-    const { head: tHead, base: tBase } = merges[0];
+    const seen = checkoutMerge(await getLog(io, env, f.repo, twins[0].id));
+    if (seen.why) return { tested: false, why: `in the log of "${me.name}" there, ${seen.why}; what it tested is not known` };
+    const { head: tHead, base: tBase } = seen;
     if (tHead !== head) return { tested: false, why: `"${me.name}" there checked out a merge of ${tHead.slice(0, 7)}, not of #${pr.number}'s head ${head.slice(0, 7)}` };
     const cmp = await get(io, env, `/repos/${f.repo}/compare/${tBase}...${head}`);
     if (!contains(cmp)) {

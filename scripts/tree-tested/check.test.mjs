@@ -4,7 +4,7 @@
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { factsOf, notEligible, mergedAs, runAtHead, jobsProblem, contains, thisJob, mergesIn, decide, main } from './check.mjs';
+import { factsOf, notEligible, mergedAs, runAtHead, jobsProblem, contains, thisJob, checkoutMerge, decide, main } from './check.mjs';
 
 let pass = 0;
 let fail = 0;
@@ -24,7 +24,7 @@ const RUN_ID = '555';
 const env = (o = {}) => ({
   GITHUB_REPOSITORY: REPO, GITHUB_EVENT_NAME: 'push', GITHUB_REF: 'refs/heads/main', GITHUB_SHA: SHA,
   GITHUB_WORKFLOW_REF: `${REPO}/.github/workflows/ci.yml@refs/heads/main`, DEFAULT_BRANCH: 'main', GITHUB_TOKEN: 't',
-  GITHUB_RUN_ID: RUN_ID, RUNNER_NAME: 'pool-e3', ...o,
+  GITHUB_RUN_ID: RUN_ID, RUNNER_NAME: 'pool-e3', SAME_ON_PULL_REQUEST: 'true', ...o,
 });
 const pr = (o = {}) => ({ number: 7, merged_at: '2026-11-12T00:00:00Z', merge_commit_sha: SHA, base: { repo: { full_name: REPO } }, head: { sha: HEAD }, ...o });
 const run = (o = {}) => ({ id: 900, event: 'pull_request', status: 'completed', conclusion: 'success', head_sha: HEAD, created_at: '2026-11-11T23:00:00Z', html_url: 'https://x/run/900', pull_requests: [], ...o });
@@ -32,7 +32,12 @@ const step = (name, conclusion = 'success') => ({ name, conclusion, status: 'com
 let jobIds = 1000;
 const job = (name, conclusion = 'success', steps = [step('Set up job'), step('Test'), step('Complete job')]) => ({ id: jobIds++, name, conclusion, status: 'completed', steps });
 const mine = (name, runner = 'pool-e3') => ({ id: 1, name, status: 'in_progress', runner_name: runner });
-const checkoutLog = (head = HEAD, base = BASE) => `2026-11-12T02:58:14Z Fetching the repository\n2026-11-12T02:58:14Z HEAD is now at 25a09da Merge ${head} into ${base}\n2026-11-12T02:58:20Z tests pass\n`;
+// A job log as GitHub writes it: each step opens with "##[group]Run <step>".
+const T = '2026-11-12T02:58:14.1195074Z ';
+const checkoutStep = (head = HEAD, base = BASE) => [`${T}##[group]Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1`, `${T}with:`, `${T}##[endgroup]`,
+  `${T}##[group]Checking out the ref`, `${T}HEAD is now at 25a09da Merge ${head} into ${base}`, `${T}##[endgroup]`];
+const testStep = (out = 'tests pass') => [`${T}##[group]Run npm test`, `${T}npm test`, `${T}##[endgroup]`, `${T}${out}`];
+const checkoutLog = (head = HEAD, base = BASE) => [`${T}##[group]Run askalf/ci/actions/checkout-with-retry@${'1'.repeat(40)}`, `${T}##[endgroup]`, ...checkoutStep(head, base), ...testStep()].join('\n') + '\n';
 
 /** A fake GitHub. routes: path (no query) -> body, an HTTP status, text, or a function of the url. */
 function world(over = {}) {
@@ -66,7 +71,9 @@ function world(over = {}) {
 console.log('\n  the facts and who is looked up');
 {
   const f = factsOf(env());
-  check('the workflow file, run id and runner are read from the environment', f.workflowFile === 'ci.yml' && f.sha === SHA && f.runId === RUN_ID && f.runnerName === 'pool-e3');
+  check('the workflow file, run id, runner and the caller\'s word are read from the environment', f.workflowFile === 'ci.yml' && f.sha === SHA && f.runId === RUN_ID && f.runnerName === 'pool-e3' && f.declared === 'true');
+  check('without the caller\'s word that the job is the same on push, nothing is skipped',
+    ['', 'false', 'yes', 'TRUE'].every((v) => /has not declared this job the same/.test(notEligible(factsOf(env({ SAME_ON_PULL_REQUEST: v }))))));
   check('a push to the default branch is eligible', notEligible(f) === '');
   check('a pull request run is tested in full', /tested in full/.test(notEligible(factsOf(env({ GITHUB_EVENT_NAME: 'pull_request' })))));
   check('a push to another branch is tested in full', /only a push to the default branch/.test(notEligible(factsOf(env({ GITHUB_REF: 'refs/heads/feature' })))));
@@ -97,8 +104,17 @@ console.log('\n  the pure rules');
   check('this job is the one in progress on this runner, and only when there is one',
     thisJob([mine('a', 'other'), mine('b'), { name: 'c', status: 'queued', runner_name: 'pool-e3' }], 'pool-e3')?.name === 'b'
       && thisJob([mine('a'), mine('b')], 'pool-e3') === null && thisJob([], 'pool-e3') === null);
-  check('the merges a checkout log names are read once each', JSON.stringify(mergesIn(checkoutLog() + checkoutLog())) === JSON.stringify([{ head: HEAD, base: BASE }])
-    && mergesIn('no checkout here').length === 0 && mergesIn(checkoutLog() + checkoutLog(HEAD, RELEASE)).length === 2);
+  check('the merge the one checkout made is read from its step', JSON.stringify(checkoutMerge(checkoutLog())) === JSON.stringify({ head: HEAD, base: BASE }));
+  const lines = (...parts) => parts.flat().join('\n');
+  // A merge checkout, then a step that checks out an older ordinary commit before the tests.
+  check('a later checkout of another commit, even by hand, is caught: two "HEAD is now at" lines',
+    /2 "HEAD is now at" lines/.test(checkoutMerge(lines(checkoutStep(), [`${T}##[group]Run git checkout ${OTHER}`, `${T}##[endgroup]`, `${T}HEAD is now at ddddddd an older commit`], testStep())).why));
+  check('a second actions/checkout step is not taken', /2 actions\/checkout steps/.test(checkoutMerge(lines(checkoutStep(), checkoutStep(), testStep())).why));
+  check('a merge line printed by a test, outside the checkout, is not taken',
+    /not in the checkout step/.test(checkoutMerge(lines([`${T}##[group]Run actions/checkout@${'2'.repeat(40)}`, `${T}##[endgroup]`], testStep(`HEAD is now at 25a09da Merge ${HEAD} into ${BASE}`))).why));
+  check('a checkout of the head itself, not a merge, is not taken',
+    /did not check out a pull request merge/.test(checkoutMerge(lines([`${T}##[group]Run actions/checkout@${'2'.repeat(40)}`, `${T}HEAD is now at bbbbbbb the head commit`], testStep())).why));
+  check('no checkout at all is not taken', /0 actions\/checkout steps/.test(checkoutMerge(lines(testStep())).why) && /0 actions\/checkout steps/.test(checkoutMerge('').why));
 }
 
 console.log('\n  the decision against a stubbed GitHub');
@@ -113,7 +129,7 @@ console.log('\n  the decision against a stubbed GitHub');
   check('it reads the log of the job of the same name there, and compares its base with the head',
     w.calls.includes(`/repos/${REPO}/actions/jobs/${w.prJobs[0].id}/logs`) && w.calls.includes(`/repos/${REPO}/compare/${BASE}...${HEAD}`));
 }
-for (const [name, over, re] of [
+for (const [name, over, re, envOver] of [
   ['a direct push (no merged pull request)', { [`/repos/${REPO}/commits/${SHA}/pulls`]: [] }, /direct push/],
   ['main had moved: another tree', { [`/repos/${REPO}/git/commits/${HEAD}`]: { tree: { sha: OTHER } } }, /another tree/],
   ['no run at the head', { [`/repos/${REPO}/actions/workflows/ci.yml/runs`]: { workflow_runs: [] } }, /no finished pull_request run/],
@@ -126,8 +142,12 @@ for (const [name, over, re] of [
     { [`/repos/${REPO}/actions/runs/${RUN_ID}/jobs`]: { total_count: 1, jobs: [mine('test (windows)')] } }, /"test \(windows\)" is not a job in .*did not run it/],
   ['this job is not found in its own run', { [`/repos/${REPO}/actions/runs/${RUN_ID}/jobs`]: { total_count: 1, jobs: [mine('unit', 'someone-else')] } }, /not found in run 555/],
   ['this run\'s jobs cannot be read', { [`/repos/${REPO}/actions/runs/${RUN_ID}/jobs`]: 500 }, /HTTP 500/],
-  ['the log shows no merge checked out', { LOG: { text: 'no checkout line\n' } }, /no merge checked out/],
-  ['the log shows two different merges', { LOG: { text: checkoutLog() + checkoutLog(HEAD, RELEASE) } }, /more than one merge/],
+  ['the log shows no checkout', { LOG: { text: 'no checkout line\n' } }, /0 actions\/checkout steps, not one; what it tested is not known/],
+  ['the log shows a merge checkout and then another checkout', { LOG: { text: checkoutLog() + checkoutLog(HEAD, RELEASE) } }, /2 actions\/checkout steps/],
+  // A matrix whose entries share one display name, wider on push: the job asking cannot be matched.
+  ['two jobs of this run share the display name of the job asking (a wider push matrix under name: test)',
+    { [`/repos/${REPO}/actions/runs/${RUN_ID}/jobs`]: { total_count: 2, jobs: [mine('unit'), { id: 3, name: 'unit', status: 'queued' }] } }, /2 jobs of this run are named "unit"/],
+  ['the caller has not declared the job the same on push', {}, /has not declared/, { SAME_ON_PULL_REQUEST: '' }],
   ['the log shows a merge of another head', { LOG: { text: checkoutLog(OTHER, BASE) } }, /merge of ddddddd, not of #7's head/],
   // Tested against a release branch, then retargeted to main with no new run: the base it merged
   // is not in the head, so the job tested the head plus that branch, not the pushed tree.
@@ -142,7 +162,7 @@ for (const [name, over, re] of [
   ['a commit cannot be read', { [`/repos/${REPO}/git/commits/${HEAD}`]: 502 }, /HTTP 502/],
   ['a commit with no tree', { [`/repos/${REPO}/git/commits/${SHA}`]: {} }, /another tree/],
 ]) {
-  const d = await decide(env(), world(over));
+  const d = await decide(env(envOver ?? {}), world(over));
   check(`${name}: tested in full`, d.tested === false && re.test(d.why));
 }
 {

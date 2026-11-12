@@ -6,8 +6,12 @@
 # Pinned like the other actions here: a caller names one full commit sha of this repository's main,
 #   - id: tree
 #     uses: askalf/ci/actions/tree-tested@<sha>
+#     with:
+#       same-on-pull-request: true
 # as an early step of a job, and puts `if: steps.tree.outputs.tested != 'true'` on the steps that
-# install, build and test. On anything but a push to the default branch it answers false without a
+# install, build and test. same-on-pull-request is the caller's word that the job runs the same steps,
+# commands and inputs on a push as on a pull request (nothing that runs only on push, no matrix a
+# push widens, one checkout of the event's own commit); without it the answer is always false. On anything but a push to the default branch it answers false without a
 # request. Every read that fails, and every rule that does not hold, answers false too: the job then
 # runs in full, as it did before. The step never fails the job.
 #
@@ -22,6 +26,12 @@ inputs:
     description: A token that reads the repository's commits, pull requests and Actions runs.
     required: false
     default: ${{ github.token }}
+  same-on-pull-request:
+    description: >-
+      true: the caller declares that this job runs the same steps, commands and inputs on a push as
+      on a pull request. Anything else, and the answer is false.
+    required: false
+    default: 'false'
   default-branch:
     description: The repository's default branch. A caller passes none.
     required: false

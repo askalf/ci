@@ -7,7 +7,7 @@ import { main } from '../../scripts/tree-tested/check.mjs';
 const input = (name) => (process.env[`INPUT_${name.toUpperCase()}`] ?? '').trim();
 
 try {
-  process.exitCode = await main({ ...process.env, GITHUB_TOKEN: input('token'), DEFAULT_BRANCH: input('default-branch') });
+  process.exitCode = await main({ ...process.env, GITHUB_TOKEN: input('token'), DEFAULT_BRANCH: input('default-branch'), SAME_ON_PULL_REQUEST: input('same-on-pull-request') });
 } catch (e) {
   // A failure of the check runs the job in full; it never fails the job.
   console.log(`tested in full: ${e.message}`);
