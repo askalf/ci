@@ -14,13 +14,17 @@
 //   2. A pull request of this repository was merged as this commit (its merge_commit_sha is the
 //      pushed sha). A direct push has none, and is tested=false.
 //   3. The pull request's head commit has the same tree as the pushed commit: the same files, byte
-//      for byte, git's own hash of them. A pull request run tests its head merged into the base it
-//      had then; when the merged result on main is the head's own tree, the head already held
-//      everything main had, so that merge was this tree too.
-//   4. The newest completed pull_request run of this workflow file at that head concluded success,
-//      on its latest attempt, and every job in it concluded success. A job that was skipped did not
-//      test anything, so a run with one is not taken: a workflow that picks its jobs by what changed
-//      runs them all on main, as before.
+//      for byte, git's own hash of them.
+//   4. Main as it was just before the merge (the pushed commit's first parent) is an ancestor of
+//      that head, by GitHub's compare. A pull_request run tests its head merged with the base main
+//      had then, an older main than that parent; when the parent is inside the head, so is every
+//      base the run could have used, and the merge it tested is the head's own tree. Without this,
+//      the tree a run tested is not known: main could have gained a change and reverted it between
+//      the run and the merge, leaving the head's tree on main but a different tree tested.
+//   5. The newest completed pull_request run of this workflow file at that head concluded success,
+//      on its latest attempt, and every job in it, and every step of every job, concluded success,
+//      all pages of them. A job or a step that was skipped did not test anything (a step that runs
+//      only on push, a job a change did not need), so a run with one is not taken.
 // Every read that fails, and every rule that does not hold, is tested=false: the job runs in full.
 // Nothing here can turn a red run green; at worst it runs a test it could have skipped.
 //
@@ -76,14 +80,29 @@ export function runAtHead(runs, { head, number }) {
     .sort((a, b) => Date.parse(b.created_at ?? 0) - Date.parse(a.created_at ?? 0))[0] ?? null;
 }
 
-/** Why the run's jobs do not show this tree tested, or '' when every job passed. Pure. */
+/**
+ * Why the run's jobs do not show this tree tested, or '' when every job, and every step of every job,
+ * concluded success. A job with no steps listed is not taken either: nothing shows what it ran. Pure.
+ */
 export function jobsProblem(jobs) {
   const list = Array.isArray(jobs) ? jobs : [];
   if (list.length === 0) return 'the run lists no jobs';
   const off = list.filter((j) => j?.conclusion !== 'success');
   if (off.length) return `not every job passed there (${off.slice(0, 4).map((j) => `${j?.name ?? '?'}: ${j?.conclusion ?? j?.status ?? '?'}`).join(', ')})`;
+  const bare = list.find((j) => !Array.isArray(j?.steps) || j.steps.length === 0);
+  if (bare) return `the job ${bare?.name ?? '?'} lists no steps`;
+  for (const j of list) {
+    const step = j.steps.find((st) => st?.conclusion !== 'success');
+    if (step) return `not every step ran and passed there (${j?.name ?? '?'}: ${step?.name ?? '?'} ${step?.conclusion ?? step?.status ?? '?'})`;
+  }
   return '';
 }
+
+/** Whether a compare of base...head says base is inside head (head is ahead of it, or the same). Pure. */
+export const contains = (compare) => compare?.status === 'ahead' || compare?.status === 'identical';
+
+/** How many pages of jobs (100 a page) a run may have before it is not read at all. */
+export const MAX_JOB_PAGES = 5;
 
 /** GET from the API as the token. Throws on a status that is not 2xx. */
 async function get(io, env, path) {
@@ -117,14 +136,31 @@ export async function decide(env, io = { fetch: globalThis.fetch }) {
     if (!SHA_RE.test(tree) || tree !== headTree) {
       return { tested: false, why: `#${pr.number}'s head ${head.slice(0, 7)} has another tree than ${f.sha.slice(0, 7)}: main had moved, so the merged files were never tested together` };
     }
+    const parent = String(pushed?.parents?.[0]?.sha ?? '');
+    if (!SHA_RE.test(parent)) return { tested: false, why: `${f.sha.slice(0, 7)} names no parent to compare` };
+    const cmp = await get(io, env, `/repos/${f.repo}/compare/${parent}...${head}`);
+    if (!contains(cmp)) {
+      return { tested: false, why: `main before the merge (${parent.slice(0, 7)}) is not inside #${pr.number}'s head ${head.slice(0, 7)} (${cmp?.status ?? 'no status'}), so the tree its run tested is not known` };
+    }
     const listed = await get(io, env, `/repos/${f.repo}/actions/workflows/${f.workflowFile}/runs?head_sha=${head}&event=pull_request&per_page=50`);
     const run = runAtHead(listed?.workflow_runs, { head, number: pr.number });
     if (!run) return { tested: false, why: `${f.workflowFile} has no finished pull_request run at #${pr.number}'s head ${head.slice(0, 7)}` };
     if (run.conclusion !== 'success') return { tested: false, why: `${f.workflowFile} ended ${run.conclusion} at #${pr.number}'s head (${run.html_url ?? run.id})` };
-    const jobs = await get(io, env, `/repos/${f.repo}/actions/runs/${run.id}/jobs?filter=latest&per_page=100`);
-    const bad = jobsProblem(jobs?.jobs);
+    const jobs = [];
+    for (let page = 1; ; page++) {
+      if (page > MAX_JOB_PAGES) return { tested: false, why: `the run has more than ${MAX_JOB_PAGES * 100} jobs; not read` };
+      const got = await get(io, env, `/repos/${f.repo}/actions/runs/${run.id}/jobs?filter=latest&per_page=100&page=${page}`);
+      const batch = Array.isArray(got?.jobs) ? got.jobs : [];
+      jobs.push(...batch);
+      const total = Number(got?.total_count);
+      if (batch.length < 100 || (Number.isFinite(total) && jobs.length >= total)) {
+        if (Number.isFinite(total) && jobs.length !== total) return { tested: false, why: `read ${jobs.length} of the run's ${total} jobs` };
+        break;
+      }
+    }
+    const bad = jobsProblem(jobs);
     if (bad) return { tested: false, why: `${bad} in ${run.html_url ?? run.id}` };
-    return { tested: true, why: `#${pr.number}'s head ${head.slice(0, 7)} has this tree, and ${f.workflowFile} passed there with every job`, run: run.html_url ?? String(run.id) };
+    return { tested: true, why: `#${pr.number}'s head ${head.slice(0, 7)} has this tree and holds main as it was before the merge, and ${f.workflowFile} passed there with every job and every step`, run: run.html_url ?? String(run.id) };
   } catch (e) {
     return { tested: false, why: `${e.message}; tested in full` };
   }

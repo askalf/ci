@@ -15,11 +15,12 @@ names the commit's date and the pull request it came from.
 
 - A new action, `actions/tree-tested`: on a push to the default branch it says whether the
   pull request merged as that commit already passed the same workflow, on its latest attempt and
-  with every job green, at a head whose tree is the pushed tree byte for byte. A caller skips its
-  build and test steps when it says so. A direct push, a moved main, a skipped or failed job, or a
-  read that fails runs the job in full, as before. Replayed against the last twelve pushes of five
-  repositories on 2026-11-12, it would have skipped 33 of 60 runs: claude-re 11, platform 8,
-  restore-desk 5, unscathed-site 5, dario 4. The pin bump moves it like the other actions.
+  with every job and every step green, at a head whose tree is the pushed tree byte for byte and
+  that holds main as it was before the merge. A caller skips its build and test steps when it says
+  so. A direct push, a moved main, a skipped or failed job or step, or a read that fails runs the
+  job in full, as before. Replayed against the last twelve pushes of five repositories on
+  2026-11-12, it would have skipped 31 of 60 runs: claude-re 9, platform 7, unscathed-site 6,
+  restore-desk 5, dario 4. The pin bump moves it like the other actions.
 - A second lens, off unless a caller turns it on. A caller on a self-hosted runner that passes
   `second-reviewer-login` gets every head the review approves read once more in the same job, as
   that account, with a second env file and rubric the host keeps for it, and
