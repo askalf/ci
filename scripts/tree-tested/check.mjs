@@ -15,16 +15,20 @@
 //      pushed sha). A direct push has none, and is tested=false.
 //   3. The pull request's head commit has the same tree as the pushed commit: the same files, byte
 //      for byte, git's own hash of them.
-//   4. Main as it was just before the merge (the pushed commit's first parent) is an ancestor of
-//      that head, by GitHub's compare. A pull_request run tests its head merged with the base main
-//      had then, an older main than that parent; when the parent is inside the head, so is every
-//      base the run could have used, and the merge it tested is the head's own tree. Without this,
-//      the tree a run tested is not known: main could have gained a change and reverted it between
-//      the run and the merge, leaving the head's tree on main but a different tree tested.
-//   5. The newest completed pull_request run of this workflow file at that head concluded success,
+//   4. The newest completed pull_request run of this workflow file at that head concluded success,
 //      on its latest attempt, and every job in it, and every step of every job, concluded success,
 //      all pages of them. A job or a step that was skipped did not test anything (a step that runs
 //      only on push, a job a change did not need), so a run with one is not taken.
+//   5. This job, the one asking (found in this run by its runner's name), has the name of a job in
+//      that run. A job the push runs and the pull request did not, such as a matrix entry only a
+//      push expands, is never in that run, so it runs in full. Steps that run only on push are a
+//      skipped step there, which rule 4 does not take.
+//   6. That job's log shows what it checked out: GitHub's merge of the head into the base, written
+//      by the checkout as "Merge <head> into <base>". The head there is the pull request's head,
+//      and that base is inside the head by GitHub's compare. A merge of a base the head already
+//      holds is the head's own tree, so the job tested exactly the pushed tree, whatever branch
+//      the pull request pointed at then and whatever main did after. With no such line, or more
+//      than one, what was tested is not known.
 // Every read that fails, and every rule that does not hold, is tested=false: the job runs in full.
 // Nothing here can turn a red run green; at worst it runs a test it could have skipped.
 //
@@ -50,6 +54,8 @@ export function factsOf(env) {
     sha: text('GITHUB_SHA'),
     workflowFile: WORKFLOW_REF_RE.exec(text('GITHUB_WORKFLOW_REF'))?.[1] ?? '',
     defaultBranch: text('DEFAULT_BRANCH'),
+    runId: text('GITHUB_RUN_ID'),
+    runnerName: text('RUNNER_NAME'),
   };
 }
 
@@ -60,6 +66,8 @@ export function notEligible(f) {
   if (!f.defaultBranch || f.ref !== `refs/heads/${f.defaultBranch}`) return `a push to ${f.ref || 'no ref'} is tested in full; only a push to the default branch repeats a pull request's run`;
   if (!SHA_RE.test(f.sha)) return 'the pushed commit is not a full sha';
   if (!f.workflowFile) return 'the workflow file could not be read from GITHUB_WORKFLOW_REF';
+  if (!/^[1-9][0-9]*$/.test(f.runId)) return 'GITHUB_RUN_ID is not a run id';
+  if (!f.runnerName) return 'RUNNER_NAME is not set, so this job cannot be found in its run';
   return '';
 }
 
@@ -103,6 +111,22 @@ export const contains = (compare) => compare?.status === 'ahead' || compare?.sta
 
 /** How many pages of jobs (100 a page) a run may have before it is not read at all. */
 export const MAX_JOB_PAGES = 5;
+/** The largest job log read for its checkout line. */
+export const MAX_LOG_BYTES = 32 * 1024 * 1024;
+
+/** This job in its own run: the one in progress on this runner. Null when there is not exactly one. Pure. */
+export function thisJob(jobs, runnerName) {
+  const mine = (Array.isArray(jobs) ? jobs : []).filter((j) => j?.status === 'in_progress' && j?.runner_name === runnerName);
+  return mine.length === 1 ? mine[0] : null;
+}
+
+const MERGE_LINE = /HEAD is now at [0-9a-f]{7,40} Merge ([0-9a-f]{40}) into ([0-9a-f]{40})/g;
+/** The merges a job's log says it checked out, as { head, base }, once each. Pure. */
+export function mergesIn(log) {
+  const seen = new Map();
+  for (const m of String(log ?? '').matchAll(MERGE_LINE)) seen.set(`${m[1]} ${m[2]}`, { head: m[1], base: m[2] });
+  return [...seen.values()];
+}
 
 /** GET from the API as the token. Throws on a status that is not 2xx. */
 async function get(io, env, path) {
@@ -113,6 +137,35 @@ async function get(io, env, path) {
   });
   if (!res.ok) throw new Error(`GET ${path.split('?')[0]}: HTTP ${res.status}`);
   return res.json();
+}
+
+/** A job's log as text; the API answers with a redirect to storage, which fetch follows. */
+async function getLog(io, env, repo, jobId) {
+  const api = (env.GITHUB_API_URL || 'https://api.github.com').replace(/\/+$/, '');
+  const res = await io.fetch(`${api}/repos/${repo}/actions/jobs/${jobId}/logs`, {
+    headers: { authorization: `Bearer ${env.GITHUB_TOKEN ?? ''}`, accept: 'application/vnd.github+json', 'x-github-api-version': '2022-11-28' },
+    signal: AbortSignal.timeout(60_000),
+  });
+  if (!res.ok) throw new Error(`GET the log of job ${jobId}: HTTP ${res.status}`);
+  const text = await res.text();
+  if (text.length > MAX_LOG_BYTES) throw new Error(`the log of job ${jobId} is over ${MAX_LOG_BYTES} bytes`);
+  return text;
+}
+
+/** Every job of a run's latest attempt, all pages, or { why } when they cannot all be read. */
+async function allJobs(io, env, repo, runId) {
+  const jobs = [];
+  for (let page = 1; ; page++) {
+    if (page > MAX_JOB_PAGES) return { why: `run ${runId} has more than ${MAX_JOB_PAGES * 100} jobs; not read` };
+    const got = await get(io, env, `/repos/${repo}/actions/runs/${runId}/jobs?filter=latest&per_page=100&page=${page}`);
+    const batch = Array.isArray(got?.jobs) ? got.jobs : [];
+    jobs.push(...batch);
+    const total = Number(got?.total_count);
+    if (batch.length < 100 || (Number.isFinite(total) && jobs.length >= total)) {
+      if (Number.isFinite(total) && jobs.length !== total) return { why: `read ${jobs.length} of run ${runId}'s ${total} jobs` };
+      return { jobs };
+    }
+  }
 }
 
 /**
@@ -136,31 +189,31 @@ export async function decide(env, io = { fetch: globalThis.fetch }) {
     if (!SHA_RE.test(tree) || tree !== headTree) {
       return { tested: false, why: `#${pr.number}'s head ${head.slice(0, 7)} has another tree than ${f.sha.slice(0, 7)}: main had moved, so the merged files were never tested together` };
     }
-    const parent = String(pushed?.parents?.[0]?.sha ?? '');
-    if (!SHA_RE.test(parent)) return { tested: false, why: `${f.sha.slice(0, 7)} names no parent to compare` };
-    const cmp = await get(io, env, `/repos/${f.repo}/compare/${parent}...${head}`);
-    if (!contains(cmp)) {
-      return { tested: false, why: `main before the merge (${parent.slice(0, 7)}) is not inside #${pr.number}'s head ${head.slice(0, 7)} (${cmp?.status ?? 'no status'}), so the tree its run tested is not known` };
-    }
     const listed = await get(io, env, `/repos/${f.repo}/actions/workflows/${f.workflowFile}/runs?head_sha=${head}&event=pull_request&per_page=50`);
     const run = runAtHead(listed?.workflow_runs, { head, number: pr.number });
     if (!run) return { tested: false, why: `${f.workflowFile} has no finished pull_request run at #${pr.number}'s head ${head.slice(0, 7)}` };
     if (run.conclusion !== 'success') return { tested: false, why: `${f.workflowFile} ended ${run.conclusion} at #${pr.number}'s head (${run.html_url ?? run.id})` };
-    const jobs = [];
-    for (let page = 1; ; page++) {
-      if (page > MAX_JOB_PAGES) return { tested: false, why: `the run has more than ${MAX_JOB_PAGES * 100} jobs; not read` };
-      const got = await get(io, env, `/repos/${f.repo}/actions/runs/${run.id}/jobs?filter=latest&per_page=100&page=${page}`);
-      const batch = Array.isArray(got?.jobs) ? got.jobs : [];
-      jobs.push(...batch);
-      const total = Number(got?.total_count);
-      if (batch.length < 100 || (Number.isFinite(total) && jobs.length >= total)) {
-        if (Number.isFinite(total) && jobs.length !== total) return { tested: false, why: `read ${jobs.length} of the run's ${total} jobs` };
-        break;
-      }
-    }
-    const bad = jobsProblem(jobs);
+    const theirs = await allJobs(io, env, f.repo, run.id);
+    if (theirs.why) return { tested: false, why: theirs.why };
+    const bad = jobsProblem(theirs.jobs);
     if (bad) return { tested: false, why: `${bad} in ${run.html_url ?? run.id}` };
-    return { tested: true, why: `#${pr.number}'s head ${head.slice(0, 7)} has this tree and holds main as it was before the merge, and ${f.workflowFile} passed there with every job and every step`, run: run.html_url ?? String(run.id) };
+    // This job, and the job of the same name there.
+    const ours = await allJobs(io, env, f.repo, f.runId);
+    if (ours.why) return { tested: false, why: ours.why };
+    const me = thisJob(ours.jobs, f.runnerName);
+    if (!me) return { tested: false, why: `this job was not found in run ${f.runId} by its runner ${f.runnerName}` };
+    const twins = theirs.jobs.filter((j) => j?.name === me.name);
+    if (twins.length !== 1) return { tested: false, why: `the job "${me.name}" is ${twins.length ? 'not one job' : 'not a job'} in ${run.html_url ?? run.id}: the pull request did not run it` };
+    // What that job checked out.
+    const merges = mergesIn(await getLog(io, env, f.repo, twins[0].id));
+    if (merges.length !== 1) return { tested: false, why: `the log of "${me.name}" there shows ${merges.length ? 'more than one merge' : 'no merge'} checked out, so what it tested is not known` };
+    const { head: tHead, base: tBase } = merges[0];
+    if (tHead !== head) return { tested: false, why: `"${me.name}" there checked out a merge of ${tHead.slice(0, 7)}, not of #${pr.number}'s head ${head.slice(0, 7)}` };
+    const cmp = await get(io, env, `/repos/${f.repo}/compare/${tBase}...${head}`);
+    if (!contains(cmp)) {
+      return { tested: false, why: `"${me.name}" there tested #${pr.number}'s head merged into ${tBase.slice(0, 7)}, which the head does not hold (${cmp?.status ?? 'no status'}), so it tested another tree` };
+    }
+    return { tested: true, why: `#${pr.number}'s head ${head.slice(0, 7)} has this tree, "${me.name}" tested it there (merged into ${tBase.slice(0, 7)}, which the head holds), and every job and step of that run passed`, run: run.html_url ?? String(run.id) };
   } catch (e) {
     return { tested: false, why: `${e.message}; tested in full` };
   }

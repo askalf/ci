@@ -29,7 +29,7 @@ inputs:
 
 outputs:
   tested:
-    description: "true when this tree already passed this workflow, with every job, at the merged pull request's head; else false."
+    description: "true when this tree already passed this workflow, with every job and step, and this job ran there on exactly this tree; else false."
   run:
     description: The run that tested it, when tested is true.
 
