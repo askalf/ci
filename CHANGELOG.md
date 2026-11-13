@@ -13,6 +13,12 @@ names the commit's date and the pull request it came from.
 
 ## November 2026
 
+- `actions/tree-tested` takes `pinned-checkouts`: other repositories a job checks out at a commit
+  its own tree names, such as a full sha read from a file of the checkout. The job log must show
+  each one checked out at a full commit sha, into a directory of its own under the workspace, and
+  at that commit. A checkout of a repository not named there still runs the push in full, as does
+  a second checkout of the job's own repository or a "HEAD is now at" line outside a checkout.
+  Each checkout's repository, ref and path are read from the inputs the runner prints for it.
 - The bump job in `redline-pin-bump.yml` may run 45 minutes, up from 30. Twenty callers at the
   measured rate need about 29 minutes with room to spare, so the next caller would not have fit;
   45 covers thirty. `scripts/redline/pin-bump.test.mjs` now also fails a limit of an hour or more,

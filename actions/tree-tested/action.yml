@@ -11,9 +11,11 @@
 # as an early step of a job, and puts `if: steps.tree.outputs.tested != 'true'` on the steps that
 # install, build and test. same-on-pull-request is the caller's word that the job runs the same steps,
 # commands and inputs on a push as on a pull request (nothing that runs only on push, no matrix a
-# push widens, one checkout of the event's own commit); without it the answer is always false. On anything but a push to the default branch it answers false without a
-# request. Every read that fails, and every rule that does not hold, answers false too: the job then
-# runs in full, as it did before. The step never fails the job.
+# push widens, one checkout of the event's own commit); without it the answer is always false. A
+# job that also checks out another repository at a commit its tree names (a pinned sha in a file)
+# lists that repository in pinned-checkouts. On anything but a push to the default branch it answers
+# false without a request. Every read that fails, and every rule that does not hold, answers false
+# too: the job then runs in full, as it did before. The step never fails the job.
 #
 # It checks out nothing and runs on the Node the runner ships. The job's token needs actions: read,
 # contents: read and pull-requests: read, which a workflow's default token has unless its
@@ -32,6 +34,16 @@ inputs:
       on a pull request. Anything else, and the answer is false.
     required: false
     default: 'false'
+  pinned-checkouts:
+    description: >-
+      Other repositories this job checks out, owner/name, separated by spaces, commas or new lines.
+      Each is the caller's word that its checkout is at a full commit sha the tree itself names (read
+      from a file of the checkout, so the same tree checks out the same commit), into a directory of
+      its own. The log must show each checkout at a full sha, in a path under the workspace. A
+      checkout of a repository not named here is not taken. Empty, the default: the job may check
+      out only its own repository.
+    required: false
+    default: ''
   default-branch:
     description: The repository's default branch. A caller passes none.
     required: false
