@@ -13,6 +13,10 @@ names the commit's date and the pull request it came from.
 
 ## November 2026
 
+- The bump job in `redline-pin-bump.yml` may run 45 minutes, up from 30. Twenty callers at the
+  measured rate need about 29 minutes with room to spare, so the next caller would not have fit;
+  45 covers thirty. `scripts/redline/pin-bump.test.mjs` now also fails a limit of an hour or more,
+  since the App token the job mints lasts an hour.
 - The pin bump moves `askalf/redline-rubric` too: it is the twentieth repository in `CALLERS`
   in `redline-pin-bump.yml`, since the rubric is reviewed on the runner host like the others and
   the `askalf-pin-bump` App is installed there. Its review, public-text and post callers are bumped

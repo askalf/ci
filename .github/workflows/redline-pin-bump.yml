@@ -66,8 +66,10 @@ jobs:
     # A dispatch without wait-for-quiet bumps every caller in one run, about 70 s each (measured
     # 2026-11-02: nine callers in 9.5 minutes; ten minutes cancelled that run partway through the
     # list). So the limit has to cover every caller in CALLERS at that rate, with room to spare;
-    # scripts/redline/pin-bump.test.mjs fails when a longer CALLERS list outgrows it.
-    timeout-minutes: 30
+    # scripts/redline/pin-bump.test.mjs fails when a longer CALLERS list outgrows it. It must also
+    # stay under an hour: the App token the job mints lasts an hour, and a run past it fails its
+    # last writes. 45 minutes covers thirty callers.
+    timeout-minutes: 45
     # A fork bumps its own callers once it names them in the repository variable REDLINE_CALLERS
     # (space-separated owner/name); without it the job runs here only.
     if: github.repository == 'askalf/ci' || vars.REDLINE_CALLERS != ''

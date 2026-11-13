@@ -590,6 +590,9 @@ if (spawnSync('bash', ['-c', 'true']).status !== 0 || process.platform === 'win3
   const needS = Math.ceil(callers.length * PER_CALLER_S * HEADROOM);
   check(`a forced run fits the limit: ${callers.length} callers at ${PER_CALLER_S} s each with ${HEADROOM}x room need ${needS} s of ${limitS} s`,
     needS <= limitS, `raise timeout-minutes on the bump job to at least ${Math.ceil(needS / 60)}`);
+  // The App token the job mints lasts an hour; a run past it would fail its last writes.
+  check(`the limit stays inside the App token's hour: ${limitS} s`, limitS < 3600,
+    'a run this long outlives its token: split the wave over two runs instead');
 }
 
 console.log('\n  the token: the pin bump App, and no long-lived token');
