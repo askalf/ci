@@ -4,7 +4,7 @@
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { factsOf, notEligible, mergedAs, runAtHead, jobsProblem, contains, thisJob, runnerProblem, checkoutMerge, decide, main } from './check.mjs';
+import { factsOf, notEligible, mergedAs, runAtHead, jobsProblem, contains, thisJob, runnerProblem, checkoutMerge, pinnedList, decide, main } from './check.mjs';
 
 let pass = 0;
 let fail = 0;
@@ -35,8 +35,22 @@ const job = (name, conclusion = 'success', steps = [step('Set up job'), step('Te
 const mine = (name, runner = 'pool-e3', labels = LABELS) => ({ id: 1, name, status: 'in_progress', runner_name: runner, labels });
 // A job log as GitHub writes it: each step opens with "##[group]Run <step>".
 const T = '2026-11-12T02:58:14.1195074Z ';
-const checkoutStep = (head = HEAD, base = BASE) => [`${T}##[group]Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1`, `${T}with:`, `${T}##[endgroup]`,
+const checkoutStep = (head = HEAD, base = BASE) => [`${T}##[group]Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1`, `${T}with:`, `${T}  repository: ${REPO}`, `${T}  token: ***`,
+  `${T}  fetch-depth: 2`, `${T}env:`, `${T}  GIT_CONFIG_COUNT: 2`, `${T}##[endgroup]`, `${T}Syncing repository: ${REPO}`,
   `${T}##[group]Checking out the ref`, `${T}HEAD is now at 25a09da Merge ${head} into ${base}`, `${T}##[endgroup]`];
+// A checkout of another repository, as checkout-with-retry prints it (a real job log,
+// 2026-11-13): the composite's own group and inputs, then the inner actions/checkout with its
+// inputs filled in, its fetch, and the composite's next inner step.
+const PIN = '04072ed'.padEnd(40, '9');
+const PINNED = 'askalf/vendored';
+const pinnedStep = ({ repo = PINNED, ref = PIN, path = 'pitlane', at = (ref ?? 'aaaaaaa').slice(0, 7), heads = 1, extra = [] } = {}) => {
+  const inputs = [repo !== null && `${T}  repository: ${repo}`, ref !== null && `${T}  ref: ${ref}`, path !== null && `${T}  path: ${path}`].filter(Boolean);
+  return [`${T}##[group]Run askalf/ci/actions/checkout-with-retry@${'1'.repeat(40)}`, `${T}with:`, ...inputs, `${T}##[endgroup]`,
+    `${T}##[group]Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1`, `${T}with:`, ...inputs, `${T}  token: ***`, `${T}  clean: true`, ...extra, `${T}##[endgroup]`,
+    `${T}Syncing repository: ${repo}`, `${T}##[group]Checking out the ref`, `${T}[command]/usr/bin/git checkout --progress --force ${ref}`,
+    ...Array.from({ length: heads }, () => `${T}HEAD is now at ${at} a pinned commit`), `${T}##[endgroup]`,
+    `${T}##[group]Run if [ "skipped" = "success" ]; then`, `${T}##[endgroup]`];
+};
 const testStep = (out = 'tests pass') => [`${T}##[group]Run npm test`, `${T}npm test`, `${T}##[endgroup]`, `${T}${out}`];
 const checkoutLog = (head = HEAD, base = BASE) => [`${T}##[group]Run askalf/ci/actions/checkout-with-retry@${'1'.repeat(40)}`, `${T}##[endgroup]`, ...checkoutStep(head, base), ...testStep()].join('\n') + '\n';
 
@@ -87,6 +101,7 @@ console.log('\n  the facts and who is looked up');
 
 console.log('\n  the pure rules');
 {
+  const O = { repo: REPO };
   check('the pull request merged as this commit is found', mergedAs([pr({ number: 3, merge_commit_sha: OTHER }), pr()], REPO, SHA)?.number === 7);
   check('an open, unmerged or other repository\'s pull request is not',
     mergedAs([pr({ merged_at: null }), pr({ base: { repo: { full_name: 'x/y' } } }), pr({ head: { sha: 'short' } })], REPO, SHA) === null && mergedAs(null, REPO, SHA) === null);
@@ -111,17 +126,55 @@ console.log('\n  the pure rules');
     /ran on \[ubuntu-latest\], this job on \[pool-exec, self-hosted\]: another machine/.test(runnerProblem(mine('a'), job('a', 'success', undefined, ['ubuntu-latest']))));
   check('a job with no labels listed, on either side, is not taken',
     /not listed for both runs/.test(runnerProblem(mine('a', 'pool-e3', []), job('a'))) && /not listed for both runs/.test(runnerProblem(mine('a'), { name: 'a' })));
-  check('the merge the one checkout made is read from its step', JSON.stringify(checkoutMerge(checkoutLog())) === JSON.stringify({ head: HEAD, base: BASE }));
+  check('the merge the one checkout made is read from its step', JSON.stringify(checkoutMerge(checkoutLog(), O)) === JSON.stringify({ head: HEAD, base: BASE }));
   const lines = (...parts) => parts.flat().join('\n');
   // A merge checkout, then a step that checks out an older ordinary commit before the tests.
-  check('a later checkout of another commit, even by hand, is caught: two "HEAD is now at" lines',
-    /2 "HEAD is now at" lines/.test(checkoutMerge(lines(checkoutStep(), [`${T}##[group]Run git checkout ${OTHER}`, `${T}##[endgroup]`, `${T}HEAD is now at ddddddd an older commit`], testStep())).why));
-  check('a second actions/checkout step is not taken', /2 actions\/checkout steps/.test(checkoutMerge(lines(checkoutStep(), checkoutStep(), testStep())).why));
+  check('a later checkout of another commit, even by hand, is caught: a "HEAD is now at" line outside a checkout step',
+    /outside every checkout step \(in "git checkout d+"\)/.test(checkoutMerge(lines(checkoutStep(), [`${T}##[group]Run git checkout ${OTHER}`, `${T}##[endgroup]`, `${T}HEAD is now at ddddddd an older commit`], testStep()), O).why));
+  check('a second actions/checkout step is not taken', /2 actions\/checkout steps of askalf\/demo, not one/.test(checkoutMerge(lines(checkoutStep(), checkoutStep(), testStep()), O).why));
   check('a merge line printed by a test, outside the checkout, is not taken',
-    /not in the checkout step/.test(checkoutMerge(lines([`${T}##[group]Run actions/checkout@${'2'.repeat(40)}`, `${T}##[endgroup]`], testStep(`HEAD is now at 25a09da Merge ${HEAD} into ${BASE}`))).why));
+    /outside every checkout step \(in "npm test"\)/.test(checkoutMerge(lines([`${T}##[group]Run actions/checkout@${'2'.repeat(40)}`, `${T}##[endgroup]`], testStep(`HEAD is now at 25a09da Merge ${HEAD} into ${BASE}`)), O).why));
   check('a checkout of the head itself, not a merge, is not taken',
-    /did not check out a pull request merge/.test(checkoutMerge(lines([`${T}##[group]Run actions/checkout@${'2'.repeat(40)}`, `${T}HEAD is now at bbbbbbb the head commit`], testStep())).why));
-  check('no checkout at all is not taken', /0 actions\/checkout steps/.test(checkoutMerge(lines(testStep())).why) && /0 actions\/checkout steps/.test(checkoutMerge('').why));
+    /did not check out a pull request merge/.test(checkoutMerge(lines([`${T}##[group]Run actions/checkout@${'2'.repeat(40)}`, `${T}HEAD is now at bbbbbbb the head commit`], testStep()), O).why));
+  check('no checkout at all is not taken', /0 actions\/checkout steps of askalf\/demo/.test(checkoutMerge(lines(testStep()), O).why) && /0 actions\/checkout steps of this repository/.test(checkoutMerge('').why));
+}
+
+console.log('\n  a checkout of another repository at a pinned commit');
+{
+  const O_REPO = { repo: REPO };
+  const lines = (...parts) => parts.flat().join('\n');
+  const P = { repo: REPO, pinned: [PINNED] };
+  const ok = (log, opts = P) => JSON.stringify(checkoutMerge(log, opts)) === JSON.stringify({ head: HEAD, base: BASE });
+  const why = (log, opts = P) => checkoutMerge(log, opts).why ?? '';
+  check('pinned-checkouts is read as owner/name words, lower case, split on spaces, commas and new lines; other words name nothing',
+    JSON.stringify(pinnedList('Askalf/Vendored, a/b\n  c/d not-a-repo a/b ../x')) === JSON.stringify(['askalf/vendored', 'a/b', 'c/d']) && pinnedList('').length === 0 && pinnedList(undefined).length === 0);
+  check('the merge, then a named repository at a full sha into a directory of its own: the merge is read',
+    ok(lines(checkoutStep(), testStep(), pinnedStep(), testStep())));
+  check('the pinned checkout first and the merge after it reads the same', ok(lines(pinnedStep(), checkoutStep(), testStep())));
+  check('names are compared without case, on either side', ok(lines(checkoutStep(), pinnedStep({ repo: 'Askalf/Vendored' })), { repo: 'ASKALF/demo', pinned: pinnedList('askalf/VENDORED') }));
+  check('a nested path is a directory of its own', ok(lines(checkoutStep(), pinnedStep({ path: 'vendor/pitlane' }))));
+  check('without pinned-checkouts, a checkout of another repository is not taken',
+    /also checks out askalf\/vendored, which the caller has not named in pinned-checkouts/.test(why(lines(checkoutStep(), pinnedStep()), O_REPO)));
+  check('a repository other than the ones named is not taken',
+    /also checks out askalf\/other, which the caller has not named/.test(why(lines(checkoutStep(), pinnedStep({ repo: 'askalf/other' })))));
+  check('a branch, a tag, a short sha or no ref is not a pinned commit: a later run may get another one',
+    [['main', /the ref main, not a full commit sha/], ['v1.2.3', /the ref v1\.2\.3/], [PIN.slice(0, 12), /the ref 04072ed99999, not a full/], [null, /at no ref, not a full commit sha/]]
+      .every(([ref, re]) => re.test(why(lines(checkoutStep(), pinnedStep({ ref, at: '04072ed' }))))));
+  check('no path, or a path that is the workspace, above it or outside it, is not a directory of its own',
+    [[null, /no path, so it checks out over the workspace/], ['.', /not a directory of its own/], ['./', /not a directory of its own/], ['a/../..', /not a directory of its own/],
+      ['/srv/elsewhere', /not under the workspace/], ['C:/x', /not under the workspace/], ['~/x', /not under the workspace/]]
+      .every(([path, re]) => re.test(why(lines(checkoutStep(), pinnedStep({ path }))))));
+  check('a checkout that landed on another commit than its ref is not taken',
+    /asked for 04072ed and is at 1234567/.test(why(lines(checkoutStep(), pinnedStep({ at: '1234567' })))));
+  check('a pinned checkout with two "HEAD is now at" lines, or none, is not taken',
+    /askalf\/vendored printed 2 "HEAD is now at" lines/.test(why(lines(checkoutStep(), pinnedStep({ heads: 2 })))) && /printed 0/.test(why(lines(checkoutStep(), pinnedStep({ heads: 0 })))));
+  check('a second checkout of this repository, even at a pinned sha into a path, is still a second one',
+    /2 actions\/checkout steps of askalf\/demo/.test(why(lines(checkoutStep(), pinnedStep({ repo: REPO })), { repo: REPO, pinned: [REPO] })));
+  check('a ref under env:, not with:, is not read as the checkout\'s ref',
+    /at no ref/.test(why(lines(checkoutStep(), pinnedStep({ ref: null, at: '04072ed', extra: [`${T}env:`, `${T}  ref: ${PIN}`] })))));
+  check('a "HEAD is now at" line in a step after the pinned checkout is still caught',
+    /outside every checkout step/.test(why(lines(checkoutStep(), pinnedStep(), [`${T}##[group]Run cd pitlane && git checkout main`, `${T}HEAD is now at 9999999 moved`]))));
+  check('a "HEAD is now at" line before any step is caught', /outside every checkout step \(in the job's setup\)/.test(why(lines([`${T}HEAD is now at 9999999 x`], checkoutStep()))));
 }
 
 console.log('\n  the decision against a stubbed GitHub');
@@ -149,7 +202,7 @@ for (const [name, over, re, envOver] of [
     { [`/repos/${REPO}/actions/runs/${RUN_ID}/jobs`]: { total_count: 1, jobs: [mine('test (windows)')] } }, /"test \(windows\)" is not a job in .*did not run it/],
   ['this job is not found in its own run', { [`/repos/${REPO}/actions/runs/${RUN_ID}/jobs`]: { total_count: 1, jobs: [mine('unit', 'someone-else')] } }, /not found in run 555/],
   ['this run\'s jobs cannot be read', { [`/repos/${REPO}/actions/runs/${RUN_ID}/jobs`]: 500 }, /HTTP 500/],
-  ['the log shows no checkout', { LOG: { text: 'no checkout line\n' } }, /0 actions\/checkout steps, not one; what it tested is not known/],
+  ['the log shows no checkout', { LOG: { text: 'no checkout line\n' } }, /0 actions\/checkout steps of askalf\/demo, not one; what it tested is not known/],
   ['the log shows a merge checkout and then another checkout', { LOG: { text: checkoutLog() + checkoutLog(HEAD, RELEASE) } }, /2 actions\/checkout steps/],
   // A matrix whose entries share one display name, wider on push: the job asking cannot be matched.
   ['two jobs of this run share the display name of the job asking (a wider push matrix under name: test)',
@@ -166,6 +219,7 @@ for (const [name, over, re, envOver] of [
   // Main gained a change and reverted it between the run and the merge: the run merged the head
   // into main with that change, a base the head does not hold.
   ['main changed and reverted after the run', { [`/repos/${REPO}/compare/${BASE}...${HEAD}`]: { status: 'diverged' } }, /does not hold/],
+  ['the job also checks out a pinned repository the caller did not name', { LOG: { text: checkoutLog() + [...pinnedStep(), ''].join('\n') } }, /in the log of "unit" there, the job also checks out askalf\/vendored, which the caller has not named/],
   ['the log cannot be read', { LOG: 410 }, /HTTP 410/],
   ['the compare cannot be read', { [`/repos/${REPO}/compare/${BASE}...${HEAD}`]: 500 }, /HTTP 500/],
   ['the pull request list cannot be read', { [`/repos/${REPO}/commits/${SHA}/pulls`]: 500 }, /HTTP 500; tested in full/],
@@ -176,6 +230,9 @@ for (const [name, over, re, envOver] of [
   check(`${name}: tested in full`, d.tested === false && re.test(d.why));
 }
 {
+  const pinnedOk = await decide(env({ PINNED_CHECKOUTS: 'askalf/vendored' }), world({ LOG: { text: checkoutLog() + [...pinnedStep(), ''].join('\n') } }));
+  check('a named repository checked out at a pinned commit, the merge of the head as well: tested', pinnedOk.tested === true);
+  check('pinned-checkouts is read from the environment', factsOf(env({ PINNED_CHECKOUTS: ' a/b ' })).pinned === 'a/b');
   const same = await decide(env(), world({ LOG: { text: checkoutLog(HEAD, HEAD) }, [`/repos/${REPO}/compare/${HEAD}...${HEAD}`]: { status: 'identical' } }));
   check('a base that is the head itself counts as held', same.tested === true);
   const w2 = world();

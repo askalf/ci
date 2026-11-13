@@ -17,6 +17,11 @@
 // checkout of anything but the event's own commit, and nothing after that checkout that moves the
 // tests onto other files (a branch switch, a reset, a second checkout). What the rules below can
 // check, they check; the rest is the caller's word.
+// One more checkout is allowed when the caller names its repository in pinned-checkouts: another
+// repository, checked out into a directory of its own at a full commit sha that the tree itself
+// names (it reads that repository's sha from a file of its own checkout). The same tree then
+// names the same commit on the push. That the sha comes from the tree is the caller's word; that the
+// checkout was at a full sha, in its own directory, and of a repository named, the log shows.
 //
 // The rule, all of it read from the GitHub API with the job's own token:
 //   0. The caller declared the job the same on push and on pull request (above).
@@ -36,9 +41,13 @@
 //      labels as this one: a job whose runs-on depends on who opened the pull request (a fork's or
 //      a bot's pull request on a hosted runner, its push on a self-hosted one) tested on another
 //      machine than the push would, and is not taken.
-//   6. That job's log shows what its checkout made. It has exactly one actions/checkout step, and
-//      exactly one "HEAD is now at" line in the whole log, and that line is inside the checkout
-//      step and reads "Merge <head> into <base>": GitHub's merge of the pull request. The head
+//   6. That job's log shows what its checkouts made. Every "HEAD is now at" line in the log is
+//      inside an actions/checkout step, one to a step. Exactly one of those steps checks out this
+//      repository, and its line reads "Merge <head> into <base>": GitHub's merge of the pull
+//      request. Each other checkout step (its repository, ref and path read from the inputs the
+//      runner prints under "with:") is of a repository named in pinned-checkouts, at a ref that is
+//      a full commit sha, into a relative path that is a directory of its own, and its line is at
+//      that commit. The head
 //      there is the pull request's head, and that base is inside the head by GitHub's compare. A
 //      merge of a base the head already holds is the head's own tree, so the checkout was exactly
 //      the pushed tree, whatever branch the pull request pointed at then and whatever main did
@@ -75,6 +84,7 @@ export function factsOf(env) {
     runId: text('GITHUB_RUN_ID'),
     runnerName: text('RUNNER_NAME'),
     declared: text('SAME_ON_PULL_REQUEST'),
+    pinned: text('PINNED_CHECKOUTS'),
   };
 }
 
@@ -157,28 +167,89 @@ export function runnerProblem(me, twin) {
 
 const STEP_START = /##\[group\]Run (.*)$/;
 const CHECKOUT_STEP = /^actions\/checkout@/;
-const HEAD_LINE = /HEAD is now at [0-9a-f]{7,40} /;
+const HEAD_LINE = /HEAD is now at ([0-9a-f]{7,40}) /;
 const MERGE_LINE = /HEAD is now at [0-9a-f]{7,40} Merge ([0-9a-f]{40}) into ([0-9a-f]{40})\s*$/;
+/** The runner's timestamp at the start of every log line. */
+const STAMP = /^\d{4}-\d\d-\d\dT[0-9:.]+Z /;
+/** One input of a step's "with:" block, as the runner prints it: two spaces, name, colon, value. */
+const WITH_INPUT = /^ {2}([A-Za-z0-9_-]+): ?(.*)$/;
+
 /**
- * What a job's log shows its tests ran on: { head, base } of the pull request merge its one
- * checkout made, or { why }. The log is cut into steps at each "##[group]Run <step>" line; there
- * must be exactly one actions/checkout step, exactly one "HEAD is now at" line in the whole log,
- * and that line inside the checkout step, naming a merge. Pure.
+ * The repositories a caller named in pinned-checkouts: owner/name words, lower case, split on
+ * whitespace or commas. A word that is not owner/name is dropped, so it names nothing. Pure.
  */
-export function checkoutMerge(log) {
+export function pinnedList(text) {
+  return [...new Set(String(text ?? '').split(/[\s,]+/).map((w) => w.trim().toLowerCase()).filter((w) => REPO_RE.test(w)))];
+}
+
+/** Why a pinned checkout's path is not a directory of its own under the workspace, or ''. Pure. */
+function pathProblem(path) {
+  const p = String(path ?? '').trim();
+  if (!p) return 'no path, so it checks out over the workspace';
+  if (p.startsWith('/') || /^[A-Za-z]:/.test(p) || p.startsWith('~')) return `the path ${p} is not under the workspace`;
+  const parts = p.split(/[\\/]+/).filter(Boolean);
+  if (parts.length === 0 || parts.every((x) => x === '.') || parts.includes('..')) return `the path ${p} is not a directory of its own under the workspace`;
+  return '';
+}
+
+/**
+ * What a job's log shows its tests ran on: { head, base } of the pull request merge its checkout of
+ * this repository made, or { why }. The log is cut into steps at each "##[group]Run <step>" line,
+ * and each actions/checkout step's "with:" block (the inputs the runner prints, expressions already
+ * filled in) says what it checked out. Every "HEAD is now at" line must be inside an actions/checkout
+ * step, and each of those steps must have exactly one. Exactly one checkout is of this repository
+ * (its repository input, or none, which is this repository), and its line names a merge. Every
+ * other checkout is of a repository the caller named in pinned-checkouts, into a path of its own
+ * under the workspace, at a ref that is a full commit sha, and its line is at that commit. Pure.
+ * opts: { repo: owner/name, pinned: [owner/name, ...] (lower case) }.
+ */
+export function checkoutMerge(log, opts = {}) {
+  const repo = String(opts.repo ?? '').toLowerCase();
+  const pinned = Array.isArray(opts.pinned) ? opts.pinned : [];
   const lines = String(log ?? '').split(/\r?\n/);
-  let step = '';
-  let checkouts = 0;
-  const heads = [];
-  for (const line of lines) {
-    const s = STEP_START.exec(line);
-    if (s) { step = s[1].trim(); if (CHECKOUT_STEP.test(step)) checkouts++; continue; }
-    if (HEAD_LINE.test(line)) heads.push({ line, step });
+  const steps = [];
+  let cur = { name: '', checkout: false, inputs: {}, heads: [] };
+  let inWith = false;
+  let first = false;
+  for (const raw of lines) {
+    const s = STEP_START.exec(raw);
+    if (s) {
+      cur = { name: s[1].trim(), inputs: {}, heads: [] };
+      cur.checkout = CHECKOUT_STEP.test(cur.name);
+      steps.push(cur);
+      inWith = false; first = true;
+      continue;
+    }
+    const line = raw.replace(STAMP, '');
+    if (first && cur.checkout && line === 'with:') { inWith = true; first = false; continue; }
+    first = false;
+    if (inWith) {
+      const w = WITH_INPUT.exec(line);
+      if (w) { if (!(w[1] in cur.inputs)) cur.inputs[w[1]] = w[2].trim(); continue; }
+      inWith = false;
+    }
+    if (HEAD_LINE.test(line)) {
+      if (!cur.checkout) return { why: `a "HEAD is now at" line is outside every checkout step (in ${cur.name ? `"${cur.name.slice(0, 60)}"` : 'the job\'s setup'}), so something after the checkout may have moved what the tests ran on` };
+      cur.heads.push(line);
+    }
   }
-  if (checkouts !== 1) return { why: `the job has ${checkouts} actions/checkout steps, not one` };
-  if (heads.length !== 1) return { why: `the log has ${heads.length} "HEAD is now at" lines, not one, so something after the checkout may have moved what the tests ran on` };
-  if (!CHECKOUT_STEP.test(heads[0].step)) return { why: 'its one "HEAD is now at" line is not in the checkout step' };
-  const m = MERGE_LINE.exec(heads[0].line);
+  const checkouts = steps.filter((st) => st.checkout);
+  const repoOf = (st) => String(st.inputs.repository || repo).toLowerCase();
+  const own = checkouts.filter((st) => repoOf(st) === repo);
+  if (own.length !== 1) return { why: `the job has ${own.length} actions/checkout steps of ${repo || 'this repository'}, not one` };
+  for (const st of checkouts) {
+    if (st.heads.length !== 1) return { why: `a checkout of ${repoOf(st)} printed ${st.heads.length} "HEAD is now at" lines, not one` };
+    if (st === own[0]) continue;
+    const other = repoOf(st);
+    if (!pinned.includes(other)) return { why: `the job also checks out ${other}, which the caller has not named in pinned-checkouts` };
+    const ref = String(st.inputs.ref ?? '');
+    if (!SHA_RE.test(ref)) return { why: `its checkout of ${other} is at ${ref ? `the ref ${ref.slice(0, 60)}` : 'no ref'}, not a full commit sha, so a later run may get another commit` };
+    const where = pathProblem(st.inputs.path);
+    if (where) return { why: `its checkout of ${other} has ${where}` };
+    const at = HEAD_LINE.exec(st.heads[0])[1];
+    if (!ref.startsWith(at)) return { why: `its checkout of ${other} asked for ${ref.slice(0, 7)} and is at ${at}` };
+  }
+  const m = MERGE_LINE.exec(own[0].heads[0]);
   if (!m) return { why: 'the checkout did not check out a pull request merge' };
   return { head: m[1], base: m[2] };
 }
@@ -264,7 +335,7 @@ export async function decide(env, io = { fetch: globalThis.fetch }) {
     const elsewhere = runnerProblem(me, twins[0]);
     if (elsewhere) return { tested: false, why: `${elsewhere} (${run.html_url ?? run.id})` };
     // What that job checked out.
-    const seen = checkoutMerge(await getLog(io, env, f.repo, twins[0].id));
+    const seen = checkoutMerge(await getLog(io, env, f.repo, twins[0].id), { repo: f.repo, pinned: pinnedList(f.pinned) });
     if (seen.why) return { tested: false, why: `in the log of "${me.name}" there, ${seen.why}; what it tested is not known` };
     const { head: tHead, base: tBase } = seen;
     if (tHead !== head) return { tested: false, why: `"${me.name}" there checked out a merge of ${tHead.slice(0, 7)}, not of #${pr.number}'s head ${head.slice(0, 7)}` };
