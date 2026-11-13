@@ -142,6 +142,10 @@ export function evalExpr(src, ctx, { strict = false, trusted = null } = {}) {
     failure: () => false,
     cancelled: () => false,
   };
+  // Every lookup by a name from the expression reads own properties only: `__proto__(x)`,
+  // `toString()`, a context named `constructor` or a path like github.event.constructor would
+  // otherwise reach Object.prototype, where Actions has no such function, context or property.
+  const own = (o, key) => o !== null && o !== undefined && Object.hasOwn(Object(o), key);
   // Whether a github.event path is one the sender cannot choose: a trusted path, or on the way to one.
   const known = (path) => trusted.some((t) => t === path || t.startsWith(`${path}.`) || path.startsWith(`${t}.`));
   const primary = () => {
@@ -157,22 +161,22 @@ export function evalExpr(src, ctx, { strict = false, trusted = null } = {}) {
       const args = [];
       if (peek() !== ')') for (args.push(or()); peek() === ','; p++, args.push(or()));
       eat(')');
-      if (!fns[k.v]) throw new Error(`unknown function ${k.v}`);
+      if (!own(fns, k.v)) throw new Error(`unknown function ${k.v}`);
       if (trusted && STATUS_FNS.has(k.v)) return UNKNOWN;
       return args.some((a) => U(a) || S(a)) ? UNKNOWN : fns[k.v](...args);
     }
-    if (strict && !(k.v in ctx) && !(trusted && UNKNOWN_CONTEXTS.has(k.v))) throw new Error(`unknown context ${k.v}`);
-    let v = trusted && (UNKNOWN_CONTEXTS.has(k.v) || !(k.v in ctx)) ? UNKNOWN : ctx[k.v] ?? null;
+    if (strict && !own(ctx, k.v) && !(trusted && UNKNOWN_CONTEXTS.has(k.v))) throw new Error(`unknown context ${k.v}`);
+    let v = trusted && (UNKNOWN_CONTEXTS.has(k.v) || !own(ctx, k.v)) ? UNKNOWN : own(ctx, k.v) ? ctx[k.v] ?? null : null;
     const path = [k.v];
     for (let depth = 0; ; depth++) {
       let key;
       if (peek() === '.') { p++; key = eat('id').v; } else if (peek() === '[') { p++; key = or(); eat(']'); } else return v;
       if (U(v) || S(v)) { v = UNKNOWN; continue; }
       if (U(key)) { v = UNKNOWN; continue; }
-      if (strict && k.v === 'matrix' && depth === 0 && !(key in (v ?? {}))) throw new Error(`unknown matrix.${key}`);
+      if (strict && k.v === 'matrix' && depth === 0 && !own(v, key)) throw new Error(`unknown matrix.${key}`);
       path.push(String(key));
-      if (trusted && k.v === 'github' && depth === 0 && !(String(key) in (v ?? {}))) { v = UNKNOWN; continue; }
-      v = trusted && path[0] === 'github' && path[1] === 'event' && path.length > 2 && !known(path.slice(2).join('.')) ? UNKNOWN : v?.[key] ?? null;
+      if (trusted && k.v === 'github' && depth === 0 && !own(v, String(key))) { v = UNKNOWN; continue; }
+      v = trusted && path[0] === 'github' && path[1] === 'event' && path.length > 2 && !known(path.slice(2).join('.')) ? UNKNOWN : own(v, key) ? v[key] ?? null : null;
     }
   };
   const cmp = () => { let v = primary(); while (peek() === '==' || peek() === '!=') { const op = toks[p++].t; const r = primary(); const e = eq(v, r); v = U(e) ? UNKNOWN : op === '==' ? e : !e; } return v; };

@@ -44,6 +44,30 @@ check('reads literals, paths and functions',
   evalIf("contains(fromJSON('[\"a\",\"b\"]'), x.y[0]) && x.z == null && 'A' == 'a'", { x: { y: ['B'] } })
   && !evalIf("x.y != 'q' && x.y == 'q'", { x: { y: 'q' } }));
 {
+  // The fuzzer's crash of 2026-11-13 (askalf/ci run 43463587459): `__proto__(...)` passed the
+  // function check through Object.prototype and threw a TypeError calling it.
+  const plainError = (src, ctx, opts, msg) => {
+    try { evalExpr(src, ctx, opts); return false; } catch (e) { return e.constructor === Error && msg.test(e.message); }
+  };
+  check('a name on Object.prototype is no function: a plain Error, never a TypeError or a built-in',
+    ['__proto__', 'toString', 'constructor', 'hasOwnProperty', 'valueOf'].every((f) =>
+      plainError(`${f}('x')`, {}, {}, /^unknown function /)
+      && plainError(`${f}(a.b)`, { a: { b: 1 } }, { trusted: ['x'] }, /^unknown function /)));
+  check('a context or a property named after Object.prototype reads as missing',
+    evalExpr('constructor', {}) === null && evalExpr('toString', {}) === null
+    && evalExpr('x.constructor', { x: {} }) === null && evalExpr("x['__proto__']", { x: {} }) === null
+    && evalExpr('x.toString.name', { x: { a: 1 } }) === null
+    && plainError('constructor', {}, { strict: true }, /^unknown context constructor$/)
+    && plainError('matrix.constructor', { matrix: { os: 'a' } }, { strict: true }, /^unknown matrix\.constructor$/));
+  check('own properties still read, strings and arrays included',
+    evalExpr('x.y', { x: { y: 'v' } }) === 'v' && evalExpr('x.y[1]', { x: { y: ['a', 'b'] } }) === 'b'
+    && evalExpr('x.y.length', { x: { y: 'abc' } }) === 3 && evalExpr('x.n', { x: { n: null } }) === null);
+  const gh = { github: { event: { constructor: 'own' } } };
+  check('trusted: a github property named after Object.prototype is UNKNOWN unless the caller supplied it',
+    evalExpr('github.constructor', { github: {} }, { trusted: ['x'] }) === UNKNOWN
+    && evalExpr('github.event.constructor', gh, { trusted: ['constructor'] }) === 'own');
+}
+{
   const repo = new Other(['askalf/example'], { repo: true });
   const login = new Other(['dependabot[bot]']);
   const ctx = { r: repo, s: repo, l: login };
