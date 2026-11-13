@@ -13,6 +13,12 @@ names the commit's date and the pull request it came from.
 
 ## November 2026
 
+- The fleet-status check's expression evaluator reads only its own tables. A function, context or
+  property named after something every JavaScript object inherits (`__proto__(x)`, `toString()`,
+  a context `constructor`, `github.event.constructor`) used to reach Object.prototype: the fuzzer
+  found `__proto__(...)` throwing a TypeError, and the others read as built-ins where Actions has
+  none. They are now an unknown function (a plain Error), a missing context or property (null),
+  or, when trusted, UNKNOWN.
 - `actions/tree-tested` takes `pinned-checkouts`: other repositories a job checks out at a commit
   its own tree names, such as a full sha read from a file of the checkout. The job log must show
   each one checked out at a full commit sha, into a directory of its own under the workspace, and
