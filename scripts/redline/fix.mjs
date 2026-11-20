@@ -227,7 +227,7 @@ export function inlineItems(comments) {
 // ---------- this repository's fix history ----------
 
 /** How much of the repository's earlier fixes the brief carries. */
-export const HISTORY = { fixes: 5, notesChars: 1_200, findings: 6, problemChars: 200 };
+export const HISTORY = { fixes: 5, notesChars: 1_200, findings: 6, problemChars: 200, reviewPages: 10 };
 /** The account ci posts its fix comments as, and the heading of an applied fix (askalf/platform apps/ci/src/runtime/fix-ci.ts). */
 export const FIX_POSTER = 'askalf';
 export const FIX_APPLIED_HEADING = '## Fix at';
@@ -276,15 +276,34 @@ export function historyFinding(f) {
 }
 
 /**
- * The repository's earlier fixes by this lane: one read of its newest issue comments, then one read
- * of each fixed pull request's reviews, at most HISTORY.fixes of them. Every entry is the
- * repository's own pull request history, which anyone who can read the repository can read.
+ * Every review of a pull request, page by page: GitHub lists them oldest first, so the change
+ * request a fix answered and the verdict after it can sit past the first page. Null when the pull
+ * request has more than maxPages pages: an entry read in part could pair the fix with the wrong
+ * findings and verdict, so it is left out instead.
+ */
+export async function allReviews(ctx, repo, pr, maxPages = HISTORY.reviewPages) {
+  const out = [];
+  for (let page = 1; page <= maxPages; page++) {
+    const rows = await gh(ctx, `/repos/${repo}/pulls/${pr}/reviews?per_page=100&page=${page}`);
+    const list = Array.isArray(rows) ? rows : [];
+    out.push(...list);
+    if (list.length < 100) return out;
+  }
+  return null;
+}
+
+/**
+ * The repository's earlier fixes by this lane: one read of its newest issue comments, then each
+ * fixed pull request's reviews (allReviews), at most HISTORY.fixes of them; a pull request with more
+ * reviews than allReviews reads is left out. Every entry is the repository's own pull request
+ * history, which anyone who can read the repository can read.
  */
 export async function repoFixHistory(ctx, repo, currentPr, reviewer) {
   const comments = await gh(ctx, `/repos/${repo}/issues/comments?sort=created&direction=desc&per_page=100`);
   const out = [];
   for (const f of appliedFixComments(comments, currentPr)) {
-    const reviews = await gh(ctx, `/repos/${repo}/pulls/${f.pr}/reviews?per_page=100`);
+    const reviews = await allReviews(ctx, repo, f.pr);
+    if (reviews === null) continue;
     const { asked, next } = fixVerdicts(reviews, f.at, reviewer);
     const findings = asked ? parseReviewBody(asked.body).findings.slice(0, HISTORY.findings).map(historyFinding) : [];
     out.push({ pr: f.pr, next, findings, notes: f.notes.slice(0, HISTORY.notesChars) });

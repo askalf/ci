@@ -15,7 +15,7 @@ import {
   failingTests, FAILING_NAMES_MAX, runSecrets, leaksSecret, maskSecrets, berryInstall, runAccount, asRunAccount, proxyEnv,
   runAccountUidProblem, TOOLS, FINISH_REQUIRED, askForFinish, checkFinish, runLoop, buildBrief, childEnv, onlyOrigins, runFix,
   LIMITS, OUTCOMES, AUTHOR, FIX_VERSION, DEFAULT_MODEL, SUBJECT_BANNED, EFFORT_LEVELS, fixEffort, priorRounds, REVIEW_PAGES_MAX,
-  HISTORY, FIX_POSTER, appliedFixComments, fixVerdicts, historyFinding, repoFixHistory, formatHistory,
+  HISTORY, FIX_POSTER, appliedFixComments, fixVerdicts, historyFinding, allReviews, repoFixHistory, formatHistory,
 } from './fix.mjs';
 import { bumpCaller, fixCallerYaml, REVIEW_WORKFLOW, FIX_WORKFLOW, PUBLIC_TEXT_WORKFLOW, POST_WORKFLOW, CALLERS } from './pin.mjs';
 
@@ -437,9 +437,24 @@ console.log('\n  this repository\'s fix history');
   } };
   const hist = await repoFixHistory(ctx, 'askalf/r', 7, 'redline');
   check('history reads the newest comments once and each fixed pull request\'s reviews once',
-    paths[0] === '/repos/askalf/r/issues/comments?sort=created&direction=desc&per_page=100' && paths.slice(1).join(',') === '/repos/askalf/r/pulls/6/reviews?per_page=100,/repos/askalf/r/pulls/5/reviews?per_page=100');
+    paths[0] === '/repos/askalf/r/issues/comments?sort=created&direction=desc&per_page=100' && paths.slice(1).join(',') === '/repos/askalf/r/pulls/6/reviews?per_page=100&page=1,/repos/askalf/r/pulls/5/reviews?per_page=100&page=1');
   check('each entry names the pull request, the next verdict, the findings it answered and the notes',
     hist.length === 2 && hist[0].pr === 6 && hist[0].next === 'approved' && hist[0].findings.length > 0 && hist[0].notes.startsWith('Reads the token') && hist[1].next === 'no verdict yet');
+  // Reviews come oldest first: the answered change request and the verdict can be past page one.
+  const old = Array.from({ length: 100 }, (_, i) => rv('redline', 'CHANGES_REQUESTED', `2026-10-01T00:${String(i % 60).padStart(2, '0')}:00Z`, 'old'));
+  const pager = (pages) => ({ readToken: 't', sleep: async () => {}, fetch: async (url) => {
+    const page = Number(/[?&]page=(\d+)/.exec(String(url))?.[1] ?? 1);
+    return new Response(JSON.stringify(pages(page)), { status: 200, headers: { 'content-type': 'application/json' } });
+  } });
+  const two = await allReviews(pager((page) => page === 1 ? old : [rv('redline', 'CHANGES_REQUESTED', '2026-11-10T01:36:00Z', 'asked'), rv('redline', 'APPROVED', '2026-11-10T03:00:00Z')]), 'askalf/r', 6);
+  const v2 = fixVerdicts(two, at, 'redline');
+  check('reviews past the first page are read, so the answered request and the verdict there are found', two.length === 102 && v2.asked.body === 'asked' && v2.next === 'approved');
+  check('a pull request with more review pages than are read gives no reviews, not a partial list',
+    (await allReviews(pager(() => old), 'askalf/r', 6, 3)) === null);
+  const fullPages = pager(() => old);
+  const cappedCtx = { ...fullPages, fetch: async (url) => String(url).includes('/issues/comments')
+    ? new Response(JSON.stringify(comments.slice(3, 4)), { status: 200, headers: { 'content-type': 'application/json' } }) : fullPages.fetch(url) };
+  check('an earlier fix whose reviews cannot all be read is left out of the history', (await repoFixHistory(cappedCtx, 'askalf/r', 7, 'redline')).length === 0);
   const brief = buildBrief({ pr: { number: 7, title: 't', body: 'b', head: { ref: 'f' }, base: { ref: 'main', repo: { full_name: 'askalf/r' } } }, files: [],
     headSha: H40, review: parseReviewBody(BODY), items: [], plan: { pm: 'npm', scripts: ['test'] }, installNote: 'ok', diff: '', history: hist });
   check('the brief carries the history as background, after the findings it answers',
