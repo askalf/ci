@@ -13,6 +13,12 @@ names the commit's date and the pull request it came from.
 
 ## November 2026
 
+- The fix lane's brief can carry lessons the lane drew from its earlier fixes that fell short: the
+  five that best match the review, from a lessons service the host names in `fix-exec.env`
+  (`FIX_LESSONS_URL`, `FIX_LESSONS_CLIENT_ID`, `FIX_LESSONS_CLIENT_SECRET`). Background only, below
+  the findings and above the history; a run on a repository not known to be private asks for lessons
+  drawn on public repositories only. Off without the settings or with `FIX_LESSONS=off`; a failed
+  read leaves the brief as it was; the token is masked like the run's other secrets.
 - The fix lane's brief carries the repository's earlier fixes by the lane: the newest five
   `## Fix at` comments ci posted on its other pull requests, the findings each answered, and the
   reviewer's next verdict there. Background only, below the findings the run answers; a failed read
