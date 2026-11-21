@@ -2086,6 +2086,21 @@ console.log('\n  model pins: the models file, the newest of a family, the list d
   check('with no list nothing is behind, the reason is kept, and no model call is null',
     blind.behind.length === 0 && blind.catalog === null && blind.catalog_error === 'dario down' && blind.answered_by === null);
 
+  const { versionIn, pinBehind } = reviewModule;
+  check('a version is read only from an id of the family', versionIn('gpt-*-sol', 'gpt-6.2-sol').join() === '6,2' && versionIn('gpt-*-sol', 'gpt-6.2-astra') === null && versionIn('gpt-*-sol', '') === null);
+  check('a pin behind the newest of its family is behind', pinBehind('gpt-*-sol', 'gpt-6.1-sol', 'gpt-6.2-sol'));
+  check('a pin ahead of the list is not behind', !pinBehind('gpt-*-sol', 'gpt-6.2-sol', 'gpt-6.1-sol'));
+  check('the same version spelled another way is not behind', !pinBehind('gpt-*-sol', 'gpt-6-sol', 'gpt-6.0-sol') && !pinBehind('gpt-*-sol', 'gpt-6.2-sol', 'gpt-6.2-sol'));
+  check('an empty pin, or one outside its family, is behind any newest of the family',
+    pinBehind('gpt-*-sol', '', 'gpt-6.2-sol') && pinBehind('gpt-*-sol', 'gpt-5.6-terra', 'gpt-6-sol') && pinBehind('claude-opus-*', 'claude-opus-5-5-20261001', 'claude-opus-5-5'));
+  check('nothing is behind a newest outside the family, or none', !pinBehind('gpt-*-sol', '', '') && !pinBehind('gpt-*-sol', 'gpt-5.6-terra', 'gpt-6.2-astra'));
+  const ahead = modelsRecord({
+    repo: 'r/r', pr: 1, headSha: HEAD, lens: 'first', at: 'x', pins: { REDLINE_MODEL: 'gpt-6.2-sol', REDLINE_DEEP_MODEL: 'gpt-6-astra', REDLINE_PIN_MODEL: 'gpt-5.6-terra' },
+    tracks: { REDLINE_MODEL: 'gpt-*-sol', REDLINE_DEEP_MODEL: 'gpt-*-astra', REDLINE_PIN_MODEL: 'gpt-*-sol' }, catalog: ['gpt-6.1-sol', 'gpt-6.0-astra'], why: '', answeredBy: '',
+  });
+  check('the record marks behind only a pin the list has a newer version for, or one outside its family',
+    ahead.behind.join() === 'REDLINE_PIN_MODEL' && ahead.newest.REDLINE_MODEL === 'gpt-6.1-sol');
+
   const ctx = { darioUrl: 'http://d', darioKey: '', model: 'gpt-6.2-sol', fetch: async () => new Response(JSON.stringify({ content: [] }), { status: 200 }), sleep: async () => {}, now: () => Date.now() };
   await callModelWith(ctx, { system: 's', messages: [{ role: 'user', content: 'hi' }], tools: [] });
   check('a model call that answers notes the model it was read on', ctx.answeredBy === 'gpt-6.2-sol');

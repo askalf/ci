@@ -1658,19 +1658,36 @@ export function trackMatcher(pattern) {
   return new RegExp(`^${esc(before)}(\\d+(?:[.-]\\d{1,2})*)${esc(after)}$`);
 }
 
+/** The version of `id` in `pattern`'s family, as a list of numbers, or null when `id` is not of it. */
+export function versionIn(pattern, id) {
+  const re = trackMatcher(pattern);
+  const m = re ? re.exec(String(id ?? '').toLowerCase()) : null;
+  return m ? m[1].split(/[.-]/).map(Number) : null;
+}
+
 /** The id of the newest version of `pattern`'s family among `ids`, or '' when none matches. */
 export function newestMatching(pattern, ids) {
-  const re = trackMatcher(pattern);
-  if (!re) return '';
   let best = '';
   let bestVersion = null;
   for (const id of ids ?? []) {
-    const m = re.exec(String(id).toLowerCase());
-    if (!m) continue;
-    const v = m[1].split(/[.-]/).map(Number);
+    const v = versionIn(pattern, id);
+    if (!v) continue;
     if (!bestVersion || compareVersions(v, bestVersion) > 0) { best = String(id); bestVersion = v; }
   }
   return best;
+}
+
+/**
+ * Whether `pin` should move to `newest`, the newest of `pattern`'s family in a list. An empty pin,
+ * or one outside the family, always should. A pin of the family should only when newest's version
+ * is greater: a pin ahead of the list, or the same version spelled another way (6 and 6.0), stays.
+ * Nothing moves to an id outside the family. Pure.
+ */
+export function pinBehind(pattern, pin, newest) {
+  const to = versionIn(pattern, newest);
+  if (!to) return false;
+  const from = versionIn(pattern, pin);
+  return !from || compareVersions(to, from) > 0;
 }
 
 /** -1, 0 or 1 for two version number lists; a missing part counts as 0, so 6 equals 6.0. */
@@ -1745,7 +1762,7 @@ export function modelsRecord({ repo, pr, headSha, lens, at, pins, tracks, catalo
   return {
     version: 1, repo, pr, head_sha: headSha, lens, at,
     pins, tracks, newest,
-    behind: Object.keys(newest).filter((k) => newest[k] && newest[k] !== pins[k]),
+    behind: Object.keys(newest).filter((k) => pinBehind(tracks[k], pins[k], newest[k])),
     catalog: catalog ?? null, catalog_error: catalog ? '' : why,
     answered_by: answeredBy || null,
   };
@@ -1805,7 +1822,7 @@ async function main() {
       repo: ctx.repo, pr: ctx.pr, headSha: ctx.headSha, lens: LENS || 'first', at: new Date().toISOString(),
       pins, tracks: pinned.tracks, catalog: catalog.ids, why: catalog.why, answeredBy: ctx.answeredBy,
     });
-    for (const k of rec.behind) console.log(`::notice::${k} is pinned to ${pins[k] || 'nothing'}; the newest ${pinned.tracks[k]} dario lists is ${rec.newest[k]}`);
+    for (const k of rec.behind) console.log(`::notice::${k} is pinned to ${pins[k] || 'nothing'}; dario lists ${rec.newest[k]}, a newer ${pinned.tracks[k]}`);
     if (rec.answered_by) console.log(`read on ${rec.answered_by}`);
     if (!modelsFile) return;
     try { mkdirSync(dirname(modelsFile), { recursive: true }); writeFileSync(modelsFile, `${JSON.stringify(rec, null, 2)}\n`); } catch (e) {
