@@ -4,7 +4,8 @@
 // Environment:
 //   FUZZ_SECONDS       per-target budget in seconds (default 30)
 //   FUZZ_JOBS          how many targets fuzz at once (default 1, one after another); each still
-//                      gets its whole FUZZ_SECONDS, so CI sets it to the runner's CPU count
+//                      gets its whole FUZZ_SECONDS. CI on GitHub-hosted runners sets it to the
+//                      runner's CPU count; on the self-hosted runner it stays unset, so one at a time
 //   FUZZ_ONLY          run only the target with this name (default: all)
 //   FUZZ_CORPUS_DIR    root of per-target corpus dirs, created on demand; libFuzzer reads its
 //                      seeds from <dir>/<target> and saves every interesting input there, so a
