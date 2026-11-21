@@ -295,6 +295,15 @@ the setting when that is higher. The count is of change requests, not of fix run
 request was answered by hand, the first fix run already sends `high`. Unset, no request names an
 effort.
 
+A fix run also reads the repository's earlier fixes by this lane and puts them in the brief as
+background, below the findings it answers: the newest five `## Fix at` comments ci posted as `askalf`
+on the repository's other pull requests, each with the findings of the change request it answered
+and the reviewer's next verdict on that pull request (approved, changes requested again, or none
+yet). That is one read of the repository's newest 100 issue comments, then each fixed pull request's
+reviews page by page, up to ten pages of 100 (a pull request with more is left out rather than read
+in part), with the run's own read token; everything read is the repository's own pull request
+history. A failed read leaves the brief as it was. `FIX_HISTORY=off` in `fix-exec.env` turns it off.
+
 ## The pin bump
 
 `redline-pin-bump.yml` runs hourly and on dispatch, and picks the newest `main` commit that changed

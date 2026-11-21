@@ -15,6 +15,7 @@ import {
   failingTests, FAILING_NAMES_MAX, runSecrets, leaksSecret, maskSecrets, berryInstall, runAccount, asRunAccount, proxyEnv,
   runAccountUidProblem, TOOLS, FINISH_REQUIRED, askForFinish, checkFinish, runLoop, buildBrief, childEnv, onlyOrigins, runFix,
   LIMITS, OUTCOMES, AUTHOR, FIX_VERSION, DEFAULT_MODEL, SUBJECT_BANNED, EFFORT_LEVELS, fixEffort, priorRounds, REVIEW_PAGES_MAX,
+  HISTORY, FIX_POSTER, appliedFixComments, fixVerdicts, historyFinding, allReviews, repoFixHistory, formatHistory,
 } from './fix.mjs';
 import { bumpCaller, fixCallerYaml, REVIEW_WORKFLOW, FIX_WORKFLOW, PUBLIC_TEXT_WORKFLOW, POST_WORKFLOW, CALLERS } from './pin.mjs';
 
@@ -395,6 +396,74 @@ function loopWorld(turns, { canForce = true } = {}) {
   const brief = buildBrief({ pr: { number: 7, title: 't', body: 'b', head: { ref: 'f' }, base: { ref: 'main', repo: { full_name: 'askalf/r' } } }, files: [{ status: 'modified', additions: 1, deletions: 0, filename: 'src/b.js' }], headSha: HEAD,
     review: parseReviewBody(BODY), items: inlineItems([{ path: 'src/b.js', line: 1, body: 'c' }]), plan: { pm: 'npm', scripts: ['test'] }, installNote: 'ok', diff: '+x' });
   check('the brief carries the PR, the findings, the inline comments, the allowlist and the test script', /PR #7: t/.test(brief) && /\[1\] blocking `src\/b\.js:1`/.test(brief) && /\[1\] src\/b\.js:1\nc/.test(brief) && /run accepts: npm test, node <file>/.test(brief) && /Test script: `npm test`/.test(brief) && /PR diff:\n\+x/.test(brief));
+}
+
+console.log('\n  this repository\'s fix history');
+{
+  const H40 = 'a'.repeat(40);
+  const c = (login, issue, body, at = '2026-11-10T01:41:17Z') => ({ user: { login }, issue_url: `https://api.github.com/repos/askalf/r/issues/${issue}`, body, created_at: at });
+  const comments = [
+    c(FIX_POSTER, 9, `## Fix not applied at ${H40}: refused\n\nno`),
+    c('someone', 8, `## Fix at ${H40}\n\nnot ours`),
+    c(FIX_POSTER, 7, `## Fix at ${H40}\n\nthis pull request`),
+    c(FIX_POSTER, 6, `## Fix at ${H40}\r\n\r\nReads the token from the config.\r\n\r\nFiles: \`src/b.js\``, '2026-11-10T01:41:17Z'),
+    c(FIX_POSTER, 5, `## Fix at ${H40}`, '2026-11-09T00:00:00Z'),
+    c(FIX_POSTER, 4, 'a plain comment'),
+  ];
+  const fixes = appliedFixComments(comments, 7);
+  check('history keeps only ci\'s applied fixes on other pull requests, newest first, notes kept, a heading with no notes too',
+    fixes.map((f) => f.pr).join(',') === '6,5' && fixes[0].notes.startsWith('Reads the token') && !fixes[0].notes.includes('\r') && fixes[1].notes === '');
+  check('history stops at its cap', appliedFixComments(Array.from({ length: 9 }, (_, i) => c(FIX_POSTER, 20 + i, `## Fix at ${H40}`)), 7).length === HISTORY.fixes);
+
+  const at = Date.parse('2026-11-10T01:41:17Z');
+  const rv = (login, state, t, body = '') => ({ user: { login }, state, submitted_at: t, body });
+  const reviews = [rv('redline', 'CHANGES_REQUESTED', '2026-11-09T20:00:00Z', 'old'), rv('redline', 'CHANGES_REQUESTED', '2026-11-10T01:36:00Z', 'asked'),
+    rv('other', 'APPROVED', '2026-11-10T02:00:00Z'), rv('redline', 'COMMENTED', '2026-11-10T02:10:00Z'), rv('redline', 'APPROVED', '2026-11-10T03:00:00Z')];
+  const v = fixVerdicts(reviews, at, 'redline');
+  check('the fix answered the reviewer\'s last change request before it, and the next verdict is the reviewer\'s own',
+    v.asked.body === 'asked' && v.next === 'approved');
+  check('a later change request is "changes requested again"; none is "no verdict yet"',
+    fixVerdicts([rv('redline', 'CHANGES_REQUESTED', '2026-11-11T00:00:00Z')], at, 'redline').next === 'changes requested again'
+      && fixVerdicts([], at, 'redline').next === 'no verdict yet' && fixVerdicts([], at, 'redline').asked === null);
+  check('a finding is one line, cut', historyFinding({ severity: 'blocking', file: 'src/b.js', line: 3, problem: 'a\n  b ' + 'x'.repeat(400) }).startsWith('blocking src/b.js:3: a b x')
+    && historyFinding({ severity: 'minor', file: null, line: null, problem: 'p' }) === 'minor: p'
+    && historyFinding({ severity: 'blocking', file: 'f', line: null, problem: 'x'.repeat(400) }).length <= 'blocking f: '.length + HISTORY.problemChars);
+
+  const paths = [];
+  const ctx = { readToken: 't', sleep: async () => {}, fetch: async (url) => {
+    paths.push(String(url).replace('https://api.github.com', ''));
+    const body = String(url).includes('/issues/comments') ? comments : String(url).includes('/pulls/6/reviews') ? [rv('redline', 'CHANGES_REQUESTED', '2026-11-10T01:36:00Z', BODY), rv('redline', 'APPROVED', '2026-11-10T03:00:00Z')] : [];
+    return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
+  } };
+  const hist = await repoFixHistory(ctx, 'askalf/r', 7, 'redline');
+  check('history reads the newest comments once and each fixed pull request\'s reviews once',
+    paths[0] === '/repos/askalf/r/issues/comments?sort=created&direction=desc&per_page=100' && paths.slice(1).join(',') === '/repos/askalf/r/pulls/6/reviews?per_page=100&page=1,/repos/askalf/r/pulls/5/reviews?per_page=100&page=1');
+  check('each entry names the pull request, the next verdict, the findings it answered and the notes',
+    hist.length === 2 && hist[0].pr === 6 && hist[0].next === 'approved' && hist[0].findings.length > 0 && hist[0].notes.startsWith('Reads the token') && hist[1].next === 'no verdict yet');
+  // Reviews come oldest first: the answered change request and the verdict can be past page one.
+  const old = Array.from({ length: 100 }, (_, i) => rv('redline', 'CHANGES_REQUESTED', `2026-10-01T00:${String(i % 60).padStart(2, '0')}:00Z`, 'old'));
+  const pager = (pages) => ({ readToken: 't', sleep: async () => {}, fetch: async (url) => {
+    const page = Number(/[?&]page=(\d+)/.exec(String(url))?.[1] ?? 1);
+    return new Response(JSON.stringify(pages(page)), { status: 200, headers: { 'content-type': 'application/json' } });
+  } });
+  const two = await allReviews(pager((page) => page === 1 ? old : [rv('redline', 'CHANGES_REQUESTED', '2026-11-10T01:36:00Z', 'asked'), rv('redline', 'APPROVED', '2026-11-10T03:00:00Z')]), 'askalf/r', 6);
+  const v2 = fixVerdicts(two, at, 'redline');
+  check('reviews past the first page are read, so the answered request and the verdict there are found', two.length === 102 && v2.asked.body === 'asked' && v2.next === 'approved');
+  check('a pull request with more review pages than are read gives no reviews, not a partial list',
+    (await allReviews(pager(() => old), 'askalf/r', 6, 3)) === null);
+  const fullPages = pager(() => old);
+  const cappedCtx = { ...fullPages, fetch: async (url) => String(url).includes('/issues/comments')
+    ? new Response(JSON.stringify(comments.slice(3, 4)), { status: 200, headers: { 'content-type': 'application/json' } }) : fullPages.fetch(url) };
+  check('an earlier fix whose reviews cannot all be read is left out of the history', (await repoFixHistory(cappedCtx, 'askalf/r', 7, 'redline')).length === 0);
+  const brief = buildBrief({ pr: { number: 7, title: 't', body: 'b', head: { ref: 'f' }, base: { ref: 'main', repo: { full_name: 'askalf/r' } } }, files: [],
+    headSha: H40, review: parseReviewBody(BODY), items: [], plan: { pm: 'npm', scripts: ['test'] }, installNote: 'ok', diff: '', history: hist });
+  check('the brief carries the history as background, after the findings it answers',
+    /Earlier fixes on this repository by this lane, newest first \(2\)\. Background only/.test(brief) && /- PR #6; the reviewer's next verdict: approved/.test(brief)
+      && brief.indexOf('Earlier fixes') > brief.indexOf('Findings (') && /The fix's notes: Reads the token/.test(brief));
+  const plain = buildBrief({ pr: { number: 7, title: 't', body: 'b', head: { ref: 'f' }, base: { ref: 'main', repo: { full_name: 'askalf/r' } } }, files: [],
+    headSha: H40, review: parseReviewBody(BODY), items: [], plan: { pm: 'npm', scripts: ['test'] }, installNote: 'ok', diff: '' });
+  check('with no history the brief has no history section', !plain.includes('Earlier fixes'));
+  check('formatHistory says when the change request was not found', formatHistory({ pr: 3, next: 'no verdict yet', findings: [], notes: '' }).includes('(the change request it answered was not found)'));
 }
 
 console.log('\n  the run account and the proxy');

@@ -224,6 +224,102 @@ export function inlineItems(comments) {
     .filter((c) => c.body);
 }
 
+// ---------- this repository's fix history ----------
+
+/** How much of the repository's earlier fixes the brief carries. */
+export const HISTORY = { fixes: 5, notesChars: 1_200, findings: 6, problemChars: 200, reviewPages: 10 };
+/** The account ci posts its fix comments as, and the heading of an applied fix (askalf/platform apps/ci/src/runtime/fix-ci.ts). */
+export const FIX_POSTER = 'askalf';
+export const FIX_APPLIED_HEADING = '## Fix at';
+
+/**
+ * The lane's applied fixes on the repository's other pull requests, newest first: the comments ci
+ * posted as FIX_POSTER under `## Fix at <head>`, each with the fixer's notes. `comments` is the
+ * repository's issue comments, newest first. Pure.
+ */
+export function appliedFixComments(comments, currentPr, max = HISTORY.fixes) {
+  const out = [];
+  for (const c of Array.isArray(comments) ? comments : []) {
+    if (out.length >= max) break;
+    if (c?.user?.login !== FIX_POSTER) continue;
+    const body = String(c.body ?? '').replace(/\r\n/g, '\n');
+    const m = /^## Fix at ([0-9a-f]{7,40})[ \t]*(?:\n|$)/.exec(body);
+    if (!m) continue;
+    const pr = Number(/\/issues\/(\d+)$/.exec(String(c.issue_url ?? ''))?.[1]);
+    if (!Number.isSafeInteger(pr) || pr <= 0 || pr === currentPr) continue;
+    const at = Date.parse(String(c.created_at ?? ''));
+    if (!Number.isFinite(at)) continue;
+    out.push({ pr, head: m[1], at, notes: body.slice(m[0].length).trim() });
+  }
+  return out;
+}
+
+/**
+ * What the reviewer asked before a fix and said next after it, from that pull request's reviews:
+ * the reviewer's last change request at or before the fix, and the first approval or change request
+ * after it. Pure.
+ */
+export function fixVerdicts(reviews, at, reviewer) {
+  const by = (Array.isArray(reviews) ? reviews : [])
+    .filter((r) => r?.user?.login === reviewer && Number.isFinite(Date.parse(String(r.submitted_at ?? ''))))
+    .sort((a, b) => Date.parse(a.submitted_at) - Date.parse(b.submitted_at));
+  const asked = by.filter((r) => r.state === 'CHANGES_REQUESTED' && Date.parse(r.submitted_at) <= at).at(-1) ?? null;
+  const next = by.find((r) => Date.parse(r.submitted_at) > at && (r.state === 'APPROVED' || r.state === 'CHANGES_REQUESTED')) ?? null;
+  return { asked, next: next === null ? 'no verdict yet' : next.state === 'APPROVED' ? 'approved' : 'changes requested again' };
+}
+
+/** One finding of an earlier review, on one line. Pure. */
+export function historyFinding(f) {
+  const place = f.file ? ` ${f.file}${f.line ? `:${f.line}` : ''}` : '';
+  const problem = String(f.problem ?? '').replace(/\s+/g, ' ').trim().slice(0, HISTORY.problemChars);
+  return `${f.severity}${place}: ${problem}`;
+}
+
+/**
+ * Every review of a pull request, page by page: GitHub lists them oldest first, so the change
+ * request a fix answered and the verdict after it can sit past the first page. Null when the pull
+ * request has more than maxPages pages: an entry read in part could pair the fix with the wrong
+ * findings and verdict, so it is left out instead.
+ */
+export async function allReviews(ctx, repo, pr, maxPages = HISTORY.reviewPages) {
+  const out = [];
+  for (let page = 1; page <= maxPages; page++) {
+    const rows = await gh(ctx, `/repos/${repo}/pulls/${pr}/reviews?per_page=100&page=${page}`);
+    const list = Array.isArray(rows) ? rows : [];
+    out.push(...list);
+    if (list.length < 100) return out;
+  }
+  return null;
+}
+
+/**
+ * The repository's earlier fixes by this lane: one read of its newest issue comments, then each
+ * fixed pull request's reviews (allReviews), at most HISTORY.fixes of them; a pull request with more
+ * reviews than allReviews reads is left out. Every entry is the repository's own pull request
+ * history, which anyone who can read the repository can read.
+ */
+export async function repoFixHistory(ctx, repo, currentPr, reviewer) {
+  const comments = await gh(ctx, `/repos/${repo}/issues/comments?sort=created&direction=desc&per_page=100`);
+  const out = [];
+  for (const f of appliedFixComments(comments, currentPr)) {
+    const reviews = await allReviews(ctx, repo, f.pr);
+    if (reviews === null) continue;
+    const { asked, next } = fixVerdicts(reviews, f.at, reviewer);
+    const findings = asked ? parseReviewBody(asked.body).findings.slice(0, HISTORY.findings).map(historyFinding) : [];
+    out.push({ pr: f.pr, next, findings, notes: f.notes.slice(0, HISTORY.notesChars) });
+  }
+  return out;
+}
+
+/** One earlier fix as brief lines. Pure. */
+export function formatHistory(h) {
+  return [
+    `- PR #${h.pr}; the reviewer's next verdict: ${h.next}`,
+    `  Asked: ${h.findings.length ? h.findings.join(' | ') : '(the change request it answered was not found)'}`,
+    `  The fix's notes: ${String(h.notes).replace(/\n+/g, ' ').trim() || '(none)'}`,
+  ].join('\n');
+}
+
 export function formatFinding(f) {
   const where = f.file ? ` \`${f.file}${f.line ? `:${f.line}` : ''}\`` : '';
   const parts = [`[${f.n}] ${f.severity}${where}`];
@@ -797,7 +893,7 @@ export async function runLoop(ctx, brief) {
   return { refused: `no fix submitted within ${LIMITS.turns} turns`, turns };
 }
 
-export function buildBrief({ pr, files, headSha, review, items, plan, installNote, diff, protectedFiles = [], githubFiles = [] }) {
+export function buildBrief({ pr, files, headSha, review, items, plan, installNote, diff, protectedFiles = [], githubFiles = [], history = [] }) {
   const findings = review.findings;
   return [
     `Repository: ${pr.base.repo.full_name}`,
@@ -814,6 +910,9 @@ export function buildBrief({ pr, files, headSha, review, items, plan, installNot
     '', `Review summary: ${review.summary || '(none)'}`,
     '', `Findings (${findings.length}):`, ...findings.map(formatFinding),
     '', `Inline comments (${items.length}):`, ...items.map((c, i) => `[${i + 1}] ${c.path}${c.line ? `:${c.line}` : ''}\n${c.body}`),
+    ...(history.length
+      ? ['', `Earlier fixes on this repository by this lane, newest first (${history.length}). Background only: the findings above are what this run answers.`, ...history.map(formatHistory)]
+      : []),
     '', `Toolchain: ${plan.pm ?? 'none'}; install: ${installNote}`,
     `run accepts: ${allowedCommands(plan).join(', ')}`,
     plan.scripts.includes('test') ? `Test script: \`${plan.pm} test\`. Run it after your edits.` : 'No test script in package.json.',
@@ -1036,6 +1135,17 @@ async function answerReview(ctx) {
     ctx.log?.(capped
       ? `  effort ${effort}: more than ${REVIEW_PAGES_MAX * 100} reviews before this one, so it is taken as a later change request`
       : `  effort ${effort ?? 'unset'}: change request ${rounds + 1} from this reviewer on this pull request`);
+  }
+
+  // The repository's earlier fixes, for the brief. Off with FIX_HISTORY=off; a failed read leaves the brief as it was.
+  let history = [];
+  if (ctx.history !== false) {
+    try {
+      history = await repoFixHistory(ctx, repo, n, reviewRow.user?.login ?? '');
+      ctx.log?.(`  history: ${history.length} earlier fix(es) on this repository`);
+    } catch (e) {
+      ctx.log?.(`  history: not read (${e instanceof Error ? e.message : String(e)})`);
+    }
   }
 
   let runAs;
@@ -1262,7 +1372,7 @@ async function answerReview(ctx) {
     };
 
     const protectedFiles = [...protectedPaths(attrs, files.map((f) => f.filename))];
-    const brief = buildBrief({ pr, files, headSha, review, items, plan, installNote, diff: buildDiff(files, LIMITS.diffChars), protectedFiles, githubFiles: [...github].sort() });
+    const brief = buildBrief({ pr, files, headSha, review, items, plan, installNote, diff: buildDiff(files, LIMITS.diffChars), protectedFiles, githubFiles: [...github].sort(), history });
     let loop;
     let calls = 0;
     try {
@@ -1375,6 +1485,7 @@ async function main() {
     repo: need('REPO'), pr: Number(need('PR')), headSha: need('HEAD_SHA'), reviewUrl: need('REVIEW_URL'), checkout: need('CHECKOUT'), out,
     readToken: need('GH_READ_TOKEN'), darioUrl, darioKey, model: secrets.FIX_MODEL || DEFAULT_MODEL,
     effort: EFFORT_LEVELS.includes(effortSetting) ? effortSetting : '',
+    history: String(secrets.FIX_HISTORY ?? '').trim().toLowerCase() !== 'off',
     system,
     fetch: onlyOrigins(withDarioSocket(globalThis.fetch, darioUrl, darioSocket), ['https://api.github.com', darioUrl]),
     sleep: (ms) => new Promise((r) => setTimeout(r, ms)), now: () => Date.now(),

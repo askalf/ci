@@ -13,6 +13,10 @@ names the commit's date and the pull request it came from.
 
 ## November 2026
 
+- The fix lane's brief carries the repository's earlier fixes by the lane: the newest five
+  `## Fix at` comments ci posted on its other pull requests, the findings each answered, and the
+  reviewer's next verdict there. Background only, below the findings the run answers; a failed read
+  leaves the brief as it was; `FIX_HISTORY=off` turns it off.
 - The fleet-status check's expression evaluator reads only its own tables. A function, context or
   property named after something every JavaScript object inherits (`__proto__(x)`, `toString()`,
   a context `constructor`, `github.event.constructor`) used to reach Object.prototype: the fuzzer
