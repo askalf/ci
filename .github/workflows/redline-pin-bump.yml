@@ -105,11 +105,12 @@ jobs:
       # What a caller runs: the scripts the reusable workflows fetch, and the workflows. The tests,
       # their fixtures and the README change nothing a caller runs, so they move no pin; nor does
       # local.mjs, the pre-push review, which runs on a laptop and the runner host and in no
-      # caller's workflow.
+      # caller's workflow; nor does model-bump.mjs, which runs here alone (redline-model-bump.yml).
       PIN_PATHS: >-
         scripts/redline
         :(exclude)scripts/redline/*.test.mjs
         :(exclude)scripts/redline/local.mjs
+        :(exclude)scripts/redline/model-bump.mjs
         :(exclude)scripts/redline/test-fixtures
         :(exclude)scripts/redline/README.md
         scripts/drift-report
