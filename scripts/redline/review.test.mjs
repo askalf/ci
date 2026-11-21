@@ -1128,8 +1128,21 @@ console.log('\n  the reusable workflow');
   const secondUploadAt = stepNamed('Upload the second lens\'s verdict');
   const second = steps[secondAt] ?? '';
   const secondUpload = steps[secondUploadAt] ?? '';
-  check('the verdict is uploaded after the review; the second lens and its upload follow, then the cleanup',
-    reviewAt >= 0 && uploadAt === reviewAt + 1 && secondAt === uploadAt + 1 && secondUploadAt === secondAt + 1 && cleanAt === secondUploadAt + 1);
+  const modelsUploadAt = stepNamed('Upload the models record');
+  const secondModelsUploadAt = stepNamed('Upload the second lens\'s models record');
+  const modelsUpload = steps[modelsUploadAt] ?? '';
+  const secondModelsUpload = steps[secondModelsUploadAt] ?? '';
+  check('the verdict and the models record go up after the review; the second lens, its verdict and its models record follow, then the cleanup',
+    reviewAt >= 0 && uploadAt === reviewAt + 1 && modelsUploadAt === uploadAt + 1 && secondAt === modelsUploadAt + 1 && secondUploadAt === secondAt + 1
+    && secondModelsUploadAt === secondUploadAt + 1 && cleanAt === secondModelsUploadAt + 1);
+  check('each review step names its own models record in the workspace',
+    (steps[reviewAt] ?? '').includes('          REDLINE_MODELS_OUT: ${{ github.workspace }}/redline-models/models.json\n')
+    && second.includes('          REDLINE_MODELS_OUT: ${{ github.workspace }}/redline-models-second/models.json\n'));
+  check('the models records go up as redline-models and redline-models-second, pinned and short-lived, only when a file was left',
+    modelsUpload.includes("if: always() && hashFiles('redline-models/models.json') != ''") && modelsUpload.includes('name: redline-models\n') && modelsUpload.includes('path: redline-models/models.json\n')
+    && secondModelsUpload.includes("if: always() && steps.second.outcome != 'skipped' && hashFiles('redline-models-second/models.json') != ''")
+    && secondModelsUpload.includes('name: redline-models-second\n') && secondModelsUpload.includes('path: redline-models-second/models.json\n')
+    && [modelsUpload, secondModelsUpload].every((u) => /uses: actions\/upload-artifact@[0-9a-f]{40} # v7\./.test(u) && /retention-days: [1-7]\n/.test(u) && !u.includes('secrets.')));
   check('the second lens runs only for a caller that names its account, and only after everything before it passed',
     second.includes("\n        if: success() && inputs.second-reviewer-login != ''\n") && def('second-reviewer-login', "''"));
   check('it cannot fail or stall the job: the job\'s result stays the first review\'s verdict',
@@ -1147,8 +1160,9 @@ console.log('\n  the reusable workflow');
   check('the second files default to host paths next to the first',
     def('second-env-file', '/etc/askalf/redline-second.env') && def('second-prompt-file', '/etc/askalf/redline-second-prompt.md'));
   check('a failed upload of the second verdict cannot fail the job either', secondUpload.includes('\n        continue-on-error: true\n'));
-  check('nothing else was made non-fatal: only the second lens\'s two steps may fail without failing the job',
-    steps.filter((s) => s.includes('continue-on-error')).length === 2 && !(steps[reviewAt] ?? '').includes('continue-on-error') && !upload.includes('continue-on-error'));
+  check('nothing else was made non-fatal: only the second lens\'s two steps and the two models records may fail without failing the job',
+    steps.filter((s) => s.includes('continue-on-error')).length === 4 && !(steps[reviewAt] ?? '').includes('continue-on-error') && !upload.includes('continue-on-error')
+    && [modelsUpload, secondModelsUpload].every((u) => u.includes('\n        continue-on-error: true\n')));
   check('its verdict goes up as redline-verdict-second, only when the step ran and left a file',
     secondUpload.includes("if: always() && steps.second.outcome != 'skipped' && hashFiles('redline-verdict-second/verdict.json') != ''")
     && second.includes('\n        id: second\n') && secondUpload.includes('name: redline-verdict-second\n') && secondUpload.includes('path: redline-verdict-second/verdict.json\n')
@@ -1157,7 +1171,7 @@ console.log('\n  the reusable workflow');
   check('the upload is the pinned upload-artifact, as redline-verdict, short-lived',
     /uses: actions\/upload-artifact@[0-9a-f]{40} # v7\./.test(upload) && upload.includes('name: redline-verdict\n')
     && upload.includes('path: redline-verdict/verdict.json\n') && /retention-days: [1-7]\n/.test(upload));
-  check('the cleanup removes both verdicts too', /run: rm -rf pr \.redline redline-verdict redline-verdict-second "\$\{RUNNER_TEMP\}\/redline-hosted"\n/.test(steps[cleanAt] ?? ''));
+  check('the cleanup removes both verdicts and both models records too', /run: rm -rf pr \.redline redline-verdict redline-verdict-second redline-models redline-models-second "\$\{RUNNER_TEMP\}\/redline-hosted"\n/.test(steps[cleanAt] ?? ''));
   check('nothing from the PR is interpolated into a run step',!/run:[^\n]*\$\{\{\s*github\.event\.pull_request\.(title|body|head\.ref)/.test(wf));
 
   // Hosted mode: a GitHub runner, with the endpoint's key and the rubric from the caller's secrets.
@@ -2009,6 +2023,72 @@ console.log('\n  earlier verdicts from the runs, and the round cap');
     const text = bad.calls.model[0].messages[0].content;
     check('a verdict for another PR, or a zip without verdict.json, is passed over; the good one is kept', b.outcome === 'posted' && text.includes('asked at 1111111') && !text.includes('asked at 2222222'));
   }
+}
+
+console.log('\n  model pins: the models file, the newest of a family, the list dario serves');
+{
+  const { trackMatcher, newestMatching, compareVersions, withModelsFile, readCatalog, modelsRecord, MODEL_KEYS } = reviewModule;
+  check('a family is a model id with one * for its version', !!trackMatcher('gpt-*-sol') && !!trackMatcher('claude-opus-*') && !!trackMatcher('GPT-*-Astra'));
+  check('no *, two *, a space or other characters is not a family',
+    !trackMatcher('gpt-6-sol') && !trackMatcher('gpt-*-*') && !trackMatcher('gpt *-sol') && !trackMatcher('gpt-(*)-sol') && !trackMatcher('') && !trackMatcher(undefined));
+  const seat = ['gpt-5.4', 'gpt-5.6-luna', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-6-astra', 'gpt-6-sol', 'gpt-6.1-sol', 'gpt-6.1-terra',
+    'gpt-6.2-astra', 'gpt-6.2-sol', 'gpt-6.2-sol-mini', 'claude-opus-4-8', 'claude-opus-5', 'claude-opus-5-5', 'claude-opus-5-5-20261001',
+    'claude-opus-5-5[1m]', 'claude-fable-5', 'claude-fable-5-1', 'claude-fable-5-2', 'claude-fable-5-2[1m]', 'claude-sonnet-5-5'];
+  check('the newest sol is 6.2, not its -mini variant', newestMatching('gpt-*-sol', seat) === 'gpt-6.2-sol');
+  check('the newest astra is 6.2 over 6', newestMatching('gpt-*-astra', seat) === 'gpt-6.2-astra');
+  check('the newest terra is 6.1 over 5.6', newestMatching('gpt-*-terra', seat) === 'gpt-6.1-terra');
+  check('the newest Opus is 5-5: not its dated snapshot, its [1m] form, or 4-8', newestMatching('claude-opus-*', seat) === 'claude-opus-5-5');
+  check('the newest Fable is 5-2', newestMatching('claude-fable-*', seat) === 'claude-fable-5-2');
+  check('6.10 is newer than 6.9', newestMatching('gpt-*-sol', ['gpt-6.9-sol', 'gpt-6.10-sol']) === 'gpt-6.10-sol');
+  check('a family nothing matches, a bad family or no list gives no model',
+    newestMatching('gpt-*-nova', seat) === '' && newestMatching('gpt-6-sol', seat) === '' && newestMatching('gpt-*-sol', null) === '');
+  check('versions compare part by part, a missing part as 0',
+    compareVersions([6, 2], [6]) === 1 && compareVersions([6], [6, 0]) === 0 && compareVersions([5, 6], [6]) === -1 && compareVersions([6, 10], [6, 9]) === 1);
+
+  const env = { DARIO_API_KEY: 'k', REDLINE_MODEL: 'gpt-5.6-terra', REDLINE_DEEP_MODEL: 'gpt-6-astra' };
+  check('no REDLINE_MODELS_FILE leaves the env file as it is', withModelsFile(env).secrets === env && withModelsFile(env).notes.length === 0);
+  check('a relative REDLINE_MODELS_FILE is refused', /absolute/.test(withModelsFile({ ...env, REDLINE_MODELS_FILE: 'models.env' }).error ?? ''));
+  const missing = withModelsFile({ ...env, REDLINE_MODELS_FILE: '/nowhere/models.env' }, () => { const e = new Error('no such file'); e.code = 'ENOENT'; throw e; });
+  check('a models file that cannot be read is an error naming it', /cannot read \/nowhere\/models\.env \(ENOENT\)/.test(missing.error ?? ''));
+  const text = [
+    '# pins', 'REDLINE_MODEL=gpt-6.2-sol', 'REDLINE_MODEL_TRACKS=gpt-*-sol', 'REDLINE_DEEP_MODEL=gpt-6.2-astra', 'REDLINE_DEEP_MODEL_TRACKS=gpt-*-astra',
+    'REDLINE_PIN_MODEL=', 'DARIO_API_KEY=not-from-here',
+  ].join('\n');
+  const laid = withModelsFile({ ...env, REDLINE_MODELS_FILE: '/etc/askalf/redline-models.env' }, (f) => (f === '/etc/askalf/redline-models.env' ? text : ''));
+  check('the models file\'s pins replace the env file\'s', laid.secrets.REDLINE_MODEL === 'gpt-6.2-sol' && laid.secrets.REDLINE_DEEP_MODEL === 'gpt-6.2-astra');
+  check('an empty pin in the models file is set empty', laid.secrets.REDLINE_PIN_MODEL === '');
+  check('a key that is not a model pin is not taken from the models file', laid.secrets.DARIO_API_KEY === 'k');
+  check('each replaced setting is said, with both values', laid.notes.length === 2 && laid.notes[0].includes('gpt-5.6-terra') && laid.notes[0].includes('gpt-6.2-sol'));
+  check('the families come with the pins', laid.tracks.REDLINE_MODEL === 'gpt-*-sol' && laid.tracks.REDLINE_DEEP_MODEL === 'gpt-*-astra' && !('REDLINE_PIN_MODEL' in laid.tracks));
+  const badTrack = withModelsFile({ REDLINE_MODELS_FILE: '/m.env' }, () => 'REDLINE_MODEL_TRACKS=gpt-6.2-sol');
+  check('a family with no * is an error', /REDLINE_MODEL_TRACKS .* one \*/.test(badTrack.error ?? ''));
+  check('MODEL_KEYS are the four model settings', MODEL_KEYS.join() === 'REDLINE_MODEL,REDLINE_DEEP_MODEL,REDLINE_PIN_MODEL,REDLINE_FALLBACK_MODEL');
+
+  let seen = null;
+  const listing = async (url, init) => { seen = { url, key: init.headers['x-api-key'] }; return new Response(JSON.stringify({ data: [{ id: 'gpt-6.2-sol' }, { id: 'claude-opus-5-5' }, { id: 'gpt-6.2-sol' }, { id: 7 }, {}] }), { status: 200 }); };
+  const listed = await readCatalog({ darioUrl: 'http://127.0.0.1:3456/', darioKey: 'k1', fetch: listing });
+  check('the list is read from dario /v1/models with the key, sorted and without repeats',
+    seen.url === 'http://127.0.0.1:3456/v1/models' && seen.key === 'k1' && listed.ids.join() === 'claude-opus-5-5,gpt-6.2-sol' && listed.why === '');
+  const refused = await readCatalog({ darioUrl: 'http://d', darioKey: '', fetch: async () => new Response('{}', { status: 401 }) });
+  check('a refused list is no list, with the status, and never throws', refused.ids === null && /401/.test(refused.why));
+  const down = await readCatalog({ darioUrl: 'http://d', darioKey: '', fetch: async () => { throw new Error('connect ECONNREFUSED'); } });
+  check('dario down is no list, with the reason', down.ids === null && /ECONNREFUSED/.test(down.why));
+
+  const rec = modelsRecord({
+    repo: 'askalf/ci', pr: 1, headSha: HEAD, lens: 'first', at: '2026-11-21T00:00:00Z',
+    pins: { REDLINE_MODEL: 'gpt-5.6-terra', REDLINE_DEEP_MODEL: 'gpt-6.2-astra', REDLINE_PIN_MODEL: '', REDLINE_FALLBACK_MODEL: '' },
+    tracks: { REDLINE_MODEL: 'gpt-*-sol', REDLINE_DEEP_MODEL: 'gpt-*-astra', REDLINE_FALLBACK_MODEL: 'gpt-*-nova' }, catalog: seat, why: '', answeredBy: 'gpt-6.2-astra',
+  });
+  check('the record holds each family\'s newest, and the pins that are behind it',
+    rec.newest.REDLINE_MODEL === 'gpt-6.2-sol' && rec.newest.REDLINE_DEEP_MODEL === 'gpt-6.2-astra' && rec.newest.REDLINE_FALLBACK_MODEL === '' && rec.behind.join() === 'REDLINE_MODEL');
+  check('the record says what the review was read on, and keeps the list', rec.answered_by === 'gpt-6.2-astra' && rec.catalog.length === seat.length && rec.version === 1);
+  const blind = modelsRecord({ repo: 'r/r', pr: 1, headSha: HEAD, lens: 'second', at: 'x', pins: {}, tracks: { REDLINE_MODEL: 'claude-opus-*' }, catalog: null, why: 'dario down', answeredBy: undefined });
+  check('with no list nothing is behind, the reason is kept, and no model call is null',
+    blind.behind.length === 0 && blind.catalog === null && blind.catalog_error === 'dario down' && blind.answered_by === null);
+
+  const ctx = { darioUrl: 'http://d', darioKey: '', model: 'gpt-6.2-sol', fetch: async () => new Response(JSON.stringify({ content: [] }), { status: 200 }), sleep: async () => {}, now: () => Date.now() };
+  await callModelWith(ctx, { system: 's', messages: [{ role: 'user', content: 'hi' }], tools: [] });
+  check('a model call that answers notes the model it was read on', ctx.answeredBy === 'gpt-6.2-sol');
 }
 
 rmSync(root, { recursive: true, force: true });

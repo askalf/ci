@@ -98,7 +98,11 @@
 // DARIO_SOCKET, which is itself the credential). REDLINE_PROMPT_FILE names the system
 // prompt, installed on the runner host: this repository is public and carries no prompt, so there is
 // no bundled fallback, and a variable that is unset, a file that cannot be read or an empty file ends
-// the run. REDLINE_VERDICT_FILE, when set, is where verdict.json goes. REDLINE_CONTEXT_FILE, when set,
+// the run. REDLINE_VERDICT_FILE, when set, is where verdict.json goes, and REDLINE_MODELS_OUT where
+// models.json goes (modelsRecord: the pins, the model list dario served, the newest of each tracked
+// family, the model the review was read on). The env file's REDLINE_MODELS_FILE, when set, names a
+// file of model pins with no secret in it (withModelsFile) whose settings replace the env file's
+// own; a set name whose file cannot be read ends the run. REDLINE_CONTEXT_FILE, when set,
 // names facts a workflow gathered before the review (files at another ref, search results, a rule
 // list) that the checkout and the PR cannot show; they go into the brief after the diff, as data, and
 // a set variable whose file cannot be read ends the run.
@@ -1067,7 +1071,10 @@ export async function callModelWith(ctx, { system, messages, tools, toolChoice, 
     }),
     signal: AbortSignal.timeout(Math.max(1, Math.floor(Math.min(timeoutMs, leftMs)))),
   }), deadline);
-  return res.json();
+  const body = await res.json();
+  // The model the review is read on, after any routing or fallback: models.json records it.
+  ctx.answeredBy = ctx.model;
+  return body;
 }
 
 /**
@@ -1632,6 +1639,118 @@ export function modelContext(secrets, dario) {
   };
 }
 
+// ---------- model pins ----------
+
+/** The model settings REDLINE_MODELS_FILE may set, each replacing the env file's own. */
+export const MODEL_KEYS = ['REDLINE_MODEL', 'REDLINE_DEEP_MODEL', 'REDLINE_PIN_MODEL', 'REDLINE_FALLBACK_MODEL'];
+
+/**
+ * The matcher for a `<KEY>_TRACKS` value: a model id with one `*` where its version goes
+ * (`gpt-*-sol`, `claude-opus-*`). The version is numbers joined by `.` or `-`, each part after the
+ * first at most two digits, so a dated snapshot (`claude-opus-5-5-20261001`) and a variant
+ * (`gpt-6.2-sol-mini`, `claude-opus-5-5[1m]`) are not the family's newest. Null for any other value.
+ */
+export function trackMatcher(pattern) {
+  const p = String(pattern ?? '').trim().toLowerCase();
+  if (!/^[a-z0-9.-]*\*[a-z0-9.-]*$/.test(p)) return null;
+  const [before, after] = p.split('*');
+  const esc = (s) => s.replace(/[.-]/g, (c) => `\\${c}`);
+  return new RegExp(`^${esc(before)}(\\d+(?:[.-]\\d{1,2})*)${esc(after)}$`);
+}
+
+/** The id of the newest version of `pattern`'s family among `ids`, or '' when none matches. */
+export function newestMatching(pattern, ids) {
+  const re = trackMatcher(pattern);
+  if (!re) return '';
+  let best = '';
+  let bestVersion = null;
+  for (const id of ids ?? []) {
+    const m = re.exec(String(id).toLowerCase());
+    if (!m) continue;
+    const v = m[1].split(/[.-]/).map(Number);
+    if (!bestVersion || compareVersions(v, bestVersion) > 0) { best = String(id); bestVersion = v; }
+  }
+  return best;
+}
+
+/** -1, 0 or 1 for two version number lists; a missing part counts as 0, so 6 equals 6.0. */
+export function compareVersions(a, b) {
+  for (let i = 0; i < Math.max(a.length, b.length); i++) {
+    const d = (a[i] ?? 0) - (b[i] ?? 0);
+    if (d) return d > 0 ? 1 : -1;
+  }
+  return 0;
+}
+
+/**
+ * The env file's settings with REDLINE_MODELS_FILE's model pins laid over them. That file holds
+ * no secret: the host installs it from a reviewed repository, and the model bump moves its pins.
+ * A key of MODEL_KEYS it sets replaces the env file's (said in notes when the two differ), and
+ * `<KEY>_TRACKS` names the family the pin follows. Returns { secrets, tracks, notes } or { error }.
+ */
+export function withModelsFile(secrets, readFile = (p) => readFileSync(p, 'utf8')) {
+  const file = secrets.REDLINE_MODELS_FILE || '';
+  if (!file) return { secrets, tracks: {}, notes: [] };
+  if (!isAbsolute(file)) return { error: 'REDLINE_MODELS_FILE must be an absolute path' };
+  let pins;
+  try { pins = parseEnvFile(readFile(file)); } catch (e) {
+    return { error: `REDLINE_MODELS_FILE: cannot read ${file} (${e.code ?? e.message})` };
+  }
+  const out = { ...secrets };
+  const tracks = {};
+  const notes = [];
+  for (const k of MODEL_KEYS) {
+    if (Object.hasOwn(pins, k)) {
+      if (Object.hasOwn(secrets, k) && secrets[k] !== pins[k]) notes.push(`${k} in the env file (${secrets[k] || 'empty'}) is replaced by the models file (${pins[k] || 'empty'})`);
+      out[k] = pins[k];
+    }
+    const t = pins[`${k}_TRACKS`];
+    if (t !== undefined && t !== '') {
+      if (!trackMatcher(t)) return { error: `${k}_TRACKS in ${file} must be a model id with one * for its version, such as gpt-*-sol; got ${t}` };
+      tracks[k] = t;
+    }
+  }
+  return { secrets: out, tracks, notes };
+}
+
+/**
+ * The model ids dario lists on GET /v1/models: its Claude catalog and the ChatGPT seat's models,
+ * for any key (the list is not narrowed to the key's models). { ids } sorted, or { ids: null, why }:
+ * a list that cannot be read never stops the review.
+ */
+export async function readCatalog(ctx, timeoutMs = 10_000) {
+  try {
+    const res = await ctx.fetch(`${ctx.darioUrl.replace(/\/+$/, '')}/v1/models`, {
+      headers: { ...(ctx.darioKey ? { 'x-api-key': ctx.darioKey } : {}) },
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (!res.ok) return { ids: null, why: `dario answered GET /v1/models with ${res.status}` };
+    const body = await res.json();
+    const data = Array.isArray(body?.data) ? body.data : [];
+    const ids = [...new Set(data.map((m) => m?.id).filter((id) => typeof id === 'string' && id))].sort();
+    return { ids, why: '' };
+  } catch (e) {
+    return { ids: null, why: `dario's GET /v1/models failed: ${e.message}` };
+  }
+}
+
+/**
+ * What one run knew of its models, for models.json and the log: each pin, the family it tracks,
+ * the newest of that family dario lists, and the model the review was read on (null when no model
+ * call was made). Pure.
+ */
+export function modelsRecord({ repo, pr, headSha, lens, at, pins, tracks, catalog, why, answeredBy }) {
+  const newest = {};
+  for (const [k, t] of Object.entries(tracks)) newest[k] = catalog ? newestMatching(t, catalog) : '';
+  return {
+    version: 1, repo, pr, head_sha: headSha, lens, at,
+    pins, tracks, newest,
+    behind: Object.keys(newest).filter((k) => newest[k] && newest[k] !== pins[k]),
+    catalog: catalog ?? null, catalog_error: catalog ? '' : why,
+    answered_by: answeredBy || null,
+  };
+}
+
 async function main() {
   const env = process.env;
   const need = (k, src = env) => { if (!src[k]) { console.error(`::error::${k} is not set`); process.exit(2); } return src[k]; };
@@ -1639,6 +1758,10 @@ async function main() {
   try { secrets = parseEnvFile(readFileSync(need('REDLINE_ENV_FILE'), 'utf8')); } catch (e) {
     console.error(`::error::REDLINE_ENV_FILE: cannot read ${env.REDLINE_ENV_FILE} (${e.code ?? e.message})`); process.exit(2);
   }
+  const pinned = withModelsFile(secrets);
+  if (pinned.error) { console.error(`::error::${pinned.error}`); process.exit(2); }
+  secrets = pinned.secrets;
+  for (const note of pinned.notes) console.log(`::notice::${note}`);
   let system;
   try { system = readPrompt(env, 'REDLINE_PROMPT_FILE'); } catch (e) { console.error(`::error::${e.message}`); process.exit(2); }
   let context = '';
@@ -1668,11 +1791,34 @@ async function main() {
     fork: env.REDLINE_FORK === '1',
     log: (line) => console.log(line),
   };
+  const pins = Object.fromEntries(MODEL_KEYS.map((k) => [k, k === 'REDLINE_MODEL' ? ctx.model : k === 'REDLINE_DEEP_MODEL' ? ctx.deepModel
+    : k === 'REDLINE_PIN_MODEL' ? ctx.pinModel : ctx.fallbackModel]));
+  console.log(`models: routine ${pins.REDLINE_MODEL || '-'}, deep ${pins.REDLINE_DEEP_MODEL || '-'}, pin-only ${pins.REDLINE_PIN_MODEL || '-'}, fallback ${pins.REDLINE_FALLBACK_MODEL || '-'}${secrets.REDLINE_MODELS_FILE ? ` (pins from ${secrets.REDLINE_MODELS_FILE})` : ''}`);
+  const catalog = await readCatalog(ctx);
+  if (catalog.ids) console.log(`dario lists ${catalog.ids.length} models: ${catalog.ids.join(', ')}`);
+  else console.log(`::warning::${catalog.why}; the review goes on without the list`);
+  // Written whatever the review's outcome, so a run that fails still says what it was given.
+  const modelsFile = env.REDLINE_MODELS_OUT || '';
+  if (modelsFile) rmSync(modelsFile, { force: true });
+  const writeModels = () => {
+    const rec = modelsRecord({
+      repo: ctx.repo, pr: ctx.pr, headSha: ctx.headSha, lens: LENS || 'first', at: new Date().toISOString(),
+      pins, tracks: pinned.tracks, catalog: catalog.ids, why: catalog.why, answeredBy: ctx.answeredBy,
+    });
+    for (const k of rec.behind) console.log(`::notice::${k} is pinned to ${pins[k] || 'nothing'}; the newest ${pinned.tracks[k]} dario lists is ${rec.newest[k]}`);
+    if (rec.answered_by) console.log(`read on ${rec.answered_by}`);
+    if (!modelsFile) return;
+    try { mkdirSync(dirname(modelsFile), { recursive: true }); writeFileSync(modelsFile, `${JSON.stringify(rec, null, 2)}\n`); } catch (e) {
+      console.log(`::warning::Redline could not write ${modelsFile}: ${e.message}`);
+    }
+  };
   let result;
   try { result = await runReview(ctx); } catch (e) {
+    writeModels();
     console.error(`::error::${LENS ? 'Redline second lens' : 'Redline'} could not finish the review: ${e.message}`);
     process.exit(2);
   }
+  writeModels();
   try { if (result.record && verdictFile) saveVerdict(verdictFile, result.record); } catch (e) {
     console.error(`::error::Redline could not write ${verdictFile}: ${e.message}`); process.exit(2);
   }

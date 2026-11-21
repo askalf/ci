@@ -100,6 +100,24 @@ narrower rubric, or both.
 With a second account that has write access, a ruleset can require two approving reviews: the
 first review's and the second lens's, each at the current head.
 
+### Model pins and the models record
+
+The env file may name `REDLINE_MODELS_FILE`, an absolute path to a file of model pins on the
+runner host. It holds no secret, so it can come from a reviewed repository through the host's
+deploy instead of being typed into the env file. Its `REDLINE_MODEL`, `REDLINE_DEEP_MODEL`,
+`REDLINE_PIN_MODEL` and `REDLINE_FALLBACK_MODEL` replace the env file's (the log says so when the
+two differ), and a set name whose file cannot be read ends the run. `<KEY>_TRACKS` names the
+family a pin follows, as a model id with one `*` for its version: `gpt-*-sol`, `claude-opus-*`.
+
+Every run lists the models dario serves on `GET /v1/models` (its Claude catalog and the ChatGPT
+seat's models, whatever the key), prints them in the log, and writes `models.json`: the pins, their
+families, the newest of each family in the list, the pins behind it, the whole list, and the model
+the review was read on (`answered_by`, null when no model was called). It goes up as the
+`redline-models` artifact, and the second lens's as `redline-models-second`, whatever the review's
+outcome. A list that cannot be read is a warning in the log, and the review goes on. In a family's
+version, numbers are joined by `.` or `-` and each part after the first has at most two digits, so
+a dated snapshot (`claude-opus-5-5-20261001`) or a variant (`gpt-6.2-sol-mini`) is never the newest.
+
 ## The post: `redline-post-verdict.yml` and `post.mjs`
 
 The review job runs the workflow files a pull request brings with it, so it never holds the

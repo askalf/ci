@@ -508,6 +508,7 @@ jobs:
           # repository. The script reads it from this file and has no bundled fallback.
           REDLINE_PROMPT_FILE: ${{ steps.where.outputs.prompt-file || inputs.prompt-file }}
           REDLINE_VERDICT_FILE: ${{ github.workspace }}/redline-verdict/verdict.json
+          REDLINE_MODELS_OUT: ${{ github.workspace }}/redline-models/models.json
         run: node .redline/scripts/redline/review.mjs
 
       # The verdict goes up whether the review passed or failed; a run that built no review (skipped,
@@ -518,6 +519,19 @@ jobs:
         with:
           name: redline-verdict
           path: redline-verdict/verdict.json
+          if-no-files-found: ignore
+          retention-days: 7
+          overwrite: true
+
+      # What the review was given and read on: its pins, the families they track, the model list
+      # dario served and the newest of each family in it. The model bump reads it from here.
+      - name: Upload the models record
+        if: always() && hashFiles('redline-models/models.json') != ''
+        continue-on-error: true
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: redline-models
+          path: redline-models/models.json
           if-no-files-found: ignore
           retention-days: 7
           overwrite: true
@@ -549,6 +563,7 @@ jobs:
           REDLINE_ENV_FILE: ${{ inputs.second-env-file }}
           REDLINE_PROMPT_FILE: ${{ inputs.second-prompt-file }}
           REDLINE_VERDICT_FILE: ${{ github.workspace }}/redline-verdict-second/verdict.json
+          REDLINE_MODELS_OUT: ${{ github.workspace }}/redline-models-second/models.json
         run: node .redline/scripts/redline/review.mjs
 
       # Only when the step ran: a file an earlier job left in the workspace is not this run's.
@@ -565,9 +580,20 @@ jobs:
           retention-days: 7
           overwrite: true
 
+      - name: Upload the second lens's models record
+        if: always() && steps.second.outcome != 'skipped' && hashFiles('redline-models-second/models.json') != ''
+        continue-on-error: true
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: redline-models-second
+          path: redline-models-second/models.json
+          if-no-files-found: ignore
+          retention-days: 7
+          overwrite: true
+
       - name: Remove the checkouts
         if: always()
-        run: rm -rf pr .redline redline-verdict redline-verdict-second "${RUNNER_TEMP}/redline-hosted"
+        run: rm -rf pr .redline redline-verdict redline-verdict-second redline-models redline-models-second "${RUNNER_TEMP}/redline-hosted"
 
       # The container goes with its anonymous volume, which held the seats' credentials.
       - name: Stop the dario sidecar
