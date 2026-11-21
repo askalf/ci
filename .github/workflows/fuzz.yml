@@ -36,7 +36,7 @@ jobs:
     # one-job runners, so GitHub's hosted queue going down does not hold our PRs. A fork's PR
     # and a Dependabot PR run code nobody here wrote, so those stay on GitHub's runners.
     runs-on: ${{ (github.repository != 'askalf/ci' || github.event.pull_request && (github.event.pull_request.head.repo.full_name != github.repository || github.event.pull_request.user.login == 'dependabot[bot]')) && 'ubuntu-latest' || fromJSON('["self-hosted","ci-exec"]') }}
-    # A pull request fuzzes 60 s per target and finishes in a few minutes; the weekly run gets 300 s.
+    # A pull request fuzzes 60 s per target, the targets side by side; the weekly run gets 300 s each.
     timeout-minutes: ${{ github.event_name == 'pull_request' && 15 || 40 }}
     steps:
       - uses: askalf/ci/actions/checkout-with-retry@f0be7010038c63c66f4a341d0fd548edf1208c7c # main 2026-11-13, askalf/ci#219
@@ -91,7 +91,9 @@ jobs:
           FUZZ_SECONDS: ${{ github.event_name == 'pull_request' && '60' || inputs.seconds || '300' }}
           FUZZ_CORPUS_DIR: fuzz/corpus
           FUZZ_ARTIFACT_DIR: fuzz/crashes
-        run: node fuzz/run.mjs
+        # Every target at once, one per CPU the job may use (nproc counts only those), so the step
+        # takes about one target's budget rather than the sum of them, and each target keeps its own.
+        run: FUZZ_JOBS="$(nproc)" node fuzz/run.mjs
       - name: Upload the crashing input
         if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
