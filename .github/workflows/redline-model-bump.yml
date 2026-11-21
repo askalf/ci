@@ -1,0 +1,107 @@
+# Moves Redline's model pins to the newest model of each pin's family that dario lists, through a
+# held pull request in the repository that holds the pins (scripts/redline/model-bump.mjs).
+#
+# Every Redline run records the models dario served and the newest of each pinned family (the
+# redline-models artifact, and redline-models-second for the second lens). This reads the newest
+# record of each lens, compares the pins files on PINS_REPO's default branch, and opens or updates
+# one pull request on BRANCH when a family has a newer model than its pin. The title carries
+# [hold]: a person merges it, and that repository's host deploy installs the files. A pin never
+# moves at review time.
+#
+# The records are this repository's runs for the first reviewer, and RECORDS_SECOND's for the
+# second lens, which only some callers run. Downloading another repository's artifacts needs a
+# token with Actions read on it, which the job's own token is not, so the records are read with a
+# second token of the pin bump App: Actions read, minted for this repository and the second lens's.
+# That needs Actions: Read among the App's permissions. Until it has it, the mint fails, the job
+# says so, and the records are read with the job's own token: the first lens still moves, and the
+# second lens's records cannot be downloaded and it is skipped with a warning. The pins repository
+# is written with the App's other token, minted for PINS_REPO alone with Contents and Pull
+# requests: the pins files are not workflows, so it asks for no Workflows permission. Without the
+# App's variable the job says so and stops, green.
+name: Redline model bump
+
+on:
+  schedule:
+    - cron: '17 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: 'Say what would move, open nothing'
+        type: boolean
+        default: false
+
+permissions: {}
+
+concurrency:
+  group: redline-model-bump
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    # Schedule and dispatch only, so only this repository's own code runs here, on the same rows as
+    # the pin bump. REDLINE_PIN_BUMP_RUNS_ON (a JSON label list) moves it, for a fork with no ci-exec rows.
+    runs-on: ${{ vars.REDLINE_PIN_BUMP_RUNS_ON && fromJSON(vars.REDLINE_PIN_BUMP_RUNS_ON) || fromJSON('["self-hosted","ci-exec"]') }}
+    if: github.repository == 'askalf/ci'
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
+    env:
+      PINS_REPO: askalf/platform
+      RECORDS_FIRST: ${{ github.repository }}
+      RECORDS_SECOND: askalf/redline-rubric
+      BRANCH: redline/model-bump
+    steps:
+      - name: Mint the pin bump App's token
+        id: app
+        if: vars.REDLINE_PIN_BUMP_CLIENT_ID != ''
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ vars.REDLINE_PIN_BUMP_CLIENT_ID }}
+          private-key: ${{ secrets.REDLINE_PIN_BUMP_APP_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: platform
+          permission-contents: write
+          permission-pull-requests: write
+
+      - name: Mint the records read token
+        id: read
+        if: vars.REDLINE_PIN_BUMP_CLIENT_ID != ''
+        continue-on-error: true
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ vars.REDLINE_PIN_BUMP_CLIENT_ID }}
+          private-key: ${{ secrets.REDLINE_PIN_BUMP_APP_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }},redline-rubric
+          permission-actions: read
+
+      - name: Say which token reads the records
+        if: vars.REDLINE_PIN_BUMP_CLIENT_ID != '' && steps.read.outcome != 'success'
+        run: echo "::warning::The pin bump App could not mint an Actions read token (give the App Actions Read). The records are read with the job's own token, which cannot download the second lens's from askalf/redline-rubric."
+
+      - name: Check for the token
+        id: guard
+        env:
+          TOKEN: ${{ steps.app.outputs.token }}
+        run: |
+          if [ -z "$TOKEN" ]; then
+            echo "::notice::The pin bump App is not set up (repository variable REDLINE_PIN_BUMP_CLIENT_ID); no model bump opened."
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Fetch the bump
+        if: steps.guard.outputs.ok == 'true'
+        uses: askalf/ci/actions/checkout-with-retry@96b847244dbb8fd6bce671734b57f48bbad9cefa # main 2026-11-21, askalf/ci#221
+        with:
+          persist-credentials: false
+
+      - name: Bump the model pins
+        if: steps.guard.outputs.ok == 'true'
+        env:
+          READ_TOKEN: ${{ steps.read.outputs.token || github.token }}
+          WRITE_TOKEN: ${{ steps.app.outputs.token }}
+          DRY_RUN: ${{ inputs.dry-run && '1' || '0' }}
+        run: node scripts/redline/model-bump.mjs

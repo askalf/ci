@@ -118,6 +118,30 @@ outcome. A list that cannot be read is a warning in the log, and the review goes
 version, numbers are joined by `.` or `-` and each part after the first has at most two digits, so
 a dated snapshot (`claude-opus-5-5-20261001`) or a variant (`gpt-6.2-sol-mini`) is never the newest.
 
+### The model bump: `model-bump.mjs` and `redline-model-bump.yml`
+
+Every six hours, and on dispatch, `redline-model-bump.yml` reads the newest `redline-models` record
+from this repository's Redline runs and the newest `redline-models-second` record from
+`RECORDS_SECOND`'s. A record older than seven days, or one with an empty list, is passed over. It
+then reads each lens's pins file on the pins repository's default branch
+(`deploy/redline/redline-models.env`, `deploy/redline/redline-second-models.env`) and moves every
+pin with a `<KEY>_TRACKS` line to the newest id of that family in the record's list. A key on more
+than one line, or a family that matches nothing, leaves its pin.
+
+When a pin moves, the bump opens one held pull request on `redline/model-bump` with every move:
+- each pin's family, old and new model;
+- the run the record came from and the whole list.
+
+An open pull request that already proposes the same files is left alone. One that proposes others is
+updated: the branch is moved to a new commit on the default branch's head, never to the head itself,
+which would close the pull request. A person merges it; until the dario keys allow the new models,
+reviews on them are refused. It writes with the pin bump App's token, minted for the pins repository
+with Contents and Pull requests only. It reads the records with a second token of the same App,
+minted for this repository and askalf/redline-rubric with Actions read, which needs Actions: Read
+among the App's permissions: the job's own token cannot download another repository's artifacts.
+When that mint fails, the job warns and reads with its own token, so the first lens still moves and
+the second lens is skipped with a warning.
+
 ## The post: `redline-post-verdict.yml` and `post.mjs`
 
 The review job runs the workflow files a pull request brings with it, so it never holds the
