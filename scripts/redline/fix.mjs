@@ -320,6 +320,57 @@ export function formatHistory(h) {
   ].join('\n');
 }
 
+// ---------- lessons from earlier fixes ----------
+
+/** How many lessons the brief carries, each cut to textChars; the text they are matched on; the read's time limit. */
+export const LESSONS = { k: 5, textChars: 300, queryChars: 6_000, timeoutMs: 8_000 };
+
+/**
+ * Where the lessons read goes, from the env file: FIX_LESSONS_URL (https only),
+ * FIX_LESSONS_CLIENT_ID and FIX_LESSONS_CLIENT_SECRET, the lessons service's own access token. Null
+ * when any is missing or FIX_LESSONS=off: the brief then goes without lessons. Pure.
+ */
+export function lessonsAccess(secrets) {
+  if (String(secrets?.FIX_LESSONS ?? '').trim().toLowerCase() === 'off') return null;
+  const url = String(secrets?.FIX_LESSONS_URL ?? '').trim();
+  const id = String(secrets?.FIX_LESSONS_CLIENT_ID ?? '').trim();
+  const secret = String(secrets?.FIX_LESSONS_CLIENT_SECRET ?? '').trim();
+  if (!url || !id || !secret) return null;
+  try { if (new URL(url).protocol !== 'https:') return null; } catch { return null; }
+  return { url, id, secret };
+}
+
+/** The text a lessons read is matched on: the review's summary, each finding, each inline comment, cut. Pure. */
+export function lessonQuery(review, items) {
+  return [
+    review?.summary ?? '',
+    ...(review?.findings ?? []).map((f) => [f.file ?? '', f.problem ?? '', f.suggestion ?? ''].join(' ')),
+    ...(items ?? []).map((c) => c.body ?? ''),
+  ].join('\n').slice(0, LESSONS.queryChars);
+}
+
+/**
+ * Lessons this lane drew from its earlier fixes that fell short (general advice, written without
+ * names or paths), matching this review, at most LESSONS.k. isPublic asks for lessons drawn on
+ * public repositories only. A redirect is an answer, never followed: it means the token was not
+ * taken. Throws on any failure; the caller leaves the brief as it was.
+ */
+export async function fetchLessons(ctx, text, isPublic) {
+  const res = await ctx.fetch(ctx.lessons.url, {
+    method: 'POST',
+    redirect: 'manual',
+    headers: { 'content-type': 'application/json', 'cf-access-client-id': ctx.lessons.id, 'cf-access-client-secret': ctx.lessons.secret },
+    body: JSON.stringify({ text, public: isPublic, k: LESSONS.k }),
+    signal: AbortSignal.timeout(LESSONS.timeoutMs),
+  });
+  if (res.status !== 200) throw new Error(`the lessons read answered ${res.status}`);
+  const v = await res.json();
+  return (Array.isArray(v?.lessons) ? v.lessons : [])
+    .map((l) => String(l?.text ?? '').replace(/\s+/g, ' ').trim().slice(0, LESSONS.textChars))
+    .filter(Boolean)
+    .slice(0, LESSONS.k);
+}
+
 export function formatFinding(f) {
   const where = f.file ? ` \`${f.file}${f.line ? `:${f.line}` : ''}\`` : '';
   const parts = [`[${f.n}] ${f.severity}${where}`];
@@ -631,7 +682,7 @@ export function renderNotes({ outcome, summary = '', reason = '', files = [], te
 
 /** The credentials of this run that must never leave the runner: the model key and the read token. */
 export function runSecrets(ctx) {
-  return [ctx.darioKey, ctx.readToken].filter((v) => typeof v === 'string' && v.length >= 8);
+  return [ctx.darioKey, ctx.readToken, ctx.lessons?.secret].filter((v) => typeof v === 'string' && v.length >= 8);
 }
 
 /** Whether text carries any of the secrets. */
@@ -893,7 +944,7 @@ export async function runLoop(ctx, brief) {
   return { refused: `no fix submitted within ${LIMITS.turns} turns`, turns };
 }
 
-export function buildBrief({ pr, files, headSha, review, items, plan, installNote, diff, protectedFiles = [], githubFiles = [], history = [] }) {
+export function buildBrief({ pr, files, headSha, review, items, plan, installNote, diff, protectedFiles = [], githubFiles = [], history = [], lessons = [] }) {
   const findings = review.findings;
   return [
     `Repository: ${pr.base.repo.full_name}`,
@@ -910,6 +961,9 @@ export function buildBrief({ pr, files, headSha, review, items, plan, installNot
     '', `Review summary: ${review.summary || '(none)'}`,
     '', `Findings (${findings.length}):`, ...findings.map(formatFinding),
     '', `Inline comments (${items.length}):`, ...items.map((c, i) => `[${i + 1}] ${c.path}${c.line ? `:${c.line}` : ''}\n${c.body}`),
+    ...(lessons.length
+      ? ['', `Lessons this lane drew from its earlier fixes that fell short (${lessons.length}). General advice, background only: the findings above are what this run answers.`, ...lessons.map((l) => `- ${l}`)]
+      : []),
     ...(history.length
       ? ['', `Earlier fixes on this repository by this lane, newest first (${history.length}). Background only: the findings above are what this run answers.`, ...history.map(formatHistory)]
       : []),
@@ -1148,6 +1202,19 @@ async function answerReview(ctx) {
     }
   }
 
+  // Lessons from this lane's earlier fixes, for the brief. Off without the lessons settings in the
+  // env file, or with FIX_LESSONS=off; a failed read leaves the brief as it was. A repository not
+  // known to be private asks for public lessons only.
+  let lessons = [];
+  if (ctx.lessons) {
+    try {
+      lessons = await fetchLessons(ctx, lessonQuery(review, items), pr.base?.repo?.private !== true);
+      ctx.log?.(`  lessons: ${lessons.length} from earlier fixes`);
+    } catch (e) {
+      ctx.log?.(`  lessons: not read (${e instanceof Error ? e.message : String(e)})`);
+    }
+  }
+
   let runAs;
   try { runAs = runAccount(ctx.runAs); } catch (e) { return refuse(e.message); }
   const home = mkdtempSync(join(tmpdir(), 'redline-fix-home-'));
@@ -1372,7 +1439,7 @@ async function answerReview(ctx) {
     };
 
     const protectedFiles = [...protectedPaths(attrs, files.map((f) => f.filename))];
-    const brief = buildBrief({ pr, files, headSha, review, items, plan, installNote, diff: buildDiff(files, LIMITS.diffChars), protectedFiles, githubFiles: [...github].sort(), history });
+    const brief = buildBrief({ pr, files, headSha, review, items, plan, installNote, diff: buildDiff(files, LIMITS.diffChars), protectedFiles, githubFiles: [...github].sort(), history, lessons });
     let loop;
     let calls = 0;
     try {
@@ -1481,13 +1548,15 @@ async function main() {
   if (effortSetting && !EFFORT_LEVELS.includes(effortSetting)) {
     console.log(`::warning::FIX_EFFORT is not one of ${EFFORT_LEVELS.join(', ')}; the fix runs with no effort field`);
   }
+  const lessons = lessonsAccess(secrets);
   const ctx = {
     repo: need('REPO'), pr: Number(need('PR')), headSha: need('HEAD_SHA'), reviewUrl: need('REVIEW_URL'), checkout: need('CHECKOUT'), out,
     readToken: need('GH_READ_TOKEN'), darioUrl, darioKey, model: secrets.FIX_MODEL || DEFAULT_MODEL,
     effort: EFFORT_LEVELS.includes(effortSetting) ? effortSetting : '',
     history: String(secrets.FIX_HISTORY ?? '').trim().toLowerCase() !== 'off',
+    lessons,
     system,
-    fetch: onlyOrigins(withDarioSocket(globalThis.fetch, darioUrl, darioSocket), ['https://api.github.com', darioUrl]),
+    fetch: onlyOrigins(withDarioSocket(globalThis.fetch, darioUrl, darioSocket), ['https://api.github.com', darioUrl, ...(lessons ? [lessons.url] : [])]),
     sleep: (ms) => new Promise((r) => setTimeout(r, ms)), now: () => Date.now(),
     dryRun: env.DRY_RUN === '1' || env.DRY_RUN === 'true',
     // The run account and the proxy are host settings, from the same env file as the key.

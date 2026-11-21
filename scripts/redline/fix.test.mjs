@@ -16,6 +16,7 @@ import {
   runAccountUidProblem, TOOLS, FINISH_REQUIRED, askForFinish, checkFinish, runLoop, buildBrief, childEnv, onlyOrigins, runFix,
   LIMITS, OUTCOMES, AUTHOR, FIX_VERSION, DEFAULT_MODEL, SUBJECT_BANNED, EFFORT_LEVELS, fixEffort, priorRounds, REVIEW_PAGES_MAX,
   HISTORY, FIX_POSTER, appliedFixComments, fixVerdicts, historyFinding, allReviews, repoFixHistory, formatHistory,
+  LESSONS, lessonsAccess, lessonQuery, fetchLessons,
 } from './fix.mjs';
 import { bumpCaller, fixCallerYaml, REVIEW_WORKFLOW, FIX_WORKFLOW, PUBLIC_TEXT_WORKFLOW, POST_WORKFLOW, CALLERS } from './pin.mjs';
 
@@ -464,6 +465,52 @@ console.log('\n  this repository\'s fix history');
     headSha: H40, review: parseReviewBody(BODY), items: [], plan: { pm: 'npm', scripts: ['test'] }, installNote: 'ok', diff: '' });
   check('with no history the brief has no history section', !plain.includes('Earlier fixes'));
   check('formatHistory says when the change request was not found', formatHistory({ pr: 3, next: 'no verdict yet', findings: [], notes: '' }).includes('(the change request it answered was not found)'));
+}
+
+console.log('\n  lessons from earlier fixes');
+{
+  const H40 = 'a'.repeat(40);
+  const S = 's'.repeat(43);
+  const on = { FIX_LESSONS_URL: 'https://lessons.example/v1/lessons', FIX_LESSONS_CLIENT_ID: 'id.access', FIX_LESSONS_CLIENT_SECRET: S };
+  check('lessonsAccess: all three settings, https only; FIX_LESSONS=off or any missing setting means none',
+    JSON.stringify(lessonsAccess(on)) === JSON.stringify({ url: on.FIX_LESSONS_URL, id: 'id.access', secret: S })
+      && lessonsAccess({ ...on, FIX_LESSONS: 'OFF' }) === null && lessonsAccess({ ...on, FIX_LESSONS_URL: '' }) === null
+      && lessonsAccess({ ...on, FIX_LESSONS_CLIENT_SECRET: ' ' }) === null && lessonsAccess({ ...on, FIX_LESSONS_URL: 'http://lessons.example/x' }) === null
+      && lessonsAccess({ ...on, FIX_LESSONS_URL: 'not a url' }) === null && lessonsAccess({}) === null);
+  const review = { summary: 'redirects are not checked', findings: [{ file: 'src/fetch.ts', problem: 'the host is checked before the redirect', suggestion: 'check each hop' }] };
+  const q = lessonQuery(review, [{ body: 'and the resolved address' }]);
+  check('the read matches on the summary, each finding and each inline comment, cut',
+    q.includes('redirects are not checked') && q.includes('the host is checked before the redirect') && q.includes('check each hop') && q.includes('resolved address')
+      && lessonQuery({ summary: 'x'.repeat(9000), findings: [] }, []).length === LESSONS.queryChars);
+
+  const sent = [];
+  const answer = (status, body) => async (url, init) => { sent.push({ url, init }); return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } }); };
+  const ctxOf = (fetch) => ({ lessons: lessonsAccess(on), fetch });
+  const many = Array.from({ length: 7 }, (_, i) => ({ id: `L${i}`, text: i === 0 ? `  Check   every\nhop. ${'y'.repeat(400)}` : `lesson ${i}` }));
+  const got = await fetchLessons(ctxOf(answer(200, { terms: 3, lessons: [...many, { id: 'x', text: '' }] })), 'redirect check', true);
+  const req = sent.at(-1);
+  const body = JSON.parse(req.init.body);
+  check('fetchLessons posts the text, the visibility and the count with the token, and never follows a redirect',
+    req.url === on.FIX_LESSONS_URL && req.init.method === 'POST' && req.init.redirect === 'manual'
+      && req.init.headers['cf-access-client-id'] === 'id.access' && req.init.headers['cf-access-client-secret'] === S
+      && body.text === 'redirect check' && body.public === true && body.k === LESSONS.k);
+  check('it keeps at most LESSONS.k lessons, on one line each, cut, and drops empty ones',
+    got.length === LESSONS.k && got[0].startsWith('Check every hop. ') && got[0].length === LESSONS.textChars && got[1] === 'lesson 1');
+  let threw = '';
+  try { await fetchLessons(ctxOf(answer(302, {})), 'x', false); } catch (e) { threw = e.message; }
+  check('an answer that is not 200 (a redirect to a sign-in page included) throws, naming no host', threw === 'the lessons read answered 302');
+
+  const pr = { number: 7, title: 't', body: 'b', head: { ref: 'f' }, base: { ref: 'main', repo: { full_name: 'askalf/r' } } };
+  const hist = [{ pr: 6, next: 'approved', findings: ['x'], notes: 'n' }];
+  const brief = buildBrief({ pr, files: [], headSha: H40, review: parseReviewBody(BODY), items: [], plan: { pm: 'npm', scripts: ['test'] }, installNote: 'ok', diff: '',
+    history: hist, lessons: ['Check every redirect hop.', 'Run the failing case again.'] });
+  check('the brief carries the lessons as background, after the findings and before the history',
+    /Lessons this lane drew from its earlier fixes that fell short \(2\)\. General advice, background only/.test(brief) && brief.includes('\n- Check every redirect hop.\n')
+      && brief.indexOf('Lessons this lane') > brief.indexOf('Findings (') && brief.indexOf('Lessons this lane') < brief.indexOf('Earlier fixes'));
+  const plain = buildBrief({ pr, files: [], headSha: H40, review: parseReviewBody(BODY), items: [], plan: { pm: 'npm', scripts: ['test'] }, installNote: 'ok', diff: '' });
+  check('with no lessons the brief has no lessons section', !plain.includes('Lessons this lane'));
+  check('the lessons secret is one of the run\'s secrets, masked in every log line',
+    runSecrets({ darioKey: 'k'.repeat(20), readToken: 't'.repeat(20), lessons: lessonsAccess(on) }).includes(S) && !runSecrets({ darioKey: 'k'.repeat(20), readToken: 't'.repeat(20) }).includes(S));
 }
 
 console.log('\n  the run account and the proxy');

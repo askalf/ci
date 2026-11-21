@@ -304,6 +304,16 @@ reviews page by page, up to ten pages of 100 (a pull request with more is left o
 in part), with the run's own read token; everything read is the repository's own pull request
 history. A failed read leaves the brief as it was. `FIX_HISTORY=off` in `fix-exec.env` turns it off.
 
+A fix run can also carry lessons the lane drew from its earlier fixes that fell short: general
+advice written without names or paths, the five that best match the review it answers, below the
+findings and above the history. They come from a lessons service the host names in `fix-exec.env`
+(`FIX_LESSONS_URL`, https only, with `FIX_LESSONS_CLIENT_ID` and `FIX_LESSONS_CLIENT_SECRET`, that
+service's access token), in one POST of the review's text. A run on a repository that is not known to
+be private asks for lessons drawn on public repositories only. Without the three settings, or with
+`FIX_LESSONS=off`, nothing is read; a failed read leaves the brief as it was. The token is masked in
+every log line like the run's other secrets, and the run's requests may reach that service's origin
+besides GitHub and the model.
+
 ## The pin bump
 
 `redline-pin-bump.yml` runs hourly and on dispatch, and picks the newest `main` commit that changed
