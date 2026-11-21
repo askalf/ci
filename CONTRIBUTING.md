@@ -50,7 +50,7 @@ target states the contract it asserts in its header. To run them:
 
 ```bash
 npm ci --prefix .clusterfuzzlite
-FUZZ_ARTIFACT_DIR=fuzz/crashes FUZZ_SECONDS=60 node fuzz/run.mjs   # FUZZ_ONLY=pin_yaml for one target
+FUZZ_ARTIFACT_DIR=fuzz/crashes FUZZ_SECONDS=60 node fuzz/run.mjs   # FUZZ_ONLY=pin_yaml for one target, FUZZ_JOBS=4 for four at once
 ```
 
 `fuzz.yml` runs them weekly, on demand and on a pull request that changes a target or a script one

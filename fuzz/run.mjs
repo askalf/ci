@@ -3,6 +3,9 @@
 // no build is needed, and a script's command line never runs on import (each guards its main).
 // Environment:
 //   FUZZ_SECONDS       per-target budget in seconds (default 30)
+//   FUZZ_JOBS          how many targets fuzz at once (default 1, one after another); each still
+//                      gets its whole FUZZ_SECONDS. CI on GitHub-hosted runners sets it to the
+//                      runner's CPU count; on the self-hosted runner it stays unset, so one at a time
 //   FUZZ_ONLY          run only the target with this name (default: all)
 //   FUZZ_CORPUS_DIR    root of per-target corpus dirs, created on demand; libFuzzer reads its
 //                      seeds from <dir>/<target> and saves every interesting input there, so a
@@ -12,7 +15,7 @@
 // Hand-written starting inputs live in fuzz/seeds/<target>/ and are read, never written.
 // Jazzer comes from .clusterfuzzlite/package.json (`npm ci --prefix .clusterfuzzlite`): this
 // repository has no package.json of its own and its scripts take no dependencies.
-import { spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { createRequire } from 'node:module';
@@ -37,7 +40,12 @@ const jazzerCli = createRequire(new URL('../.clusterfuzzlite/package.json', impo
 const shebangHook = new URL('./shebang-register.mjs', import.meta.url).href;
 if (artifactDir) mkdirSync(artifactDir, { recursive: true });
 
-for (const t of targets) {
+const jobs = Math.min(targets.length, Math.max(1, Number.parseInt(process.env.FUZZ_JOBS ?? '', 10) || 1));
+
+// Fuzzes one target and resolves with how it ended. With one job its output streams as it comes;
+// with more, each target's output is held and printed as one block when it ends, so the logs of
+// targets running side by side never interleave.
+function fuzz(t) {
   const name = t.replace(/\.fuzz\.js$/, '');
   // Every target is a plain synchronous function, so Jazzer runs in its faster sync mode.
   const args = [jazzerCli, `fuzz/${name}.fuzz`, '--sync'];
@@ -52,10 +60,34 @@ for (const t of targets) {
   // rather than libFuzzer's 20 minute default.
   args.push('--', `-max_total_time=${secs}`, '-timeout=10', '-print_final_stats=1');
   if (artifactDir) args.push(`-artifact_prefix=${artifactDir}${path.sep}`);
-  console.log(`\n=== fuzzing ${name} (${secs}s) ===`);
-  const r = spawnSync(process.execPath, ['--import', shebangHook, ...args], { stdio: 'inherit' });
-  if (r.status !== 0) {
-    console.error(`\n${name}: jazzer exited with ${r.status ?? r.signal}; a reproducing input is in ${artifactDir || 'the working directory'}`);
-    process.exit(r.status || 1);
-  }
+  const header = `\n=== fuzzing ${name} (${secs}s) ===`;
+  return new Promise((resolve) => {
+    if (jobs === 1) console.log(header);
+    const child = spawn(process.execPath, ['--import', shebangHook, ...args], { stdio: jobs === 1 ? 'inherit' : ['ignore', 'pipe', 'pipe'] });
+    const out = [];
+    child.stdout?.on('data', (d) => out.push(d));
+    child.stderr?.on('data', (d) => out.push(d));
+    child.on('error', (err) => resolve({ name, status: null, signal: null, err }));
+    child.on('close', (status, signal) => {
+      if (jobs > 1) process.stdout.write(`${header}\n${Buffer.concat(out)}`);
+      resolve({ name, status, signal });
+    });
+  });
 }
+
+// After a failure no further target starts; the ones already running finish their budget. With
+// one job that is the first failing target, as before.
+const failures = [];
+let next = 0;
+await Promise.all(Array.from({ length: jobs }, async () => {
+  while (!failures.length && next < targets.length) {
+    const r = await fuzz(targets[next++]);
+    if (r.status !== 0) failures.push(r);
+  }
+}));
+for (const r of failures) {
+  console.error(`\n${r.name}: jazzer exited with ${r.err?.message ?? r.status ?? r.signal}; a reproducing input is in ${artifactDir || 'the working directory'}`);
+}
+// exitCode rather than exit(): a target's held output can still be draining into a pipe, and exit()
+// would cut it off, crash report included.
+if (failures.length) process.exitCode = failures[0].status || 1;
