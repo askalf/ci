@@ -44,6 +44,15 @@ inputs:
       out only its own repository.
     required: false
     default: ''
+  full-run-labels:
+    description: >-
+      The runner labels this job asks for when it runs in full, separated by commas, spaces or new
+      lines, for a job that runs a tested push on a lighter runner (its build and test steps all
+      skip there). The pull request's job is compared with these labels instead of the ones this
+      job got: it must have run where a full run of this push would. Empty, the default: the labels
+      this job got.
+    required: false
+    default: ''
   default-branch:
     description: The repository's default branch. A caller passes none.
     required: false

@@ -4,7 +4,7 @@
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { factsOf, notEligible, mergedAs, runAtHead, jobsProblem, contains, thisJob, runnerProblem, checkoutMerge, pinnedList, decide, main } from './check.mjs';
+import { factsOf, notEligible, mergedAs, runAtHead, jobsProblem, contains, thisJob, runnerProblem, fullLabelList, checkoutMerge, pinnedList, decide, main } from './check.mjs';
 
 let pass = 0;
 let fail = 0;
@@ -124,6 +124,11 @@ console.log('\n  the pure rules');
     runnerProblem(mine('a'), job('a', 'success', undefined, ['POOL-EXEC', 'self-hosted', 'pool-exec'])) === '');
   check('a hosted runner there and a self-hosted one here are not',
     /ran on \[ubuntu-latest\], this job on \[pool-exec, self-hosted\]: another machine/.test(runnerProblem(mine('a'), job('a', 'success', undefined, ['ubuntu-latest']))));
+  check('with full-run-labels, the pull request\'s job is compared with those, not with the lighter runner this job got',
+    runnerProblem(mine('a', 'pool-e3', ['self-hosted', 'light']), job('a'), ['Self-Hosted', 'pool-exec']) === ''
+      && /"a" there ran on \[pool-exec, self-hosted\], a full run of this job on \[heavy, self-hosted\]: another machine/.test(runnerProblem(mine('a'), job('a'), ['self-hosted', 'heavy'])));
+  check('full-run-labels is read as a list, commas, spaces or new lines between',
+    JSON.stringify(fullLabelList(' self-hosted, platform-solo\n x ')) === JSON.stringify(['self-hosted', 'platform-solo', 'x']) && fullLabelList('').length === 0 && fullLabelList(undefined).length === 0);
   check('a job with no labels listed, on either side, is not taken',
     /not listed for both runs/.test(runnerProblem(mine('a', 'pool-e3', []), job('a'))) && /not listed for both runs/.test(runnerProblem(mine('a'), { name: 'a' })));
   check('the merge the one checkout made is read from its step', JSON.stringify(checkoutMerge(checkoutLog(), O)) === JSON.stringify({ head: HEAD, base: BASE }));
@@ -233,6 +238,14 @@ for (const [name, over, re, envOver] of [
   const pinnedOk = await decide(env({ PINNED_CHECKOUTS: 'askalf/vendored' }), world({ LOG: { text: checkoutLog() + [...pinnedStep(), ''].join('\n') } }));
   check('a named repository checked out at a pinned commit, the merge of the head as well: tested', pinnedOk.tested === true);
   check('pinned-checkouts is read from the environment', factsOf(env({ PINNED_CHECKOUTS: ' a/b ' })).pinned === 'a/b');
+  const light = { [`/repos/${REPO}/actions/runs/${RUN_ID}/jobs`]: { total_count: 1, jobs: [mine('unit', 'pool-e3', ['self-hosted', 'light'])] } };
+  const moved = await decide(env({ FULL_RUN_LABELS: 'self-hosted,pool-exec' }), world(light));
+  check('a push on a lighter runner whose full-run-labels match where the pull request\'s job ran: tested', moved.tested === true);
+  const unnamed = await decide(env(), world(light));
+  check('the same push without full-run-labels: tested in full, the lighter runner is another machine', unnamed.tested === false && /this job on \[light, self-hosted\]: another machine/.test(unnamed.why));
+  const wrong = await decide(env({ FULL_RUN_LABELS: 'self-hosted heavy' }), world(light));
+  check('full-run-labels that are not where the pull request\'s job ran: tested in full', wrong.tested === false && /a full run of this job on \[heavy, self-hosted\]: another machine/.test(wrong.why));
+  check('full-run-labels is read from the environment', factsOf(env({ FULL_RUN_LABELS: ' a, b ' })).fullLabels === 'a, b');
   const same = await decide(env(), world({ LOG: { text: checkoutLog(HEAD, HEAD) }, [`/repos/${REPO}/compare/${HEAD}...${HEAD}`]: { status: 'identical' } }));
   check('a base that is the head itself counts as held', same.tested === true);
   const w2 = world();

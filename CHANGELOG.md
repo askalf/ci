@@ -13,6 +13,10 @@ names the commit's date and the pull request it came from.
 
 ## November 2026
 
+- `actions/tree-tested` takes `full-run-labels`: the runner labels a job asks for when it runs in
+  full. A job that runs a tested push on a lighter runner, where its build and test steps all skip,
+  names them, and the pull request's job is compared with those instead of the labels the push got.
+  Without it, the push's own labels are compared, as before. The README row says so.
 - The fix lane's brief can carry lessons the lane drew from its earlier fixes that fell short: the
   five that best match the review, from a lessons service the host names in `fix-exec.env`
   (`FIX_LESSONS_URL`, `FIX_LESSONS_CLIENT_ID`, `FIX_LESSONS_CLIENT_SECRET`). Background only, below

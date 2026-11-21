@@ -40,7 +40,11 @@
 //      share a name) cannot be told apart, so neither is taken. That job asked for the same runner
 //      labels as this one: a job whose runs-on depends on who opened the pull request (a fork's or
 //      a bot's pull request on a hosted runner, its push on a self-hosted one) tested on another
-//      machine than the push would, and is not taken.
+//      machine than the push would, and is not taken. A caller that runs a tested push on a lighter
+//      runner (the build steps all skip there) names in full-run-labels the labels this job asks
+//      for when it runs in full, and those are compared instead of the labels it got: the pull
+//      request's job must have run where a full run of this push would have. That the job runs in
+//      full on those labels is the caller's word, like same-on-pull-request.
 //   6. That job's log shows what its checkouts made. Every "HEAD is now at" line in the log is
 //      inside an actions/checkout step, one to a step. Exactly one of those steps checks out this
 //      repository, and its line reads "Merge <head> into <base>": GitHub's merge of the pull
@@ -85,6 +89,7 @@ export function factsOf(env) {
     runnerName: text('RUNNER_NAME'),
     declared: text('SAME_ON_PULL_REQUEST'),
     pinned: text('PINNED_CHECKOUTS'),
+    fullLabels: text('FULL_RUN_LABELS'),
   };
 }
 
@@ -154,14 +159,22 @@ export function thisJob(jobs, runnerName) {
 const labelsOf = (j) => (Array.isArray(j?.labels) && j.labels.length
   ? [...new Set(j.labels.map((l) => String(l).toLowerCase()))].sort() : null);
 
+/** full-run-labels as a list (commas, spaces or new lines between), or [] when none is given. Pure. */
+export function fullLabelList(text) {
+  return String(text ?? '').split(/[\s,]+/).map((l) => l.trim()).filter(Boolean);
+}
+
 /**
  * Why the pull request's job ran on another kind of runner than the job asking, or ''. Labels are
- * compared as a set, ignoring case, as GitHub matches them. Pure.
+ * compared as a set, ignoring case, as GitHub matches them. With `full` (full-run-labels), the pull
+ * request's job is compared with those, the labels this job asks for when it runs in full, in place
+ * of the ones it got this time. Pure.
  */
-export function runnerProblem(me, twin) {
-  const mine = labelsOf(me), theirs = labelsOf(twin);
+export function runnerProblem(me, twin, full = []) {
+  const mine = full.length ? labelsOf({ labels: full }) : labelsOf(me), theirs = labelsOf(twin);
+  const where = full.length ? 'a full run of this job on' : 'this job on';
   if (!mine || !theirs) return `the runner labels of "${me?.name ?? '?'}" are not listed for both runs`;
-  if (mine.join('\n') !== theirs.join('\n')) return `"${me?.name ?? '?'}" there ran on [${theirs.join(', ')}], this job on [${mine.join(', ')}]: another machine`;
+  if (mine.join('\n') !== theirs.join('\n')) return `"${me?.name ?? '?'}" there ran on [${theirs.join(', ')}], ${where} [${mine.join(', ')}]: another machine`;
   return '';
 }
 
@@ -332,7 +345,7 @@ export async function decide(env, io = { fetch: globalThis.fetch }) {
     if (namesakes !== 1) return { tested: false, why: `${namesakes} jobs of this run are named "${me.name}", so the one the pull request ran cannot be told apart` };
     const twins = theirs.jobs.filter((j) => j?.name === me.name);
     if (twins.length !== 1) return { tested: false, why: `the job "${me.name}" is ${twins.length ? 'not one job' : 'not a job'} in ${run.html_url ?? run.id}: the pull request did not run it` };
-    const elsewhere = runnerProblem(me, twins[0]);
+    const elsewhere = runnerProblem(me, twins[0], fullLabelList(f.fullLabels));
     if (elsewhere) return { tested: false, why: `${elsewhere} (${run.html_url ?? run.id})` };
     // What that job checked out.
     const seen = checkoutMerge(await getLog(io, env, f.repo, twins[0].id), { repo: f.repo, pinned: pinnedList(f.pinned) });
