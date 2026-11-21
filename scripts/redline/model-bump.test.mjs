@@ -62,6 +62,9 @@ console.log('\n  bumpPins: each tracked pin to its family\'s newest');
   check('a family that is not a family moves nothing', bumpPins('REDLINE_MODEL_TRACKS=gpt-6-sol\nREDLINE_MODEL=gpt-5\n', SEAT).changes.length === 0);
   const crlf = bumpPins('REDLINE_MODEL_TRACKS=gpt-*-sol\r\nREDLINE_MODEL=gpt-6-sol\r\n', SEAT);
   check('CRLF line endings are kept', crlf.text === 'REDLINE_MODEL_TRACKS=gpt-*-sol\r\nREDLINE_MODEL=gpt-6.2-sol\r\n');
+  check('a pin ahead of the record\'s list is never moved back', bumpPins('REDLINE_MODEL_TRACKS=gpt-*-sol\nREDLINE_MODEL=gpt-6.3-sol\n', SEAT).changes.length === 0);
+  check('the same version spelled another way is not moved', bumpPins('REDLINE_MODEL_TRACKS=gpt-*-sol\nREDLINE_MODEL=gpt-6.2.0-sol\n', SEAT).changes.length === 0);
+  check('a pin outside its family moves into it', bumpPins('REDLINE_MODEL_TRACKS=gpt-*-sol\nREDLINE_MODEL=gpt-5.6-terra\n', SEAT).changes.map((c) => c.to).join() === 'gpt-6.2-sol');
   check('the second lens moves to the newest Opus and Fable, past [1m]', bumpPins(SECOND.replace('claude-fable-5-2', 'claude-fable-5-1'), SEAT).changes.map((c) => c.to).join() === 'claude-fable-5-2');
 }
 

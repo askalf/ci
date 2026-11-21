@@ -24,7 +24,7 @@
 //   DRY_RUN         1: say what would move, write nothing
 import { appendFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
-import { gh, ghBytes, newestMatching, parseEnvFile, trackMatcher, MODEL_KEYS } from './review.mjs';
+import { gh, ghBytes, newestMatching, parseEnvFile, pinBehind, trackMatcher, MODEL_KEYS } from './review.mjs';
 import { zipEntry } from './zip.mjs';
 
 /** The two lenses: the artifact that carries each one's record, and its pins file in PINS_REPO. */
@@ -41,8 +41,8 @@ const MODEL_ID = /^[A-Za-z0-9._:/-]+$/;
 
 /**
  * The pins file with each tracked pin moved to its family's newest in `catalog`, and the moves.
- * A pin moves only when its key is on exactly one line, its family is valid, and the newest is a
- * model id other than the pin. Line endings and every other line are kept as they are. Pure.
+ * A pin moves only when its key is on exactly one line, its family is valid, and it is behind the
+ * newest (pinBehind): never back to an older version the record's list happens to end at. Line endings and every other line are kept as they are. Pure.
  */
 export function bumpPins(text, catalog) {
   const pins = parseEnvFile(text);
@@ -53,7 +53,7 @@ export function bumpPins(text, catalog) {
     if (!tracks || !trackMatcher(tracks) || !Object.hasOwn(pins, key)) continue;
     const to = newestMatching(tracks, catalog);
     const from = pins[key];
-    if (!to || to === from || !MODEL_ID.test(to)) continue;
+    if (!to || !pinBehind(tracks, from, to) || !MODEL_ID.test(to)) continue;
     const line = new RegExp(`^${key}=[^\\r\\n]*`, 'gm');
     if ((out.match(line) ?? []).length !== 1) continue;
     out = out.replace(line, `${key}=${to}`);
