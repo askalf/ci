@@ -71,7 +71,12 @@ const ms = Number(process.env.STUB_MS);
 const wait = code && !name.includes('late') ? ms / 10 : ms;
 log('start');
 process.stdout.write('out ' + name + ' 1\\n');
-setTimeout(() => { process.stdout.write('out ' + name + ' 2\\n'); log('end'); process.exit(code); }, wait);
+// A target named big... prints 4 MB before its last line, so its log is still draining when it ends.
+// Every target exits only once its last line is written: exit() can cut off output still in a pipe.
+setTimeout(() => {
+  if (name.startsWith('big')) process.stdout.write(('x'.repeat(1023) + '\\n').repeat(4096));
+  process.stdout.write('out ' + name + ' 2\\n', () => { log('end'); process.exit(code); });
+}, wait);
 `;
   function run(names, jobs) {
     const root = mkdtempSync(join(tmpdir(), 'ci-fuzz-run-test-'));
@@ -88,7 +93,7 @@ setTimeout(() => { process.stdout.write('out ' + name + ' 2\\n'); log('end'); pr
     const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith('FUZZ_')));
     Object.assign(env, { FUZZ_SECONDS: '1', FUZZ_CORPUS_DIR: join(root, 'corpus'), STUB_LOG: logFile, STUB_MS: '1000' });
     if (jobs !== undefined) env.FUZZ_JOBS = jobs;
-    const r = spawnSync(process.execPath, [join(root, 'fuzz', 'run.mjs')], { cwd: root, env, encoding: 'utf8', timeout: 60000 });
+    const r = spawnSync(process.execPath, [join(root, 'fuzz', 'run.mjs')], { cwd: root, env, encoding: 'utf8', timeout: 60000, maxBuffer: 64 * 1024 * 1024 });
     const events = readFileSync(logFile, 'utf8').trim().split('\n').filter(Boolean).map((l) => l.split(' '));
     rmSync(root, { recursive: true, force: true });
     let now = 0;
@@ -137,6 +142,11 @@ setTimeout(() => { process.stdout.write('out ' + name + ' 2\\n'); log('end'); pr
   r = run(['a_fail5', 'b_late_fail7'], '2');
   check('every failure is reported', /a_fail5: jazzer exited with 5/.test(r.stderr) && /b_late_fail7: jazzer exited with 7/.test(r.stderr), show(r));
   check('the run exits with the first failure\'s status', r.status === 5, show(r));
+
+  r = run(['a_fail5', 'big_late_fail3'], '2');
+  check('a failing target that ends last with a large log has all of it printed',
+    r.status === 5 && r.stdout.length > 4 * 1024 * 1024 && r.stdout.trimEnd().endsWith('out big_late_fail3 2'),
+    `status ${r.status}, ${r.stdout.length} bytes, ends ${JSON.stringify(r.stdout.slice(-80))}`);
 }
 
 console.log(`\n  ${pass} pass, ${failed} fail`);
