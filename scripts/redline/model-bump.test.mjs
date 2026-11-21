@@ -59,6 +59,13 @@ console.log('\n  bumpPins: each tracked pin to its family\'s newest');
   check('a family nothing in the list matches leaves its pin', bumpPins('REDLINE_MODEL_TRACKS=gpt-*-nova\nREDLINE_MODEL=gpt-6-sol\n', SEAT).changes.length === 0);
   check('an empty pin with a family is filled', bumpPins('REDLINE_PIN_MODEL_TRACKS=gpt-*-terra\nREDLINE_PIN_MODEL=\n', SEAT).text === 'REDLINE_PIN_MODEL_TRACKS=gpt-*-terra\nREDLINE_PIN_MODEL=gpt-6.1-terra\n');
   check('a key on two lines is not guessed at', bumpPins('REDLINE_MODEL_TRACKS=gpt-*-sol\nREDLINE_MODEL=gpt-6-sol\nREDLINE_MODEL=gpt-6-sol\n', SEAT).changes.length === 0);
+  check('an indented second assignment counts as a second line, as the env parser reads it', (() => {
+    const two = 'REDLINE_MODEL_TRACKS=gpt-*-sol\nREDLINE_MODEL=gpt-6-sol\n REDLINE_MODEL = gpt-6-sol\n';
+    const r = bumpPins(two, SEAT);
+    return r.changes.length === 0 && r.text === two;
+  })());
+  check('one indented assignment is the key\'s line, rewritten', bumpPins('REDLINE_MODEL_TRACKS=gpt-*-sol\n  REDLINE_MODEL = gpt-6-sol\n# REDLINE_MODEL=gpt-5-sol\n', SEAT).text
+    === 'REDLINE_MODEL_TRACKS=gpt-*-sol\nREDLINE_MODEL=gpt-6.2-sol\n# REDLINE_MODEL=gpt-5-sol\n');
   check('a family that is not a family moves nothing', bumpPins('REDLINE_MODEL_TRACKS=gpt-6-sol\nREDLINE_MODEL=gpt-5\n', SEAT).changes.length === 0);
   const crlf = bumpPins('REDLINE_MODEL_TRACKS=gpt-*-sol\r\nREDLINE_MODEL=gpt-6-sol\r\n', SEAT);
   check('CRLF line endings are kept', crlf.text === 'REDLINE_MODEL_TRACKS=gpt-*-sol\r\nREDLINE_MODEL=gpt-6.2-sol\r\n');
@@ -131,7 +138,6 @@ console.log('\n  newestRecord: the newest usable models record');
   check('a record with an empty list is no record', (await newestRecord(empty.ctx, { repo: 'r/r', artifact: 'redline-models' })) === null);
   const old = fakeGitHub({ now: NOW, runs: { 'r/r': [run(6, 24 * 8)] }, artifacts: { 6: [{ id: 61, name: 'redline-models' }] }, zips: { 61: makeZip('models.json', rec('first')) } });
   check('a record older than the age limit is no record', (await newestRecord(old.ctx, { repo: 'r/r', artifact: 'redline-models' })) === null && RECORD_MAX_AGE_MS === 7 * 86_400_000);
-  check('the records are read with the read token', fakeGitHub({ now: NOW }).ctx.readToken === 'read-tok');
 }
 
 console.log('\n  the pull request\'s title and body');
@@ -170,8 +176,10 @@ console.log('\n  runBump: the pull request in the pins repository');
   check('the new file texts are the moved pins', blobs[0].body.content.includes('REDLINE_MODEL=gpt-6.2-sol\n') && blobs[1].body.content.includes('REDLINE_DEEP_MODEL=claude-fable-5-2\n'));
   check('a missing branch is created at the new commit, never at the base', ref.method === 'POST' && ref.body.ref === 'refs/heads/redline/model-bump' && ref.body.sha === 'c0ffee');
   check('the pull request is from the branch to the default branch, held', pull.body.head === 'redline/model-bump' && pull.body.base === 'main' && pull.body.title.startsWith('[hold] '));
-  check('every write uses the write token and every record read the read token',
-    g.writes.every((w) => w.token === 'Bearer write-tok') && g.reads.filter((x) => x.path.includes('/actions/')).every((x) => x.token === 'Bearer read-tok'));
+  const recordReads = g.reads.filter((x) => x.path.includes('/actions/'));
+  check('every write uses the write token and every record read, the artifact download among them, the read token',
+    g.writes.every((w) => w.token === 'Bearer write-tok') && recordReads.some((x) => x.path.endsWith('/zip'))
+    && recordReads.length > 0 && recordReads.every((x) => x.token === 'Bearer read-tok'));
 }
 {
   const g = full({ branchExists: true, openPulls: [{ number: 7, html_url: 'https://github.com/o/pins/pull/7' }], branchFiles: { [TARGETS[0].path]: 'older', [TARGETS[1].path]: 'older' } });

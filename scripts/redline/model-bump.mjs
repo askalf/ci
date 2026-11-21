@@ -42,24 +42,34 @@ const MODEL_ID = /^[A-Za-z0-9._:/-]+$/;
 /**
  * The pins file with each tracked pin moved to its family's newest in `catalog`, and the moves.
  * A pin moves only when its key is on exactly one line, its family is valid, and it is behind the
- * newest (pinBehind): never back to an older version the record's list happens to end at. Line endings and every other line are kept as they are. Pure.
+ * newest (pinBehind): never back to an older version the record's list happens to end at. A line
+ * counts as the key's when parseEnvFile would read it so (trimmed, not a comment), so an indented
+ * second assignment stops the move. Line endings and every other line are kept as they are. Pure.
  */
 export function bumpPins(text, catalog) {
   const pins = parseEnvFile(text);
   const changes = [];
-  let out = text;
+  const lines = String(text).split('\n');
   for (const key of MODEL_KEYS) {
     const tracks = pins[`${key}_TRACKS`];
     if (!tracks || !trackMatcher(tracks) || !Object.hasOwn(pins, key)) continue;
     const to = newestMatching(tracks, catalog);
     const from = pins[key];
     if (!to || !pinBehind(tracks, from, to) || !MODEL_ID.test(to)) continue;
-    const line = new RegExp(`^${key}=[^\\r\\n]*`, 'gm');
-    if ((out.match(line) ?? []).length !== 1) continue;
-    out = out.replace(line, `${key}=${to}`);
+    const at = lines.flatMap((l, i) => (envKeyOf(l) === key ? [i] : []));
+    if (at.length !== 1) continue;
+    lines[at[0]] = `${key}=${to}${lines[at[0]].endsWith('\r') ? '\r' : ''}`;
     changes.push({ key, from, to, tracks });
   }
-  return { text: out, changes };
+  return { text: lines.join('\n'), changes };
+}
+
+/** The key parseEnvFile reads from one line, or null for a blank line, a comment or no `=`. */
+function envKeyOf(raw) {
+  const line = raw.trim();
+  if (!line || line.startsWith('#')) return null;
+  const eq = line.indexOf('=');
+  return eq <= 0 ? null : line.slice(0, eq).trim();
 }
 
 /**
