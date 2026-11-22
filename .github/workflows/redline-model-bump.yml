@@ -9,15 +9,14 @@
 # moves at review time.
 #
 # The records are this repository's runs for the first reviewer, and RECORDS_SECOND's for the
-# second lens, which only some callers run. Downloading another repository's artifacts needs a
-# token with Actions read on it, which the job's own token is not, so the records are read with a
-# second token of the pin bump App: Actions read, minted for this repository and the second lens's.
-# That needs Actions: Read among the App's permissions. Until it has it, the mint fails, the job
-# says so, and the records are read with the job's own token: the first lens still moves, and the
-# second lens's records cannot be downloaded and it is skipped with a warning. The pins repository
-# is written with the App's other token, minted for PINS_REPO alone with Contents and Pull
-# requests: the pins files are not workflows, so it asks for no Workflows permission. Without the
-# App's variable the job says so and stops, green.
+# second lens, which only some callers run. Both are read with the job's own token (actions: read):
+# it reads this repository's runs, and a public repository's runs and artifacts, which
+# askalf/redline-rubric is (2026-11-22, run 44996095049: the second lens read a redline-rubric
+# record with it). A private RECORDS_SECOND would need a token with Actions read there; its read
+# then fails, and that lens is skipped with a warning while the first still moves. The pins
+# repository is written with the pin bump App's token, minted for PINS_REPO alone with Contents
+# and Pull requests: the pins files are not workflows, so it asks for no Workflows permission.
+# Without the App's variable the job says so and stops, green.
 name: Redline model bump
 
 on:
@@ -64,22 +63,6 @@ jobs:
           permission-contents: write
           permission-pull-requests: write
 
-      - name: Mint the records read token
-        id: read
-        if: vars.REDLINE_PIN_BUMP_CLIENT_ID != ''
-        continue-on-error: true
-        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
-        with:
-          client-id: ${{ vars.REDLINE_PIN_BUMP_CLIENT_ID }}
-          private-key: ${{ secrets.REDLINE_PIN_BUMP_APP_KEY }}
-          owner: ${{ github.repository_owner }}
-          repositories: ${{ github.event.repository.name }},redline-rubric
-          permission-actions: read
-
-      - name: Say which token reads the records
-        if: vars.REDLINE_PIN_BUMP_CLIENT_ID != '' && steps.read.outcome != 'success'
-        run: echo "::warning::The pin bump App could not mint an Actions read token (give the App Actions Read). The records are read with the job's own token, which cannot download the second lens's from askalf/redline-rubric."
-
       - name: Check for the token
         id: guard
         env:
@@ -101,7 +84,7 @@ jobs:
       - name: Bump the model pins
         if: steps.guard.outputs.ok == 'true'
         env:
-          READ_TOKEN: ${{ steps.read.outputs.token || github.token }}
+          READ_TOKEN: ${{ github.token }}
           WRITE_TOKEN: ${{ steps.app.outputs.token }}
           DRY_RUN: ${{ inputs.dry-run && '1' || '0' }}
         run: node scripts/redline/model-bump.mjs
