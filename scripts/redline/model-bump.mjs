@@ -15,9 +15,8 @@
 // pull request.
 //
 // Environment (all set by .github/workflows/redline-model-bump.yml):
-//   READ_TOKEN      reads the record repositories' runs and artifacts: the pin bump App's Actions
-//                   read token for this repository and RECORDS_SECOND's, or, when that mint
-//                   failed, the job's GITHUB_TOKEN (which cannot download RECORDS_SECOND's)
+//   READ_TOKEN      reads the record repositories' runs and artifacts (the job's GITHUB_TOKEN:
+//                   this repository's, and a public RECORDS_SECOND's)
 //   WRITE_TOKEN     reads PINS_REPO and writes BRANCH and the pull request (the pin bump App)
 //   PINS_REPO       owner/name of the repository with the pins files
 //   RECORDS_FIRST   owner/name whose redline.yml runs carry the redline-models artifact

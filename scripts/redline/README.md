@@ -136,11 +136,10 @@ An open pull request that already proposes the same files is left alone. One tha
 updated: the branch is moved to a new commit on the default branch's head, never to the head itself,
 which would close the pull request. A person merges it; until the dario keys allow the new models,
 reviews on them are refused. It writes with the pin bump App's token, minted for the pins repository
-with Contents and Pull requests only. It reads the records with a second token of the same App,
-minted for this repository and askalf/redline-rubric with Actions read, which needs Actions: Read
-among the App's permissions: the job's own token cannot download another repository's artifacts.
-When that mint fails, the job warns and reads with its own token, so the first lens still moves and
-the second lens is skipped with a warning.
+with Contents and Pull requests only. It reads the records with the job's own token, which reads
+this repository's runs and a public repository's artifacts (askalf/redline-rubric is public). A
+private records repository would need a token with Actions read there: without one its read
+fails, that lens is skipped with a warning, and the other still moves.
 
 ## The post: `redline-post-verdict.yml` and `post.mjs`
 

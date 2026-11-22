@@ -13,6 +13,10 @@ names the commit's date and the pull request it came from.
 
 ## November 2026
 
+- The Redline model bump reads its records with the job's own token. It reads askalf/redline-rubric's
+  artifacts because that repository is public (the bump's run of 2026-11-22 read a second-lens
+  record with it), so the pin bump App's second token, minted with Actions read, and its warning
+  are gone. The README says when another token would be needed: a private records repository.
 - The fix lane's brief can carry lessons the lane drew from its earlier fixes that fell short: the
   five that best match the review, from a lessons service the host names in `fix-exec.env`
   (`FIX_LESSONS_URL`, `FIX_LESSONS_CLIENT_ID`, `FIX_LESSONS_CLIENT_SECRET`). Background only, below
