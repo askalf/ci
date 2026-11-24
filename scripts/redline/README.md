@@ -239,9 +239,12 @@ checks that the checkout is exactly the reviewed head, then `fix.mjs`:
   again from the reviewed head, leaves that change out, and is checked for a protected path before
   the bundle is written;
 - writes `fix.json` (`outcome`: `fixed`, `no_change`, `tests_failed` or `refused`; the commits,
-  files, tests, turns, notes and `description`), `notes.md`, `description.md` when the description
-  is replaced, and, for a fix, `fix.bundle` (`<head>..HEAD`). A dry
-  run writes `diff.patch` instead of committing.
+  files, tests, turns, notes, `description` and `run`), `notes.md`, `description.md` when the
+  description is replaced, and, for a fix, `fix.bundle` (`<head>..HEAD`). A dry
+  run writes `diff.patch` instead of committing. `run` is the workflow run and attempt that wrote
+  the record, `{ id, attempt }`; the brief names the same pair on its fourth line (`Fix run <id>,
+  attempt <n>`), so each model call and the artifact name one execution. A rerun keeps the run id
+  and raises the attempt.
 
 Limits: 40 turns, 30 files, 400 KB of diff; past any of them the outcome is `refused`. Wall time
 counts from the start of the run, install included: at 45 minutes the model must call `finish_fix`,

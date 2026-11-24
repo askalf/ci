@@ -10,6 +10,9 @@
 // Output, under FIX_OUT (uploaded as the redline-fix artifact):
 //   fix.json     { version, repo, pr, base_head, new_head, outcome, commits, files, tests, turns, model, notes }
 //                outcome: fixed | no_change | tests_failed | refused. Always written, whatever happened.
+//                run: { id, attempt } is the workflow run and attempt that wrote it, null outside
+//                one. The brief's "Fix run" line says the same, so each model call and the
+//                artifact name one execution: a rerun keeps the run id and raises the attempt.
 //   notes.md     the notes field: markdown for the PR comment the ops tick posts.
 //   description.md  the PR's new description, only when fix_describe answered a finding on it
 //                (fix.json `description: true`); the ops tick sets it as the PR body.
@@ -746,9 +749,31 @@ export function maskSecrets(text, secrets) {
 
 // ---------- fix.json ----------
 
+/**
+ * The workflow run and attempt this process is part of, from the runner's environment
+ * (GITHUB_RUN_ID, GITHUB_RUN_ATTEMPT); null when either is not a positive integer, as outside a
+ * workflow. Pure.
+ */
+export function runIdentity(env = process.env) {
+  const whole = (v) => (/^[1-9]\d{0,14}$/.test(String(v ?? '')) ? Number(v) : null);
+  const id = whole(env.GITHUB_RUN_ID);
+  const attempt = whole(env.GITHUB_RUN_ATTEMPT);
+  return id !== null && attempt !== null ? { id, attempt } : null;
+}
+
+/** Why a value is not a run identity { id, attempt }, both positive integers; null when it is one. Pure. */
+function runProblem(run) {
+  const ok = run !== null && typeof run === 'object' && !Array.isArray(run)
+    && Number.isSafeInteger(run.id) && run.id > 0 && Number.isSafeInteger(run.attempt) && run.attempt > 0;
+  return ok ? null : 'run must be null or { id, attempt }, both positive integers';
+}
+
 /** fix.json exactly as the ops tick reads it. */
-export function fixRecord({ repo, pr, headSha, newHead = null, outcome, commits = [], files = [], tests = null, turns = 0, model = '', notes = '', description = false }) {
-  return { version: FIX_VERSION, repo, pr, base_head: headSha, new_head: newHead, outcome, commits, files, tests, turns, model, notes: String(notes ?? ''), description: description === true };
+export function fixRecord({ repo, pr, headSha, newHead = null, outcome, commits = [], files = [], tests = null, turns = 0, model = '', notes = '', description = false, run = null }) {
+  return {
+    version: FIX_VERSION, repo, pr, base_head: headSha, new_head: newHead, outcome, commits, files, tests, turns, model, notes: String(notes ?? ''), description: description === true,
+    run: run && runProblem(run) === null ? { id: run.id, attempt: run.attempt } : null,
+  };
 }
 
 /** Why a parsed fix.json is malformed, or null. The ops tick applies its own checks as well. */
@@ -774,6 +799,8 @@ export function fixProblem(v) {
   if (/[\u2013\u2014]/.test(v.notes)) return 'notes must not contain an em dash';
   if (v.description !== undefined && typeof v.description !== 'boolean') return 'description must be a boolean';
   if (v.description === true && v.outcome !== 'fixed' && v.outcome !== 'no_change') return `${v.outcome} carries no description`;
+  // Absent in a record written before the field existed; null outside a workflow run.
+  if (v.run !== undefined && v.run !== null && runProblem(v.run)) return runProblem(v.run);
   return null;
 }
 
@@ -944,12 +971,15 @@ export async function runLoop(ctx, brief) {
   return { refused: `no fix submitted within ${LIMITS.turns} turns`, turns };
 }
 
-export function buildBrief({ pr, files, headSha, review, items, plan, installNote, diff, protectedFiles = [], githubFiles = [], history = [], lessons = [] }) {
+export function buildBrief({ pr, files, headSha, review, items, plan, installNote, diff, protectedFiles = [], githubFiles = [], history = [], lessons = [], run = null }) {
   const findings = review.findings;
   return [
     `Repository: ${pr.base.repo.full_name}`,
     `PR #${pr.number}: ${pr.title}`,
     `${pr.head.ref} -> ${pr.base.ref}; head ${headSha}`,
+    // Directly under the head line, where a reader of the call's record finds which execution
+    // made the call. fix.json carries the same pair (fixRecord).
+    ...(run && runProblem(run) === null ? [`Fix run ${run.id}, attempt ${run.attempt}`] : []),
     '', 'PR description:', String(pr.body ?? '').slice(0, LIMITS.bodyChars) || '(empty)',
     '', `Files the PR changes (${files.length}):`, ...files.map((f) => `- ${f.status} +${f.additions} -${f.deletions} ${f.filename}`),
     githubFiles.length
@@ -1148,7 +1178,7 @@ export async function runFix(ctx) {
   // through the ops tick (the description becomes the PR body), so the description is checked with them.
   if (leaksSecret(`${JSON.stringify(result.record)}\n${result.description ?? ''}`, runSecrets(ctx))) {
     for (const f of ['fix.bundle', 'diff.patch']) rmSync(join(ctx.out, f), { force: true });
-    return { record: fixRecord({ repo: ctx.repo, pr: ctx.pr, headSha: ctx.headSha, model: ctx.model, outcome: 'refused', turns: result.record.turns,
+    return { record: fixRecord({ repo: ctx.repo, pr: ctx.pr, headSha: ctx.headSha, model: ctx.model, run: ctx.run, outcome: 'refused', turns: result.record.turns,
       notes: renderNotes({ outcome: 'refused', reason: 'The result carried a credential of this run, so nothing from it is kept.' }) }) };
   }
   return result;
@@ -1161,7 +1191,7 @@ async function answerReview(ctx) {
   // Seconds a command may still run, inside hardMs; 0 when the budget is spent.
   const secondsLeft = (want) => { const left = Math.floor((deadline - ctx.now()) / 1000); return left < 30 ? 0 : Math.min(want, left); };
   mkdirSync(out, { recursive: true });
-  const base = { repo, pr: n, headSha, model: ctx.model };
+  const base = { repo, pr: n, headSha, model: ctx.model, run: ctx.run };
   const refuse = (why, extra = {}) => ({ record: fixRecord({ ...base, outcome: 'refused', ...extra, notes: renderNotes({ outcome: 'refused', reason: why }) }) });
 
   const ref = parseReviewUrl(ctx.reviewUrl);
@@ -1439,7 +1469,7 @@ async function answerReview(ctx) {
     };
 
     const protectedFiles = [...protectedPaths(attrs, files.map((f) => f.filename))];
-    const brief = buildBrief({ pr, files, headSha, review, items, plan, installNote, diff: buildDiff(files, LIMITS.diffChars), protectedFiles, githubFiles: [...github].sort(), history, lessons });
+    const brief = buildBrief({ pr, files, headSha, review, items, plan, installNote, diff: buildDiff(files, LIMITS.diffChars), protectedFiles, githubFiles: [...github].sort(), history, lessons, run: ctx.run });
     let loop;
     let calls = 0;
     try {
@@ -1551,6 +1581,7 @@ async function main() {
   const lessons = lessonsAccess(secrets);
   const ctx = {
     repo: need('REPO'), pr: Number(need('PR')), headSha: need('HEAD_SHA'), reviewUrl: need('REVIEW_URL'), checkout: need('CHECKOUT'), out,
+    run: runIdentity(process.env),
     readToken: need('GH_READ_TOKEN'), darioUrl, darioKey, model: secrets.FIX_MODEL || DEFAULT_MODEL,
     effort: EFFORT_LEVELS.includes(effortSetting) ? effortSetting : '',
     history: String(secrets.FIX_HISTORY ?? '').trim().toLowerCase() !== 'off',
