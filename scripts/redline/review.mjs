@@ -408,6 +408,27 @@ export const DESCRIPTION_FILE = /^(?:pr|pull[ -]request) (?:description|body|tex
 export const isDescriptionFinding = (f) => DESCRIPTION_FILE.test(String(f?.file ?? '').trim()) && f?.rule === 'misleading-text';
 
 /**
+ * What the reviewer is told, once, when it asked for changes and every finding it asked with is
+ * eased, a claim in the description among them. Such a review approves, and a defect in the code
+ * that was written up as "the description promises this" would be approved with it. The reviewer
+ * decides which side is wrong; a defect in the code goes to its code line. It is told about the
+ * claims only: every finding, a secret in the description included, is then weighed by the
+ * review's rules as before, and those give the verdict.
+ */
+export const DESCRIPTION_ONLY_NUDGE = 'Every finding that asks for changes here is of a kind that does not block, and at least one of them is a claim in '
+  + 'the pull request description that the code does not back. Such a claim does not block: the author corrects it with no commit, so this '
+  + 'review would be posted as an approval. For each such claim, decide which side is wrong. If the code would be a defect whatever the '
+  + 'description said, give the finding at its code line, quoted as any finding is (from the diff, or from a changed file the diff could not '
+  + 'show), with the severity the review rules give it there. '
+  + 'If the code is acceptable as it stands and the description says more than it does, keep the finding on the description with severity '
+  + 'minor. Then weigh every finding by the review rules as before and call redline_submit again, with the verdict they give and a summary '
+  + 'that matches it.';
+
+/** The line an approval carries when the review asked for changes and every finding it asked with was eased, a description claim among them. */
+export const DESCRIPTION_ONLY_NOTE = 'The review asked for changes only for findings that do not block: a claim in the pull request description '
+  + 'that the code does not back, which is corrected with no commit, or the wording of a sentence. This is an approval.';
+
+/**
  * The root .gitattributes of the pull request's base commit, '' when the base has none. The marks
  * come from the base, never from the head: a pull request cannot mark the files it adds or changes
  * as captured for its own review. The mark lands first, in a reviewed change of its own.
@@ -456,7 +477,11 @@ export function capturedFindings(review, protectedSet, { unlabeled = false } = {
   return review.findings.filter((f) => protectedSet.has(f.file) && (PROSE_RULES.has(f.rule) || (unlabeled && !f.rule)));
 }
 
-/** Validate redline_submit input; returns { review } or { error }. */
+/**
+ * Validate redline_submit input; returns { review, descriptionOnly } or { error }. descriptionOnly
+ * is true when the review asked for changes, every finding it asked with was eased, and at least
+ * one of them is a claim in the description: the review loop asks the reviewer about that once.
+ */
 export function checkSubmission(input) {
   if (!input || typeof input !== 'object') return { error: 'redline_submit needs an object' };
   if (input.verdict !== 'APPROVE' && input.verdict !== 'REQUEST_CHANGES') return { error: 'verdict must be APPROVE or REQUEST_CHANGES' };
@@ -483,7 +508,8 @@ export function checkSubmission(input) {
   const graded = findings.map((f) => ((ADVISORY_RULES.has(f.rule) || isDescriptionFinding(f)) && f.severity === 'blocking' ? { ...f, severity: 'minor' } : f));
   const eased = input.verdict === 'REQUEST_CHANGES' && blocked && !graded.some((f) => f.severity === 'blocking');
   const rule = !eased && typeof input.rule === 'string' && /^[a-z0-9-]{1,40}$/.test(input.rule) ? input.rule : 'none';
-  return { review: { verdict: eased ? 'APPROVE' : input.verdict, summary: input.summary.trim(), findings: graded, rule } };
+  const descriptionOnly = eased && findings.some((f) => f.severity === 'blocking' && isDescriptionFinding(f));
+  return { review: { verdict: eased ? 'APPROVE' : input.verdict, summary: input.summary.trim(), findings: graded, rule }, descriptionOnly };
 }
 
 /** Findings the corpus does not back. */
@@ -1416,6 +1442,7 @@ export async function reviewChange(ctx, { pr, files, commits, reviews = [], prot
   let review = null;
   let repaired = false;
   let repairedCaptured = false;
+  let repairedDescription = false;
   let textOnly = 0;
   const notes = [];
   // A text answer is not a review: nothing in prose is graded, grounded or posted. Five of eight
@@ -1485,6 +1512,14 @@ export async function reviewChange(ctx, { pr, files, commits, reviews = [], prot
         results.push({ type: 'tool_result', tool_use_id: u.id, is_error: true, content: checked.error });
         continue;
       }
+      // Asked before the findings are grounded: what the reviewer gives at a code line in answer
+      // is grounded with its next submission, like any other finding.
+      if (checked.descriptionOnly && !repairedDescription && turn < LIMITS.turns) {
+        repairedDescription = true;
+        ctx.log?.('  changes asked for only through findings that do not block, a description claim among them: one repair round offered');
+        results.push({ type: 'tool_result', tool_use_id: u.id, is_error: true, content: DESCRIPTION_ONLY_NUDGE });
+        continue;
+      }
       const bad = ungrounded(checked.review, corpus);
       if (bad.length && !repaired && turn < LIMITS.turns) {
         repaired = true;
@@ -1518,6 +1553,8 @@ export async function reviewChange(ctx, { pr, files, commits, reviews = [], prot
           notes.push('The review asked for changes but every blocking finding was about the wording of captured data. Re-run the check.');
         }
       }
+      // Its summary was written for a request for changes, so the approval says why it is one.
+      if (checked.descriptionOnly) notes.push(DESCRIPTION_ONLY_NOTE);
       review = checked.review;
       break;
     }

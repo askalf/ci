@@ -10,7 +10,7 @@ import {
   parseEnvFile, readPrompt, safePath, buildDiff, planDiff, unshownFiles, checkoutCorpus, quoteIsGrounded, corpusOf, checkSubmission, finalVerdict,
   renderBody, verdictAtHead, isDeterministicApproval, runTool, runReview, buildBrief, contextSection, changedFilesSection, earlierReviewsSection, REVIEWER_LOGIN, LIMITS, metaPhrase,
   verdictRecord, verdictProblem, saveVerdict, VERDICT_VERSION,
-  reviewRunsOf, verdictAsReview, mergeVerdicts, roundsAsked, isCapNotice, capNoticeRounds, capNoticeQuote, lastRequest, renderCapBody, roundCapOf, DEFAULT_ROUND_CAP, ROUND_CAP_RULE, VERDICT_ARTIFACT, stripComments, DISPATCH_ACTOR, deltaSince, COMPARE_FILES_MAX,
+  DESCRIPTION_ONLY_NOTE, reviewRunsOf, verdictAsReview, mergeVerdicts, roundsAsked, isCapNotice, capNoticeRounds, capNoticeQuote, lastRequest, renderCapBody, roundCapOf, DEFAULT_ROUND_CAP, ROUND_CAP_RULE, VERDICT_ARTIFACT, stripComments, DISPATCH_ACTOR, deltaSince, COMPARE_FILES_MAX,
 } from './review.mjs';
 import { deflateRawSync } from 'node:zlib';
 import * as reviewModule from './review.mjs';
@@ -231,6 +231,16 @@ console.log('\n  submission, verdict and body');
   check('the description goes by its whole label, with an optional line; a commit message, a doc, or a file whose name begins the same way does not',
     ['PR description', 'pr description:12', 'Pull request body', 'pull-request text', ' PR text '].every((file) => checkSubmission({ verdict: 'REQUEST_CHANGES', summary: 's', findings: [{ ...onBody, file }] }).review.findings[0].severity === 'minor')
     && ['commit message', 'docs/README.md', 'src/pr-description.js', 'prbody.md', 'PR description.md', 'prbody/README.md', 'PR descriptions', 'PR description:12:3', 'PRdescription'].every((file) => checkSubmission({ verdict: 'REQUEST_CHANGES', summary: 's', findings: [{ ...onBody, file }] }).review.findings[0].severity === 'blocking'));
+  check('a review that asked for changes only on the description says so, for the loop to ask about once',
+    checkSubmission({ verdict: 'REQUEST_CHANGES', summary: 's', findings: [onBody], rule: 'misleading-text' }).descriptionOnly === true
+    && checkSubmission({ verdict: 'REQUEST_CHANGES', summary: 's', findings: [onBody, wording] }).descriptionOnly === true
+    // Wording alone is eased too, and there is no code behind it to ask about.
+    && checkSubmission({ verdict: 'REQUEST_CHANGES', summary: 's', findings: [wording], rule: 'reads-as-generated' }).descriptionOnly === false
+    // A finding that still blocks keeps the request for changes: nothing was lost.
+    && checkSubmission({ verdict: 'REQUEST_CHANGES', summary: 's', findings: [onBody, blocking] }).descriptionOnly === false
+    && checkSubmission({ verdict: 'APPROVE', summary: 's', findings: [{ ...onBody, severity: 'minor' }] }).descriptionOnly === false
+    // A request for changes that names no blocking finding at all still asks, and is not this case.
+    && checkSubmission({ verdict: 'REQUEST_CHANGES', summary: 's', findings: [{ ...onBody, severity: 'minor' }] }).descriptionOnly === false);
   check('attribution or a secret in the description still blocks',
     ['ai-attribution', 'secret-exposure', undefined].every((rule) => finalVerdict(checkSubmission({ verdict: 'REQUEST_CHANGES', summary: 's', findings: [{ ...onBody, rule }] }).review) === 'REQUEST_CHANGES'));
   const withSecret = checkSubmission({ verdict: 'REQUEST_CHANGES', summary: 's', findings: [wording, { ...blocking, rule: 'secret-exposure' }], rule: 'secret-exposure' }).review;
@@ -565,6 +575,57 @@ console.log('\n  earlier reviews on the PR');
   const { ctx, calls } = world({ turns: [submit({ ...APPROVE, findings: [GOOD] })] });
   const r = await runReview(ctx);
   check('APPROVE with a blocking finding posts REQUEST_CHANGES', r.verdict === 'REQUEST_CHANGES' && calls.posted[0].event === 'REQUEST_CHANGES');
+}
+{
+  // The description of the pull request in this world is "Adds it.".
+  const claim = { severity: 'blocking', file: 'PR description', quote: 'Adds it.', problem: 'The description says the token is added safely, and the code exports a secret.', rule: 'misleading-text' };
+  const asksOnDescription = { verdict: 'REQUEST_CHANGES', summary: 'Request changes: the description promises what the code does not do.', findings: [claim], rule: 'misleading-text' };
+  {
+    const { ctx, calls } = world({ turns: [submit(asksOnDescription), submit({ verdict: 'REQUEST_CHANGES', summary: 'The export leaks a secret.', findings: [GOOD, { ...claim, severity: 'minor' }], rule: 'secret-exposure' })] });
+    const r = await runReview(ctx);
+    check('a review that asks for changes only on the description is asked once which side is wrong, and the defect it then gives at the code line blocks',
+      r.verdict === 'REQUEST_CHANGES' && calls.model.length === 2 && JSON.stringify(calls.model[1].messages.at(-1)).includes('decide which side is wrong')
+        && calls.posted[0].event === 'REQUEST_CHANGES' && calls.posted[0].body.includes('Exports a secret from the environment.') && !calls.posted[0].body.includes(DESCRIPTION_ONLY_NOTE));
+  }
+  {
+    const { ctx, calls } = world({ turns: [submit(asksOnDescription), submit({ verdict: 'APPROVE', summary: 'The code holds; the description says more than it does.', findings: [{ ...claim, severity: 'minor' }] })] });
+    const r = await runReview(ctx);
+    check('when the reviewer answers that the code is acceptable, the review approves with the claim as a note and a summary of its own',
+      r.verdict === 'APPROVE' && calls.model.length === 2 && calls.posted[0].event === 'APPROVE' && calls.posted[0].body.includes('The code holds')
+        && !calls.posted[0].body.includes(DESCRIPTION_ONLY_NOTE));
+  }
+  {
+    const { ctx, calls } = world({ turns: [submit(asksOnDescription)] });
+    const r = await runReview(ctx);
+    check('asked once, not again: the same answer approves, and the approval says why a review that asked for changes is one',
+      r.verdict === 'APPROVE' && calls.model.length === 2 && calls.posted[0].event === 'APPROVE' && calls.posted[0].body.includes(DESCRIPTION_ONLY_NOTE));
+  }
+  {
+    // A claim in the description and, beside it, a wording finding on a source file: both are eased.
+    const wordingInSource = { ...GOOD, rule: 'reads-as-generated', problem: 'The comment narrates the patch.' };
+    const mixed = { verdict: 'REQUEST_CHANGES', summary: 'Request changes: the description overstates the change and a comment narrates it.', findings: [claim, wordingInSource], rule: 'misleading-text' };
+    const { ctx, calls } = world({ turns: [submit(mixed)] });
+    const r = await runReview(ctx);
+    const asked = JSON.stringify(calls.model[1].messages.at(-1));
+    check('a claim in the description beside a wording finding elsewhere is asked about too, in words that hold for both, and the same answer approves with the line',
+      r.verdict === 'APPROVE' && calls.model.length === 2 && asked.includes('at least one of them is a claim in the pull request description') && !asked.includes('is on the pull request description')
+        && calls.posted[0].event === 'APPROVE' && calls.posted[0].body.includes(DESCRIPTION_ONLY_NOTE) && calls.posted[0].body.includes('The comment narrates the patch.'));
+  }
+  {
+    // Asked about the claim, the reviewer finds a secret in the description itself: that blocks where it is.
+    const secret = { severity: 'blocking', file: 'PR description', quote: 'Adds it.', problem: 'The description carries a live token.', rule: 'secret-exposure' };
+    const { ctx, calls } = world({ turns: [submit(asksOnDescription), submit({ verdict: 'REQUEST_CHANGES', summary: 'The description carries a token.', findings: [secret], rule: 'secret-exposure' })] });
+    const r = await runReview(ctx);
+    check('what the reviewer answers is weighed by the usual rules: a secret in the description still blocks, at the description',
+      r.verdict === 'REQUEST_CHANGES' && calls.model.length === 2 && calls.posted[0].event === 'REQUEST_CHANGES' && calls.posted[0].body.includes('The description carries a live token.')
+        && !calls.posted[0].body.includes(DESCRIPTION_ONLY_NOTE));
+  }
+  {
+    const { ctx, calls } = world({ turns: [submit({ verdict: 'REQUEST_CHANGES', summary: 'The comment narrates the patch.', findings: [{ ...GOOD, rule: 'reads-as-generated', problem: 'The comment narrates the patch.' }], rule: 'reads-as-generated' })] });
+    const r = await runReview(ctx);
+    check('a review held only by wording approves as before, with no question and no note',
+      r.verdict === 'APPROVE' && calls.model.length === 1 && !calls.posted[0].body.includes(DESCRIPTION_ONLY_NOTE));
+  }
 }
 
 console.log('\n  captured data (redline-protected)');
