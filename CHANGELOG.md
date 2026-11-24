@@ -23,6 +23,20 @@ names the commit's date and the pull request it came from.
   lines and anything outside those blocks are read as before, so attribution or a secret there
   still blocks. A block of that shape is left out whoever wrote it. `local.mjs pack --pr` carries
   the author's account type, so a local review reads the description as CI does.
+- A review before the push can be given Redline's earlier verdicts on the branch.
+  `local.mjs pack --earlier <file>`, once per file and oldest first, adds a verdict the author
+  kept to the earlier reviews the brief shows: a CI review's `verdict.json`, or the saved output
+  of an earlier local review. A local review records nothing, and on a private repository no
+  review is posted, so until now every local review of such a branch started with no memory of
+  the last, and the rules that read earlier reviews (check their findings first, say when fixes
+  are not converging) had nothing to read. A file in neither form is refused by name.
+- A review before the push reads on the models the review in CI reads on. `local.mjs review` took
+  its models from the env file alone and never laid the pins of `REDLINE_MODELS_FILE` over them, as
+  `review.mjs` does. On a host that keeps model keys in the env file for callers pinned to an older
+  Redline, a branch was read by one model before the push and by another in CI: on 2026-11-24 a
+  local review ran on `gpt-6-astra` while the pins named `gpt-6.2-astra`. It now reads the pins
+  the same way (`hostSettings`), prints the routine and deep models it holds, and stops when the
+  models file cannot be read.
 - The Redline model bump reads its records with the job's own token. It reads askalf/redline-rubric's
   artifacts because that repository is public (the bump's run of 2026-11-22 read a second-lens
   record with it), so the pin bump App's second token, minted with Actions read, and its warning

@@ -17,6 +17,7 @@ import {
   LIMITS, OUTCOMES, AUTHOR, FIX_VERSION, DEFAULT_MODEL, SUBJECT_BANNED, EFFORT_LEVELS, fixEffort, priorRounds, REVIEW_PAGES_MAX,
   HISTORY, FIX_POSTER, appliedFixComments, fixVerdicts, historyFinding, allReviews, repoFixHistory, formatHistory,
   LESSONS, lessonsAccess, lessonQuery, fetchLessons,
+  runIdentity,
 } from './fix.mjs';
 import { bumpCaller, fixCallerYaml, REVIEW_WORKFLOW, FIX_WORKFLOW, PUBLIC_TEXT_WORKFLOW, POST_WORKFLOW, CALLERS } from './pin.mjs';
 
@@ -294,7 +295,30 @@ console.log('\n  fix.json');
 {
   const base = { repo: 'askalf/r', pr: 7, headSha: HEAD, model: 'm' };
   const fixed = fixRecord({ ...base, outcome: 'fixed', newHead: OTHER, commits: [{ sha: OTHER, subject: 'fix: x' }], files: ['a'], tests: { command: 'npm test', exit_code: 0, summary: '1 pass, 0 fail' }, turns: 3, notes: 'n' });
-  check('the record has exactly the contract keys', Object.keys(fixed).join() === 'version,repo,pr,base_head,new_head,outcome,commits,files,tests,turns,model,notes,description');
+  check('the record has exactly the contract keys', Object.keys(fixed).join() === 'version,repo,pr,base_head,new_head,outcome,commits,files,tests,turns,model,notes,description,run');
+  check('outside a workflow run the record names none', fixed.run === null && fixProblem(fixed) === null);
+  const named = fixRecord({ ...base, outcome: 'refused', notes: 'why', run: { id: 45405973359, attempt: 2, extra: 'dropped' } });
+  check('in one it names the run and the attempt, and nothing else', JSON.stringify(named.run) === '{"id":45405973359,"attempt":2}' && fixProblem(named) === null);
+  check('a run that is not two positive integers is written as none, and refused when read',
+    fixRecord({ ...base, outcome: 'refused', notes: 'why', run: { id: 0, attempt: 1 } }).run === null
+    && fixRecord({ ...base, outcome: 'refused', notes: 'why', run: { id: 7 } }).run === null
+    && /run must be/.test(fixProblem({ ...fixed, run: { id: 7, attempt: 0 } })) && /run must be/.test(fixProblem({ ...fixed, run: { id: '7', attempt: 1 } }))
+    && /run must be/.test(fixProblem({ ...fixed, run: [7, 1] })) && /run must be/.test(fixProblem({ ...fixed, run: 'x' })));
+  const older = { ...fixed };
+  delete older.run;
+  check('a record from before the field is still read', fixProblem(older) === null);
+  check('runIdentity reads the runner\'s run and attempt', JSON.stringify(runIdentity({ GITHUB_RUN_ID: '45405973359', GITHUB_RUN_ATTEMPT: '2' })) === '{"id":45405973359,"attempt":2}');
+  check('and is null when either is missing, blank, zero or not a number', runIdentity({}) === null && runIdentity({ GITHUB_RUN_ID: '5' }) === null
+    && runIdentity({ GITHUB_RUN_ID: '', GITHUB_RUN_ATTEMPT: '1' }) === null && runIdentity({ GITHUB_RUN_ID: '0', GITHUB_RUN_ATTEMPT: '1' }) === null
+    && runIdentity({ GITHUB_RUN_ID: '5', GITHUB_RUN_ATTEMPT: '1x' }) === null && runIdentity({ GITHUB_RUN_ID: '-5', GITHUB_RUN_ATTEMPT: '1' }) === null);
+  check('runIdentity reads any positive safe integer, as runProblem accepts it, and nothing past that',
+    JSON.stringify(runIdentity({ GITHUB_RUN_ID: '1000000000000000', GITHUB_RUN_ATTEMPT: '1' })) === '{"id":1000000000000000,"attempt":1}'
+    && JSON.stringify(runIdentity({ GITHUB_RUN_ID: String(Number.MAX_SAFE_INTEGER), GITHUB_RUN_ATTEMPT: '3' })) === `{"id":${Number.MAX_SAFE_INTEGER},"attempt":3}`
+    && runIdentity({ GITHUB_RUN_ID: '9007199254740992', GITHUB_RUN_ATTEMPT: '1' }) === null
+    && runIdentity({ GITHUB_RUN_ID: '5', GITHUB_RUN_ATTEMPT: '99999999999999999999' }) === null
+    && runIdentity({ GITHUB_RUN_ID: '1e3', GITHUB_RUN_ATTEMPT: '1' }) === null && runIdentity({ GITHUB_RUN_ID: ' 5', GITHUB_RUN_ATTEMPT: '1' }) === null
+    && runIdentity({ GITHUB_RUN_ID: '0x10', GITHUB_RUN_ATTEMPT: '1' }) === null && runIdentity({ GITHUB_RUN_ID: '000', GITHUB_RUN_ATTEMPT: '1' }) === null
+    && fixProblem(fixRecord({ ...base, outcome: 'refused', notes: 'why', run: runIdentity({ GITHUB_RUN_ID: '1000000000000000', GITHUB_RUN_ATTEMPT: '1' }) })) === null);
   check('fixed passes', fixProblem(fixed) === null && fixed.version === FIX_VERSION);
   check('no_change passes with no commit', fixProblem(fixRecord({ ...base, outcome: 'no_change', notes: 'n', turns: 1 })) === null);
   check('tests_failed passes with files and tests and no commit', fixProblem(fixRecord({ ...base, outcome: 'tests_failed', files: ['a'], tests: { command: 'npm test', exit_code: 1, summary: '' }, notes: 'n' })) === null);
@@ -396,6 +420,11 @@ function loopWorld(turns, { canForce = true } = {}) {
   check('fetch is limited to GitHub and dario', (await f('https://api.github.com/x')) === 'ok https://api.github.com/x' && (await f('http://127.0.0.1:3456/v1/messages')).startsWith('ok') && (await throws(() => f('https://example.com/'))) !== null && (await throws(() => f('nope'))) !== null);
   const brief = buildBrief({ pr: { number: 7, title: 't', body: 'b', head: { ref: 'f' }, base: { ref: 'main', repo: { full_name: 'askalf/r' } } }, files: [{ status: 'modified', additions: 1, deletions: 0, filename: 'src/b.js' }], headSha: HEAD,
     review: parseReviewBody(BODY), items: inlineItems([{ path: 'src/b.js', line: 1, body: 'c' }]), plan: { pm: 'npm', scripts: ['test'] }, installNote: 'ok', diff: '+x' });
+  const briefArgs = { pr: { number: 7, title: 't', body: 'Fix run 1, attempt 9', head: { ref: 'f' }, base: { ref: 'main', repo: { full_name: 'askalf/r' } } }, files: [], headSha: HEAD,
+    review: parseReviewBody(BODY), items: [], plan: { pm: 'npm', scripts: ['test'] }, installNote: 'ok', diff: '' };
+  const inRun = buildBrief({ ...briefArgs, run: { id: 45405973359, attempt: 2 } }).split('\n');
+  check('in a workflow run the brief names the run and attempt directly under the head line', inRun[2] === `f -> main; head ${HEAD}` && inRun[3] === 'Fix run 45405973359, attempt 2' && inRun[4] === '');
+  check('outside one it has no such line, whatever the description says', buildBrief(briefArgs).split('\n')[3] === '' && buildBrief({ ...briefArgs, run: { id: 0, attempt: 1 } }).split('\n')[3] === '');
   check('the brief carries the PR, the findings, the inline comments, the allowlist and the test script', /PR #7: t/.test(brief) && /\[1\] blocking `src\/b\.js:1`/.test(brief) && /\[1\] src\/b\.js:1\nc/.test(brief) && /run accepts: npm test, node <file>/.test(brief) && /Test script: `npm test`/.test(brief) && /PR diff:\n\+x/.test(brief));
 }
 
@@ -628,11 +657,14 @@ if (!gitOk) {
   {
     const repo = makeRepo();
     const w = world(repo, { turns: [tool('fix_read', { path: 'src/b.js' }), tool('fix_write', { path: 'src/b.js', content: FIXED_B }), tool('fix_run', { command: 'node test.mjs' }), finish()] });
+    w.ctx.run = { id: 45405973359, attempt: 2 };
     const { record: r } = await runFix(w.ctx);
     check('outcome fixed with a new head past the base', r.outcome === 'fixed' && SHA.test(r.new_head) && r.new_head !== repo.head && r.base_head === repo.head);
     check('one commit, the sanitised subject, the file', r.commits.length === 1 && r.commits[0].sha === r.new_head && r.commits[0].subject === 'fix: read the token from the config' && r.files.join() === 'src/b.js');
     check('no test script: tests is null and the notes say so', r.tests === null && /no test script/.test(r.notes));
     check('the record passes the schema and carries the turns and the model', fixProblem(r) === null && r.turns === 4 && r.model === 'm');
+    check('the record and the brief of every call name the same run and attempt', JSON.stringify(r.run) === '{"id":45405973359,"attempt":2}'
+      && w.calls.model.length === 4 && w.calls.model.every((c) => String(c.messages[0].content).split('\n')[3] === 'Fix run 45405973359, attempt 2'));
     check('the notes are the summary, files and tests, clean', r.notes.startsWith('Reads the token from the config') && r.notes.includes('Files: `src/b.js`') && !/[\u2013\u2014]/.test(r.notes));
     check('the model got the brief with the findings and the tools, the key in a header', w.calls.model[0].messages[0].content.includes('[1] blocking `src/b.js:1`') && w.calls.model[0].tools.length === 7 && w.calls.model[0].key === 'k');
     check('the read went back to the model, the write and run reported', JSON.stringify(w.calls.model[1].messages.at(-1)).includes('export const token') && JSON.stringify(w.calls.model[2].messages.at(-1)).includes('wrote src/b.js') && JSON.stringify(w.calls.model[3].messages.at(-1)).includes('exit 0'));

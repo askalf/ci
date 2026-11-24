@@ -9,13 +9,18 @@
 //   pack    runs in the repository to review. It writes a tar to stdout: change.json (the PR as
 //           review.mjs reads it from GitHub: files with per-file patches, commits, the base's
 //           .gitattributes, and with --pr the PR's title, body, author and earlier reviews) and tree/ (the
-//           head's files as committed, for the read tools).
+//           head's files as committed, for the read tools). --earlier <file>, given once per
+//           file and oldest first, adds an earlier Redline verdict the author kept: a CI
+//           review's verdict.json, or the saved output of an earlier `review` here. A review
+//           here records nothing, and on a private repository none is posted, so without
+//           them each review of a branch starts with no memory of the last.
 //   review  runs on the host, on an unpacked tar: reviewChange() from review.mjs with the host's
-//           env file (REDLINE_ENV_FILE) and prompt (REDLINE_PROMPT_FILE), the same model routing,
-//           the same grounding. It posts nothing and writes no verdict.json. Exit 0 on APPROVE,
-//           1 on REQUEST_CHANGES, 2 when no review finished.
+//           env file (REDLINE_ENV_FILE) and prompt (REDLINE_PROMPT_FILE), the same model pins
+//           (hostSettings), the same model routing, the same grounding. It posts nothing and
+//           writes no verdict.json. Exit 0 on APPROVE, 1 on REQUEST_CHANGES, 2 when no review
+//           finished.
 //
-//   node <ci>/scripts/redline/local.mjs pack [--base <ref>] [--pr <n>] [--title <t>] [--body-file <f>] \
+//   node <ci>/scripts/redline/local.mjs pack [--base <ref>] [--pr <n>] [--title <t>] [--body-file <f>] [--earlier <file>]... \
 //     | ssh <host> /opt/askalf/redline-local.sh
 //
 // Only committed work is reviewed: the head commit and the commits since its merge base with the base
@@ -26,7 +31,7 @@ import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 import {
-  parseEnvFile, readPrompt, darioAccess, modelContext, routeModel, reviewChange, renderBody, protectedIn, PROTECTED_ATTR,
+  parseEnvFile, readPrompt, darioAccess, modelContext, routeModel, reviewChange, renderBody, protectedIn, PROTECTED_ATTR, withModelsFile, REVIEWER_LOGIN,
 } from './review.mjs';
 
 const SHA = /^[0-9a-f]{40}$/;
@@ -146,8 +151,51 @@ function ghApi(path) {
 }
 
 /**
+ * The line a local review prints above its verdict text, and the marker every verdict ends with:
+ * the head is read from that footer, its own last line, never from a marker a finding quotes. A
+ * saved file holds one review: one such line, a blank line, then verdict text, then the footer.
+ * A review starts at a whole banner line (model, "(nothing posted)" and its verdict) followed by
+ * the blank line; a line in a finding that only starts like a banner is verdict text.
+ */
+const BANNER = /^Redline local review on [^\n]* \(nothing posted\): (APPROVE|REQUEST_CHANGES)\n\n/gm;
+const HEAD_FOOTER = /(?:^|\n)<!-- redline:head=([0-9a-f]{40}) -->[ \t]*$/;
+
+/**
+ * An earlier Redline verdict the author kept, as { state, commit_id, body }. Two forms: the
+ * verdict.json a CI review uploads (its redline-verdict artifact: event, body, head_sha), and the
+ * output of an earlier `local.mjs review` saved as printed, whose head is the marker its verdict
+ * ends with. Anything else is an error that names the file: a row with no head or no verdict
+ * would be an earlier request the review cannot place, and a blank body one it cannot read. The
+ * row carries no login: the host gives it the reviewer login it reads reviews by (reviewLocal). Pure.
+ */
+export function earlierReview(text, name = 'the file') {
+  let v = null;
+  try { v = JSON.parse(text); } catch { v = null; }
+  if (v !== null && typeof v === 'object') {
+    const state = v.event === 'APPROVE' ? 'APPROVED' : v.event === 'REQUEST_CHANGES' ? 'CHANGES_REQUESTED' : null;
+    if (!state || typeof v.body !== 'string' || !v.body.trim() || typeof v.head_sha !== 'string' || !SHA.test(v.head_sha)) {
+      throw new Error(`${name} is JSON but not a verdict.json: it needs event (APPROVE or REQUEST_CHANGES), a body that is not blank and a full head_sha`);
+    }
+    return { state, commit_id: v.head_sha, body: v.body };
+  }
+  const saved = String(text).replace(/\r\n/g, '\n');
+  // Two runs in one file (tee -a) would give one run's verdict and another's head: refused, as is
+  // any file whose single review is not verdict text ending in its footer.
+  const runs = [...saved.matchAll(BANNER)];
+  if (runs.length > 1) throw new Error(`${name} holds ${runs.length} local reviews; keep one review per file and give each its own --earlier`);
+  const m = runs[0] ?? null;
+  const body = m ? saved.slice(m.index + m[0].length).trimEnd() : '';
+  const footer = HEAD_FOOTER.exec(body);
+  if (!m || !footer) throw new Error(`${name} is neither a verdict.json nor the saved output of a local review (its "Redline local review on ..." line and the head marker the verdict ends with)`);
+  if (!body.slice(0, footer.index).trim()) throw new Error(`${name} has a local review line and a head marker but no verdict text between them`);
+  return { state: m[1] === 'APPROVE' ? 'APPROVED' : 'CHANGES_REQUESTED', commit_id: footer[1], body: body.trim() };
+}
+
+/**
  * Everything review needs about the change, from the repository at `cwd`. opts: base, pr, title,
- * body, repo, and fetchPr(repo, n) -> { pr, reviews } (gh by default) for --pr.
+ * body, repo, fetchPr(repo, n) -> { pr, reviews } (gh by default) for --pr, and earlier: the
+ * verdicts the author kept (earlierReview), packed apart from the PR's reviews and in the order
+ * given; the host merges them after those, under its own reviewer login.
  */
 export function buildChange(cwd, opts = {}) {
   const head = git(cwd, ['rev-parse', 'HEAD']).trim();
@@ -185,7 +233,7 @@ export function buildChange(cwd, opts = {}) {
     authorType: opts.body === undefined ? String(pr?.user?.type ?? '') : '',
     head: { ref: headRef, sha: head },
     base: { ref: ref.replace(/^origin\//, ''), sha: base },
-    files, commits, attributes, reviews,
+    files, commits, attributes, reviews, earlier: opts.earlier ?? [],
   };
 }
 
@@ -279,6 +327,10 @@ export function checkChange(change) {
   if (!SHA.test(change.head?.sha ?? '') || !SHA.test(change.base?.sha ?? '')) return { error: 'change.json needs full head and base shas' };
   if (!Array.isArray(change.files) || !change.files.length || change.files.some((f) => typeof f?.filename !== 'string')) return { error: 'change.json has no files' };
   if (!Array.isArray(change.commits)) return { error: 'change.json has no commits' };
+  const earlier = change.earlier ?? [];
+  if (!Array.isArray(earlier) || earlier.some((e) => !['APPROVED', 'CHANGES_REQUESTED'].includes(e?.state) || typeof e.commit_id !== 'string' || !SHA.test(e.commit_id) || typeof e.body !== 'string' || !e.body.trim())) {
+    return { error: 'change.json has an earlier verdict without a state, a full head sha and a body' };
+  }
   return { change };
 }
 
@@ -304,11 +356,26 @@ export async function reviewLocal(ctx, dir) {
     ctx.log?.(`no path counts as ${PROTECTED_ATTR}: ${e.message}`);
   }
   routeModel(review, c.files);
-  const { review: r, verdict, notes } = await reviewChange(review, { pr, files: c.files, commits: c.commits, reviews: c.reviews ?? [], protectedSet });
+  // The verdicts the author kept are Redline's by the login this host reads Redline's reviews by,
+  // whatever the login was where they were packed; they follow the PR's own reviews.
+  const kept = (c.earlier ?? []).map((e) => ({ user: { login: REVIEWER_LOGIN }, state: e.state, commit_id: e.commit_id, body: e.body }));
+  const { review: r, verdict, notes } = await reviewChange(review, { pr, files: c.files, commits: c.commits, reviews: [...(c.reviews ?? []), ...kept], protectedSet });
   return { verdict, body: renderBody(r, verdict, c.head.sha, notes), model: review.model };
 }
 
 /** --name value pairs; a flag without a value is an error. Pure. */
+/**
+ * The host's settings for a review here, read as review.mjs reads them in CI: the env file's, with
+ * the model pins of the file its REDLINE_MODELS_FILE names laid over them (withModelsFile). A host
+ * may keep model keys in the env file for callers pinned to an older Redline; the models file is
+ * what the review in CI reads on, so the review here reads on it too. `readFile` reads the models
+ * file (the file system's by default). Returns { secrets, notes } or { error }.
+ */
+export function hostSettings(envText, readFile) {
+  const pinned = withModelsFile(parseEnvFile(envText), readFile);
+  return pinned.error ? { error: pinned.error } : { secrets: pinned.secrets, notes: pinned.notes };
+}
+
 export function parseArgs(argv) {
   const out = { _: [] };
   for (let i = 0; i < argv.length; i++) {
@@ -316,7 +383,9 @@ export function parseArgs(argv) {
     if (!a.startsWith('--')) { out._.push(a); continue; }
     const v = argv[i + 1];
     if (v === undefined || v.startsWith('--')) throw new Error(`${a} needs a value`);
-    out[a.slice(2)] = v;
+    // --earlier is given once per file; every other flag once.
+    if (a === '--earlier') (out.earlier ??= []).push(v);
+    else out[a.slice(2)] = v;
     i++;
   }
   return out;
@@ -334,9 +403,15 @@ async function main() {
     }
     const pr = args.pr === undefined ? 0 : Number(args.pr);
     if (!Number.isInteger(pr) || pr < 0) { console.error('--pr must be a PR number'); process.exit(2); }
+    let earlier;
+    try { earlier = (args.earlier ?? []).map((f) => earlierReview(readFileSync(f, 'utf8'), f)); } catch (e) {
+      console.error(`redline local: ${e.message}`);
+      process.exit(2);
+    }
     const change = buildChange(process.cwd(), {
       base: args.base, pr, repo: args.repo, title: args.title,
       body: args['body-file'] === undefined ? undefined : readFileSync(args['body-file'], 'utf8'),
+      earlier,
     });
     console.error(`redline local: ${change.files.length} file(s), ${change.commits.length} commit(s), ${change.base.ref}@${change.base.sha.slice(0, 7)}..${change.head.sha.slice(0, 7)}${change.number ? `, as ${change.repo}#${change.number}` : ''}`);
     process.stdout.write(packChange(process.cwd(), change));
@@ -350,21 +425,28 @@ async function main() {
     let system;
     try {
       if (!env.REDLINE_ENV_FILE) throw new Error('REDLINE_ENV_FILE is not set');
-      secrets = parseEnvFile(readFileSync(env.REDLINE_ENV_FILE, 'utf8'));
+      const host = hostSettings(readFileSync(env.REDLINE_ENV_FILE, 'utf8'));
+      if (host.error) throw new Error(host.error);
+      secrets = host.secrets;
+      for (const note of host.notes) console.log(note);
       system = readPrompt(env, 'REDLINE_PROMPT_FILE');
     } catch (e) { console.error(`redline local: ${e.message}`); process.exit(2); }
     const dario = darioAccess(secrets);
     if (dario.error) { console.error(`redline local: ${dario.error}`); process.exit(2); }
     const ctx = { ...modelContext(secrets, dario), system, context: '', log: (line) => console.log(line) };
+    console.log(`models: routine ${ctx.model || '-'}, deep ${ctx.deepModel || '-'}${secrets.REDLINE_MODELS_FILE ? ` (pins from ${secrets.REDLINE_MODELS_FILE})` : ''}`);
     let result;
     try { result = await reviewLocal(ctx, dir); } catch (e) {
       console.error(`redline local: the review did not finish: ${e.message}`);
       process.exit(2);
     }
     console.log(`Redline local review on ${result.model} (nothing posted): ${result.verdict}\n\n${result.body}`);
-    process.exit(result.verdict === 'REQUEST_CHANGES' ? 1 : 0);
+    // Exit once stdout has drained: process.exit would drop what a pipe has not taken yet, the
+    // head marker the verdict ends with included, and the saved review could not be read back.
+    process.exitCode = result.verdict === 'REQUEST_CHANGES' ? 1 : 0;
+    return;
   }
-  console.error('usage: local.mjs pack [--base <ref>] [--pr <n>] [--title <t>] [--body-file <f>] | local.mjs review <dir>');
+  console.error('usage: local.mjs pack [--base <ref>] [--pr <n>] [--title <t>] [--body-file <f>] [--earlier <file>]... | local.mjs review <dir>');
   process.exit(2);
 }
 
