@@ -177,7 +177,7 @@ function protectedInTree(git, attrs, base) {
  * by Claude` is a credit. A model id (a name followed by a hyphen or more letters) is never the
  * credited party.
  */
-export const BUILD_SUBJECT_BANNED = /co-authored|signed-off|\b(?:generated|written|made|authored|created|drafted) (?:by|with) (?:an? )?(?:AI|LLM|model|assistant|claude(?: code)?|chatgpt|gpt|copilot|codex|gemini)(?![\w-])/i;
+export const BUILD_SUBJECT_BANNED = /co-authored|signed-off|reviewed-by|acked-by|tested-by|\b(?:generated|written|made|authored|created|drafted) (?:by|with) (?:an? )?(?:AI|LLM|model|assistant|claude(?: code)?|chatgpt|gpt|copilot|codex|gemini)(?![\w-])/i;
 
 /**
  * The commit subject, which is also the pull request's title: the model's line with the cleaning

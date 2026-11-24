@@ -142,7 +142,7 @@ console.log('\n  the commit subject');
     && buildSubject('ops: reset the cursor #12') === 'ops: reset the cursor' && buildSubject('ops: see https://x.y/z reset') === 'ops: see reset');
   check('only the first line counts, and trailing punctuation is dropped', buildSubject('ops: reset the cursor.\n\nCo-Authored-By: Someone') === 'ops: reset the cursor');
   check('a subject that credits a tool or a person falls back to the default',
-    ['Signed-off-by: someone', 'docs: tidy the readme, Co-authored-by someone', 'docs: tidy the readme, generated with Claude', 'ops: reset the cursor, written by an AI',
+    ['Signed-off-by: someone', 'Reviewed-by: someone', 'Tested-by: someone', 'Acked-by: someone', 'docs: tidy the readme, Co-authored-by someone', 'docs: tidy the readme, generated with Claude', 'ops: reset the cursor, written by an AI',
       'ops: reset the cursor, drafted with Claude Code', 'docs: made with copilot'].every((l) => buildSubject(l) === 'apply the requested change'));
   check('the words a repository\'s own commits use are kept: a model, a prompt, the review, a model id',
     ['docs: LLM cleanup', 'redline: bump the model pins to gpt-6.2-sol', 'dario: serve claude-opus-5-5 from the pool', 'ops: the prompt names the playbook',
