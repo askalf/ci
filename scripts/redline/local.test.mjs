@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 import {
   git, repoFromUrl, changedFiles, fileRecords, gitQuoted, patchOf, branchCommits, baseRef, buildChange, packChange, tarOf, checkChange, reviewLocal, parseArgs, hostSettings, earlierReview,
 } from './local.mjs';
-import { REVIEWER_LOGIN } from './review.mjs';
+import { REVIEWER_LOGIN, renderBody } from './review.mjs';
 
 const SHA_RE = /^[0-9a-f]{40}$/;
 let pass = 0;
@@ -67,6 +67,14 @@ console.log('\n  earlierReview: a verdict the author kept, as the row the brief 
   check('a file holding two saved reviews (tee -a) is refused by name, in either order and with CRLF',
     /kept\.txt holds 2 local reviews/.test(await bad(approval + request)) && /kept\.txt holds 2 local reviews/.test(await bad(request + approval))
     && /kept\.txt holds 2 local reviews/.test(await bad(`models: a\n${approval}turn 1: x\n${request}`.replace(/\n/g, '\r\n'))));
+  const startup = renderBody({ summary: 'One message is unclear.', rule: 'none', findings: [{ severity: 'blocking', file: 'a.js', line: 3, quote: 'log(e)', problem: 'The log names no cause.',
+    suggestion: 'Redline local review on startup failed.\nRedline local review on gpt-x (nothing posted)\n\nlog(e.message)' }] }, 'REQUEST_CHANGES', HEAD);
+  const savedStartup = `turn 1: redline_submit; stop=tool_use\nRedline local review on gpt-x (nothing posted): REQUEST_CHANGES\n\n${startup}\n`;
+  check('a rendered suggestion whose lines start like the review line is verdict text, not a second review',
+    startup.includes('\nRedline local review on startup failed.\n')
+    && JSON.stringify(earlierReview(savedStartup, 'review1.txt')) === JSON.stringify({ state: 'CHANGES_REQUESTED', commit_id: HEAD, body: startup })
+    && earlierReview(savedStartup.replace(/\n/g, '\r\n')).body === startup
+    && /kept\.txt holds 2 local reviews/.test(await bad(savedStartup + approval)) && /kept\.txt holds 2 local reviews/.test(await bad(approval + savedStartup)));
   check('a second review cut before its footer still makes two', /kept\.txt holds 2 local reviews/.test(await bad(approval + 'Redline local review on gpt-x (nothing posted): REQUEST_CHANGES\n\n**Verdict')));
   check('a review line and a footer with no verdict text between them is refused',
     /kept\.txt has a local review line and a head marker but no verdict text/.test(await bad(`Redline local review on gpt-x (nothing posted): APPROVE\n\n<!-- redline:head=${HEAD} -->\n`))
