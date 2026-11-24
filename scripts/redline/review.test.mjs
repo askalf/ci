@@ -1092,6 +1092,29 @@ console.log('\n  CLI');
   try { readFileSync(stale); } catch { staleLeft = false; }
   check('a verdict file left by an earlier run is removed before the review starts', !staleLeft);
 
+  // A run that main ends on a setting it reads leaves neither file of an earlier run: the workflow
+  // uploads a verdict or a models record whenever the file is there.
+  const staleModels = join(dir, 'earlier-models', 'models.json');
+  mkdirSync(join(dir, 'earlier-models'));
+  const leave = () => { writeFileSync(stale, '{"stale":true}\n'); writeFileSync(staleModels, '{"stale":true}\n'); };
+  const left = () => [stale, staleModels].filter((f) => existsSync(f)).length;
+  leave();
+  const noEnvName = spawnSync(process.execPath, [script], { env: { PATH: process.env.PATH, REDLINE_VERDICT_FILE: stale, REDLINE_MODELS_OUT: staleModels }, encoding: 'utf8' });
+  check('no REDLINE_ENV_FILE: exit 2, and neither file of an earlier run is left', noEnvName.status === 2 && noEnvName.stderr.includes('::error::REDLINE_ENV_FILE is not set') && left() === 0);
+  leave();
+  const noEnv = run({ ...base, REDLINE_MODELS_OUT: staleModels, REDLINE_ENV_FILE: join(dir, 'gone.env') });
+  check('an env file that cannot be read: exit 2, and neither file of an earlier run is left', noEnv.status === 2 && /::error::REDLINE_ENV_FILE: cannot read .*gone\.env/.test(noEnv.stderr) && left() === 0);
+  leave();
+  const capModels = join(dir, 'models.env');
+  writeFileSync(capModels, 'REDLINE_ROUND_CAP=eight\n');
+  const capEnv = join(dir, 'capped.env');
+  writeFileSync(capEnv, `DARIO_URL=http://127.0.0.1:9\nREDLINE_MODELS_FILE=${capModels}\n`);
+  const badCap = run({ ...base, REDLINE_MODELS_OUT: staleModels, REDLINE_ENV_FILE: capEnv, REDLINE_PROMPT_FILE: PROMPT_FIXTURE });
+  check('a round cap in the models file that is not a count: exit 2, the error names the key, and neither file of an earlier run is left',
+    badCap.status === 2 && badCap.stderr.includes('::error::REDLINE_ROUND_CAP in ') && badCap.stderr.includes('must be a whole number from 0 to 999 (0 is no cap); got eight') && left() === 0);
+  leave();
+  check('a prompt file that is not there leaves neither file either', run({ ...base, REDLINE_MODELS_OUT: staleModels, REDLINE_PROMPT_FILE: join(dir, 'gone.md') }).status === 2 && left() === 0);
+
   // A whole run of the CLI against a stub fetch loaded before review.mjs: every request is logged,
   // GitHub answers for one open PR and the model submits an approval.
   const stub = join(dir, 'stub.cjs');
@@ -2179,7 +2202,7 @@ console.log('\n  earlier verdicts from the runs, and the round cap');
 
 console.log('\n  model pins: the models file, the newest of a family, the list dario serves');
 {
-  const { trackMatcher, newestMatching, compareVersions, withModelsFile, readCatalog, modelsRecord, MODEL_KEYS } = reviewModule;
+  const { trackMatcher, newestMatching, compareVersions, withModelsFile, readCatalog, modelsRecord, MODEL_KEYS, ROUND_CAP_KEY } = reviewModule;
   check('a family is a model id with one * for its version', !!trackMatcher('gpt-*-sol') && !!trackMatcher('claude-opus-*') && !!trackMatcher('GPT-*-Astra'));
   check('no *, two *, a space or other characters is not a family',
     !trackMatcher('gpt-6-sol') && !trackMatcher('gpt-*-*') && !trackMatcher('gpt *-sol') && !trackMatcher('gpt-(*)-sol') && !trackMatcher('') && !trackMatcher(undefined));
@@ -2215,6 +2238,40 @@ console.log('\n  model pins: the models file, the newest of a family, the list d
   const badTrack = withModelsFile({ REDLINE_MODELS_FILE: '/m.env' }, () => 'REDLINE_MODEL_TRACKS=gpt-6.2-sol');
   check('a family with no * is an error', /REDLINE_MODEL_TRACKS .* one \*/.test(badTrack.error ?? ''));
   check('MODEL_KEYS are the four model settings', MODEL_KEYS.join() === 'REDLINE_MODEL,REDLINE_DEEP_MODEL,REDLINE_PIN_MODEL,REDLINE_FALLBACK_MODEL');
+
+  // The round cap is the one other setting the models file may set.
+  const capFrom = (envFile, text) => withModelsFile({ ...envFile, REDLINE_MODELS_FILE: '/m.env' }, () => text);
+  check('ROUND_CAP_KEY is the env file\'s own name for the cap', ROUND_CAP_KEY === 'REDLINE_ROUND_CAP');
+  check('the models file left the cap alone until it sets one', laid.secrets.REDLINE_ROUND_CAP === undefined && capFrom({ REDLINE_ROUND_CAP: '6' }, 'REDLINE_MODEL=m').secrets.REDLINE_ROUND_CAP === '6');
+  const capOver = capFrom({ REDLINE_ROUND_CAP: '4' }, 'REDLINE_ROUND_CAP=8\n');
+  check('a cap in the models file replaces the env file\'s, and the note gives both', capOver.secrets.REDLINE_ROUND_CAP === '8' && roundCapOf(capOver.secrets.REDLINE_ROUND_CAP) === 8
+    && capOver.notes.length === 1 && capOver.notes[0] === 'REDLINE_ROUND_CAP in the env file (4) is replaced by the models file (8)');
+  const capAlone = capFrom({}, 'REDLINE_ROUND_CAP=8\n');
+  check('a cap only the models file sets is taken, with no note', capAlone.secrets.REDLINE_ROUND_CAP === '8' && capAlone.notes.length === 0);
+  check('the same cap in both files is no note', capFrom({ REDLINE_ROUND_CAP: '8' }, 'REDLINE_ROUND_CAP=8\n').notes.length === 0);
+  const capOff = capFrom({ REDLINE_ROUND_CAP: '8' }, 'REDLINE_ROUND_CAP=0\n');
+  check('a cap of 0 in the models file turns the cap off', capOff.secrets.REDLINE_ROUND_CAP === '0' && roundCapOf(capOff.secrets.REDLINE_ROUND_CAP) === 0);
+  check('a cap in the models file that is not a whole number from 0 to 999 is an error naming the file',
+    ['', 'eight', '-1', '1000', '8 rounds', '8.0', '+8'].every((v) => /^REDLINE_ROUND_CAP in \/m\.env must be a whole number from 0 to 999/.test(capFrom({ REDLINE_ROUND_CAP: '4' }, `REDLINE_ROUND_CAP=${v}\n`).error ?? '')));
+  check('an empty cap in the models file is said as nothing', / got nothing$/.test(capFrom({}, 'REDLINE_ROUND_CAP=\n').error ?? ''));
+  // The env file's own cap, with a models file that sets none: taken as it is written, never an
+  // error, and read as a count afterwards as it always was.
+  const envCap = (v) => capFrom({ REDLINE_ROUND_CAP: v }, 'REDLINE_MODEL=m');
+  check('the env file\'s own cap that is not a count is no error and counts as the default',
+    ['eight', '', '-1', '1000'].every((v) => envCap(v).error === undefined && envCap(v).secrets.REDLINE_ROUND_CAP === v && roundCapOf(envCap(v).secrets.REDLINE_ROUND_CAP) === DEFAULT_ROUND_CAP));
+  check('the env file\'s own cap that is a count is read as that count', envCap('12').error === undefined && roundCapOf(envCap('12').secrets.REDLINE_ROUND_CAP) === 12);
+  // The env file holds the host's secrets: what was typed on its cap line reaches the log only when it is a count.
+  const pasted = capFrom({ REDLINE_ROUND_CAP: 'pasted-by-mistake' }, 'REDLINE_ROUND_CAP=8\n');
+  check('an env file cap that is not a count is replaced without being printed', pasted.secrets.REDLINE_ROUND_CAP === '8' && pasted.notes.length === 1
+    && pasted.notes[0] === 'REDLINE_ROUND_CAP in the env file (not a count, so the default) is replaced by the models file (8)' && !pasted.notes.join().includes('pasted'));
+  check('an empty env file cap is said the same way', capFrom({ REDLINE_ROUND_CAP: '' }, 'REDLINE_ROUND_CAP=8\n').notes[0] === 'REDLINE_ROUND_CAP in the env file (not a count, so the default) is replaced by the models file (8)');
+  // A quoted count with spaces in it: the env parser keeps the spaces and roundCapOf trims them, so it is a count, and 0 is no cap.
+  const padded = parseEnvFile('REDLINE_ROUND_CAP=" 0 "\n');
+  check('a quoted, space-padded count in the env file is said as the count it is read as', padded.REDLINE_ROUND_CAP === ' 0 ' && roundCapOf(padded.REDLINE_ROUND_CAP) === 0
+    && capFrom(padded, 'REDLINE_ROUND_CAP=8\n').notes[0] === 'REDLINE_ROUND_CAP in the env file (0) is replaced by the models file (8)');
+  check('the same count written another way in the two files is no note', capFrom({ REDLINE_ROUND_CAP: ' 8 ' }, 'REDLINE_ROUND_CAP=8\n').notes.length === 0 && capFrom({ REDLINE_ROUND_CAP: '08' }, 'REDLINE_ROUND_CAP=8\n').notes.length === 0);
+  const paddedPin = capFrom({ REDLINE_ROUND_CAP: '4' }, 'REDLINE_ROUND_CAP=" 8 "\n');
+  check('a quoted, space-padded count in the models file is taken trimmed', paddedPin.error === undefined && paddedPin.secrets.REDLINE_ROUND_CAP === '8' && paddedPin.notes[0] === 'REDLINE_ROUND_CAP in the env file (4) is replaced by the models file (8)');
 
   let seen = null;
   const listing = async (url, init) => { seen = { url, key: init.headers['x-api-key'] }; return new Response(JSON.stringify({ data: [{ id: 'gpt-6.2-sol' }, { id: 'claude-opus-5-5' }, { id: 'gpt-6.2-sol' }, { id: 7 }, {}] }), { status: 200 }); };

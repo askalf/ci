@@ -127,6 +127,14 @@ deploy instead of being typed into the env file. Its `REDLINE_MODEL`, `REDLINE_D
 two differ), and a set name whose file cannot be read ends the run. `<KEY>_TRACKS` names the
 family a pin follows, as a model id with one `*` for its version: `gpt-*-sol`, `claude-opus-*`.
 
+The same file may set `REDLINE_ROUND_CAP`, the one setting in it that is not a model, so a
+host's round cap can come from a reviewed repository too. It replaces the env file's, and the
+log says so when the two are not the same count, giving the env file's value only when it is
+one. Both are read trimmed.
+There it must be a whole number from 0 to 999 (0 turns the cap
+off): anything else ends the run. The env file's own `REDLINE_ROUND_CAP` is read as before, and a
+value there that is not such a number counts as the default.
+
 Every run lists the models dario serves on `GET /v1/models` (its Claude catalog and the ChatGPT
 seat's models, whatever the key), prints them in the log, and writes `models.json`: the pins, their
 families, the newest of each family in the list, the pins behind it, the whole list, and the model
