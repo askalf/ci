@@ -601,6 +601,16 @@ console.log('\n  earlier reviews on the PR');
       r.verdict === 'APPROVE' && calls.model.length === 2 && calls.posted[0].event === 'APPROVE' && calls.posted[0].body.includes(DESCRIPTION_ONLY_NOTE));
   }
   {
+    // Every turn before the last is spent reading, and the claim comes first on the last turn: there is
+    // no turn left to answer a question in, so none is asked and the review approves with the line.
+    const lastTurnOnly = (b) => (b.messages.length > 2 * (LIMITS.turns - 1) ? submit(asksOnDescription) : use('redline_read', { path: 'src/b.js' }));
+    const { ctx, calls } = world({ turns: [lastTurnOnly] });
+    const r = await runReview(ctx);
+    check('a claim first submitted on the last turn is not sent back: the review approves there, with the line',
+      r.verdict === 'APPROVE' && calls.model.length === LIMITS.turns && calls.posted.length === 1 && calls.posted[0].event === 'APPROVE'
+        && calls.posted[0].body.includes(DESCRIPTION_ONLY_NOTE));
+  }
+  {
     // A claim in the description and, beside it, a wording finding on a source file: both are eased.
     const wordingInSource = { ...GOOD, rule: 'reads-as-generated', problem: 'The comment narrates the patch.' };
     const mixed = { verdict: 'REQUEST_CHANGES', summary: 'Request changes: the description overstates the change and a comment narrates it.', findings: [claim, wordingInSource], rule: 'misleading-text' };
