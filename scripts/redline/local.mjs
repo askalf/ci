@@ -150,37 +150,43 @@ function ghApi(path) {
   try { const pages = JSON.parse(r.stdout); return pages.length === 1 && !Array.isArray(pages[0]) ? pages[0] : pages.flat(); } catch { return null; }
 }
 
-/** The line a local review prints above its verdict text, and the marker every verdict ends with. */
+/**
+ * The line a local review prints above its verdict text, and the marker every verdict ends with:
+ * the head is read from that footer, its own last line, never from a marker a finding quotes.
+ */
 const LOCAL_REVIEW = /^Redline local review on .* \(nothing posted\): (APPROVE|REQUEST_CHANGES)\r?\n\r?\n([\s\S]*)$/m;
-const HEAD_MARKER = /<!-- redline:head=([0-9a-f]{40}) -->/;
+const HEAD_FOOTER = /(?:^|\n)<!-- redline:head=([0-9a-f]{40}) -->[ \t]*$/;
 
 /**
- * An earlier Redline verdict the author kept, as the review row the brief reads. Two forms: the
+ * An earlier Redline verdict the author kept, as { state, commit_id, body }. Two forms: the
  * verdict.json a CI review uploads (its redline-verdict artifact: event, body, head_sha), and the
  * output of an earlier `local.mjs review` saved as printed, whose head is the marker its verdict
  * ends with. Anything else is an error that names the file: a row with no head or no verdict
- * would be an earlier request the review cannot place. Pure.
+ * would be an earlier request the review cannot place, and a blank body one it cannot read. The
+ * row carries no login: the host gives it the reviewer login it reads reviews by (reviewLocal). Pure.
  */
 export function earlierReview(text, name = 'the file') {
   let v = null;
   try { v = JSON.parse(text); } catch { v = null; }
   if (v !== null && typeof v === 'object') {
     const state = v.event === 'APPROVE' ? 'APPROVED' : v.event === 'REQUEST_CHANGES' ? 'CHANGES_REQUESTED' : null;
-    if (!state || typeof v.body !== 'string' || !SHA.test(String(v.head_sha ?? ''))) {
-      throw new Error(`${name} is JSON but not a verdict.json: it needs event (APPROVE or REQUEST_CHANGES), body and a full head_sha`);
+    if (!state || typeof v.body !== 'string' || !v.body.trim() || typeof v.head_sha !== 'string' || !SHA.test(v.head_sha)) {
+      throw new Error(`${name} is JSON but not a verdict.json: it needs event (APPROVE or REQUEST_CHANGES), a body that is not blank and a full head_sha`);
     }
-    return { user: { login: REVIEWER_LOGIN }, state, commit_id: v.head_sha, body: v.body };
+    return { state, commit_id: v.head_sha, body: v.body };
   }
   const m = LOCAL_REVIEW.exec(text);
-  const head = m ? HEAD_MARKER.exec(m[2])?.[1] : null;
-  if (!m || !head) throw new Error(`${name} is neither a verdict.json nor the saved output of a local review (its "Redline local review on ..." line and the head marker under the verdict)`);
-  return { user: { login: REVIEWER_LOGIN }, state: m[1] === 'APPROVE' ? 'APPROVED' : 'CHANGES_REQUESTED', commit_id: head, body: m[2].trim() };
+  const body = m ? m[2].replace(/\r\n/g, '\n').trimEnd() : '';
+  const head = HEAD_FOOTER.exec(body)?.[1];
+  if (!m || !head) throw new Error(`${name} is neither a verdict.json nor the saved output of a local review (its "Redline local review on ..." line and the head marker the verdict ends with)`);
+  return { state: m[1] === 'APPROVE' ? 'APPROVED' : 'CHANGES_REQUESTED', commit_id: head, body: body.trim() };
 }
 
 /**
  * Everything review needs about the change, from the repository at `cwd`. opts: base, pr, title,
- * body, repo, fetchPr(repo, n) -> { pr, reviews } (gh by default) for --pr, and earlier: review
- * rows (earlierReview) that follow the PR's own reviews, in the order given.
+ * body, repo, fetchPr(repo, n) -> { pr, reviews } (gh by default) for --pr, and earlier: the
+ * verdicts the author kept (earlierReview), packed apart from the PR's reviews and in the order
+ * given; the host merges them after those, under its own reviewer login.
  */
 export function buildChange(cwd, opts = {}) {
   const head = git(cwd, ['rev-parse', 'HEAD']).trim();
@@ -206,7 +212,6 @@ export function buildChange(cwd, opts = {}) {
     pr = got.pr;
     reviews = got.reviews.map((r) => ({ user: { login: r.user?.login ?? '' }, state: r.state, commit_id: r.commit_id, body: r.body ?? '' }));
   }
-  reviews = [...reviews, ...(opts.earlier ?? [])];
   const last = commits.at(-1)?.commit.message ?? '';
   return {
     repo,
@@ -216,7 +221,7 @@ export function buildChange(cwd, opts = {}) {
     author: pr?.user?.login ?? (git(cwd, ['config', 'user.name'], { allowFail: true })?.trim() || 'local'),
     head: { ref: headRef, sha: head },
     base: { ref: ref.replace(/^origin\//, ''), sha: base },
-    files, commits, attributes, reviews,
+    files, commits, attributes, reviews, earlier: opts.earlier ?? [],
   };
 }
 
@@ -310,6 +315,10 @@ export function checkChange(change) {
   if (!SHA.test(change.head?.sha ?? '') || !SHA.test(change.base?.sha ?? '')) return { error: 'change.json needs full head and base shas' };
   if (!Array.isArray(change.files) || !change.files.length || change.files.some((f) => typeof f?.filename !== 'string')) return { error: 'change.json has no files' };
   if (!Array.isArray(change.commits)) return { error: 'change.json has no commits' };
+  const earlier = change.earlier ?? [];
+  if (!Array.isArray(earlier) || earlier.some((e) => !['APPROVED', 'CHANGES_REQUESTED'].includes(e?.state) || typeof e.commit_id !== 'string' || !SHA.test(e.commit_id) || typeof e.body !== 'string' || !e.body.trim())) {
+    return { error: 'change.json has an earlier verdict without a state, a full head sha and a body' };
+  }
   return { change };
 }
 
@@ -335,7 +344,10 @@ export async function reviewLocal(ctx, dir) {
     ctx.log?.(`no path counts as ${PROTECTED_ATTR}: ${e.message}`);
   }
   routeModel(review, c.files);
-  const { review: r, verdict, notes } = await reviewChange(review, { pr, files: c.files, commits: c.commits, reviews: c.reviews ?? [], protectedSet });
+  // The verdicts the author kept are Redline's by the login this host reads Redline's reviews by,
+  // whatever the login was where they were packed; they follow the PR's own reviews.
+  const kept = (c.earlier ?? []).map((e) => ({ user: { login: REVIEWER_LOGIN }, state: e.state, commit_id: e.commit_id, body: e.body }));
+  const { review: r, verdict, notes } = await reviewChange(review, { pr, files: c.files, commits: c.commits, reviews: [...(c.reviews ?? []), ...kept], protectedSet });
   return { verdict, body: renderBody(r, verdict, c.head.sha, notes), model: review.model };
 }
 

@@ -194,9 +194,12 @@ A review here records nothing, and on a private repository Redline's reviews are
 the last. `--earlier <file>` adds an earlier verdict you kept; give it once per file, oldest
 first. A file is either a CI review's `verdict.json` (its `redline-verdict` artifact) or the
 output of an earlier local review saved as printed (`... | tee review1.txt`). With them the
-review checks its earlier findings first, as it does in CI.
+review checks its earlier findings first, as it does in CI. With `pipefail` (bash, zsh) the
+pipeline's status is the review's, not `tee`'s: 1 on a request for changes, 2 when no review
+finished, and an SSH failure's own status.
 
 ```sh
+set -o pipefail
 node <ci checkout>/scripts/redline/local.mjs pack --pr 98 --earlier verdict.json --earlier review1.txt \
   | ssh <runner host> /opt/askalf/redline-local.sh | tee review2.txt
 ```
