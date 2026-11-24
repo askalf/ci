@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
-  git, repoFromUrl, changedFiles, fileRecords, gitQuoted, patchOf, branchCommits, baseRef, buildChange, packChange, tarOf, checkChange, reviewLocal, parseArgs,
+  git, repoFromUrl, changedFiles, fileRecords, gitQuoted, patchOf, branchCommits, baseRef, buildChange, packChange, tarOf, checkChange, reviewLocal, parseArgs, hostSettings,
 } from './local.mjs';
 import { REVIEWER_LOGIN } from './review.mjs';
 
@@ -321,6 +321,23 @@ console.log('\n  the pack command');
   check('pack outside a repository says where to run it, and writes nothing', r.status === 2 && r.stdout === ''
     && /is not in a git repository; run pack inside the repository whose branch you want reviewed/.test(r.stderr));
   rmSync(outside, { recursive: true, force: true });
+}
+
+console.log('\n  hostSettings: the model pins a review in CI reads on');
+{
+  const models = '/etc/redline/models.env';
+  const read = (p) => {
+    if (p !== models) throw Object.assign(new Error('no such file'), { code: 'ENOENT' });
+    return 'REDLINE_MODEL=new-routine\nREDLINE_DEEP_MODEL=new-deep\n';
+  };
+  const s = hostSettings(`REDLINE_MODEL=old-routine\nREDLINE_DEEP_MODEL=old-deep\nREDLINE_MODELS_FILE=${models}\nDARIO_API_KEY=k\n`, read);
+  check('the models file\'s pins replace the env file\'s own', s.secrets?.REDLINE_MODEL === 'new-routine' && s.secrets?.REDLINE_DEEP_MODEL === 'new-deep');
+  check('the rest of the env file is kept', s.secrets?.DARIO_API_KEY === 'k');
+  check('each key the models file replaced is noted', s.notes?.length === 2 && s.notes.every((n) => /is replaced by the models file/.test(n)));
+  const plain = hostSettings('REDLINE_MODEL=only\n', read);
+  check('an env file that names no models file stands as it is', plain.secrets?.REDLINE_MODEL === 'only' && plain.notes?.length === 0);
+  const unreadable = hostSettings(`REDLINE_MODELS_FILE=${models}\n`, () => { throw Object.assign(new Error('denied'), { code: 'EACCES' }); });
+  check('a models file that cannot be read is an error, not a review on the env file\'s keys', /cannot read \/etc\/redline\/models\.env/.test(unreadable.error ?? '') && unreadable.secrets === undefined);
 }
 
 rmSync(repo, { recursive: true, force: true });

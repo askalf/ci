@@ -180,8 +180,10 @@ export, eol or filter attribute applied; a symlink is a file holding its target)
 it also reads that PR's title, description and Redline's earlier requests through `gh`; without
 it the title is the last commit's subject (`--title` and `--body-file` set them). `local.mjs
 review` runs on the runner host, where the env file and the prompt are, and calls the same
-`reviewChange()` with the same model routing and grounding. It posts nothing; it exits 0 on
-APPROVE, 1 on REQUEST_CHANGES and 2 when no review finished.
+`reviewChange()` with the same model routing and grounding. It reads on the models the review in
+CI reads on: the env file's, with the pins of its `REDLINE_MODELS_FILE` laid over them, and it
+prints which. It posts nothing; it exits 0 on APPROVE, 1 on REQUEST_CHANGES and 2 when no review
+finished.
 
 ```sh
 node <ci checkout>/scripts/redline/local.mjs pack --pr 98 | ssh <runner host> /opt/askalf/redline-local.sh

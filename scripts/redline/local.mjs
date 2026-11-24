@@ -11,9 +11,10 @@
 //           .gitattributes, and with --pr the PR's title, body and earlier reviews) and tree/ (the
 //           head's files as committed, for the read tools).
 //   review  runs on the host, on an unpacked tar: reviewChange() from review.mjs with the host's
-//           env file (REDLINE_ENV_FILE) and prompt (REDLINE_PROMPT_FILE), the same model routing,
-//           the same grounding. It posts nothing and writes no verdict.json. Exit 0 on APPROVE,
-//           1 on REQUEST_CHANGES, 2 when no review finished.
+//           env file (REDLINE_ENV_FILE) and prompt (REDLINE_PROMPT_FILE), the same model pins
+//           (hostSettings), the same model routing, the same grounding. It posts nothing and
+//           writes no verdict.json. Exit 0 on APPROVE, 1 on REQUEST_CHANGES, 2 when no review
+//           finished.
 //
 //   node <ci>/scripts/redline/local.mjs pack [--base <ref>] [--pr <n>] [--title <t>] [--body-file <f>] \
 //     | ssh <host> /opt/askalf/redline-local.sh
@@ -26,7 +27,7 @@ import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 import {
-  parseEnvFile, readPrompt, darioAccess, modelContext, routeModel, reviewChange, renderBody, protectedIn, PROTECTED_ATTR,
+  parseEnvFile, readPrompt, darioAccess, modelContext, routeModel, reviewChange, renderBody, protectedIn, PROTECTED_ATTR, withModelsFile,
 } from './review.mjs';
 
 const SHA = /^[0-9a-f]{40}$/;
@@ -306,6 +307,18 @@ export async function reviewLocal(ctx, dir) {
 }
 
 /** --name value pairs; a flag without a value is an error. Pure. */
+/**
+ * The host's settings for a review here, read as review.mjs reads them in CI: the env file's, with
+ * the model pins of the file its REDLINE_MODELS_FILE names laid over them (withModelsFile). A host
+ * may keep model keys in the env file for callers pinned to an older Redline; the models file is
+ * what the review in CI reads on, so the review here reads on it too. `readFile` reads the models
+ * file (the file system's by default). Returns { secrets, notes } or { error }.
+ */
+export function hostSettings(envText, readFile) {
+  const pinned = withModelsFile(parseEnvFile(envText), readFile);
+  return pinned.error ? { error: pinned.error } : { secrets: pinned.secrets, notes: pinned.notes };
+}
+
 export function parseArgs(argv) {
   const out = { _: [] };
   for (let i = 0; i < argv.length; i++) {
@@ -347,12 +360,16 @@ async function main() {
     let system;
     try {
       if (!env.REDLINE_ENV_FILE) throw new Error('REDLINE_ENV_FILE is not set');
-      secrets = parseEnvFile(readFileSync(env.REDLINE_ENV_FILE, 'utf8'));
+      const host = hostSettings(readFileSync(env.REDLINE_ENV_FILE, 'utf8'));
+      if (host.error) throw new Error(host.error);
+      secrets = host.secrets;
+      for (const note of host.notes) console.log(note);
       system = readPrompt(env, 'REDLINE_PROMPT_FILE');
     } catch (e) { console.error(`redline local: ${e.message}`); process.exit(2); }
     const dario = darioAccess(secrets);
     if (dario.error) { console.error(`redline local: ${dario.error}`); process.exit(2); }
     const ctx = { ...modelContext(secrets, dario), system, context: '', log: (line) => console.log(line) };
+    console.log(`models: routine ${ctx.model || '-'}, deep ${ctx.deepModel || '-'}${secrets.REDLINE_MODELS_FILE ? ` (pins from ${secrets.REDLINE_MODELS_FILE})` : ''}`);
     let result;
     try { result = await reviewLocal(ctx, dir); } catch (e) {
       console.error(`redline local: the review did not finish: ${e.message}`);
