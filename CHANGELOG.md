@@ -13,6 +13,13 @@ names the commit's date and the pull request it came from.
 
 ## November 2026
 
+- A review before the push can be given Redline's earlier verdicts on the branch.
+  `local.mjs pack --earlier <file>`, once per file and oldest first, adds a verdict the author
+  kept to the earlier reviews the brief shows: a CI review's `verdict.json`, or the saved output
+  of an earlier local review. A local review records nothing, and on a private repository no
+  review is posted, so until now every local review of such a branch started with no memory of
+  the last, and the rules that read earlier reviews (check their findings first, say when fixes
+  are not converging) had nothing to read. A file in neither form is refused by name.
 - A review before the push reads on the models the review in CI reads on. `local.mjs review` took
   its models from the env file alone and never laid the pins of `REDLINE_MODELS_FILE` over them, as
   `review.mjs` does. On a host that keeps model keys in the env file for callers pinned to an older

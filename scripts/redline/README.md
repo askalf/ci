@@ -189,6 +189,18 @@ finished.
 node <ci checkout>/scripts/redline/local.mjs pack --pr 98 | ssh <runner host> /opt/askalf/redline-local.sh
 ```
 
+A review here records nothing, and on a private repository Redline's reviews are not posted, so
+`--pr` alone finds no earlier request there and each review of a branch starts with no memory of
+the last. `--earlier <file>` adds an earlier verdict you kept; give it once per file, oldest
+first. A file is either a CI review's `verdict.json` (its `redline-verdict` artifact) or the
+output of an earlier local review saved as printed (`... | tee review1.txt`). With them the
+review checks its earlier findings first, as it does in CI.
+
+```sh
+node <ci checkout>/scripts/redline/local.mjs pack --pr 98 --earlier verdict.json --earlier review1.txt \
+  | ssh <runner host> /opt/askalf/redline-local.sh | tee review2.txt
+```
+
 Only committed work is reviewed, against the merge base with origin's default branch (`--base`
 names another). A local review spends the same model budget as one in CI, the deep key included
 when the change routes there.

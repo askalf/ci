@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
-  git, repoFromUrl, changedFiles, fileRecords, gitQuoted, patchOf, branchCommits, baseRef, buildChange, packChange, tarOf, checkChange, reviewLocal, parseArgs, hostSettings,
+  git, repoFromUrl, changedFiles, fileRecords, gitQuoted, patchOf, branchCommits, baseRef, buildChange, packChange, tarOf, checkChange, reviewLocal, parseArgs, hostSettings, earlierReview,
 } from './local.mjs';
 import { REVIEWER_LOGIN } from './review.mjs';
 
@@ -26,6 +26,27 @@ check('https and ssh remotes name owner/repo', repoFromUrl('https://github.com/a
 check('a remote off GitHub names nothing', repoFromUrl('https://example.com/a/b.git') === null && repoFromUrl('') === null);
 check('flags take the next word; the rest is positional', JSON.stringify(parseArgs(['pack', '--pr', '7', '--base', 'origin/dev'])) === JSON.stringify({ _: ['pack'], pr: '7', base: 'origin/dev' }));
 check('a flag with no value is an error', !!(await throws(() => parseArgs(['pack', '--pr']))) && !!(await throws(() => parseArgs(['--pr', '--base', 'x']))));
+check('--earlier is kept once per file, in the order given', JSON.stringify(parseArgs(['pack', '--earlier', 'one.txt', '--pr', '7', '--earlier', 'two.json']).earlier) === JSON.stringify(['one.txt', 'two.json'])
+  && parseArgs(['pack']).earlier === undefined && !!(await throws(() => parseArgs(['pack', '--earlier']))));
+
+console.log('\n  earlierReview: a verdict the author kept, as the row the brief reads');
+{
+  const HEAD = '33d6f41b9646d7a5ad3b33347a9cd4808d8f97e7';
+  const body = `**Verdict: request changes.** One boundary case remains.\n\n### 1. Blocking: \`a.js:3\`\n\nrule:none\n\n<!-- redline:head=${HEAD} -->`;
+  const fromCi = earlierReview(JSON.stringify({ version: 1, repo: 'askalf/r', pr: 7, head_sha: HEAD, event: 'REQUEST_CHANGES', body }), 'verdict.json');
+  check('a CI review\'s verdict.json', fromCi.state === 'CHANGES_REQUESTED' && fromCi.commit_id === HEAD && fromCi.body === body && fromCi.user.login === REVIEWER_LOGIN);
+  check('an approval too', earlierReview(JSON.stringify({ head_sha: HEAD, event: 'APPROVE', body: 'ok' })).state === 'APPROVED');
+  const saved = `redline-local: askalf/ci f090f30\nmodels: routine a, deep b\nturn 1: redline_read; stop=tool_use\nturn 2: redline_submit; stop=tool_use\nRedline local review on gpt-x (nothing posted): REQUEST_CHANGES\n\n${body}\n`;
+  const fromLocal = earlierReview(saved, 'review1.txt');
+  check('the saved output of a local review: the verdict under its line, the head from its marker',
+    fromLocal.state === 'CHANGES_REQUESTED' && fromLocal.commit_id === HEAD && fromLocal.body === body && fromLocal.user.login === REVIEWER_LOGIN);
+  check('saved with CRLF line ends', earlierReview(saved.replace(/\n/g, '\r\n')).commit_id === HEAD);
+  const bad = async (text) => (await throws(() => earlierReview(text, 'kept.txt')))?.message ?? '';
+  check('JSON that is not a verdict names the file and what is missing', /kept\.txt is JSON but not a verdict\.json/.test(await bad(JSON.stringify({ head_sha: HEAD, event: 'COMMENT', body: 'x' })))
+    && /not a verdict\.json/.test(await bad(JSON.stringify({ head_sha: '33d6f41', event: 'APPROVE', body: 'x' }))) && /not a verdict\.json/.test(await bad('[]')));
+  check('text with no local review line, or a verdict with no head marker, is refused',
+    /kept\.txt is neither/.test(await bad('some notes')) && /kept\.txt is neither/.test(await bad('Redline local review on gpt-x (nothing posted): APPROVE\n\nno marker here')));
+}
 
 // A repository with a main branch and a feature branch that adds, changes, renames, removes and
 // adds a binary file, in two commits.
@@ -205,6 +226,11 @@ console.log('\n  buildChange');
   check('--pr reads the PR\'s title, body, author and reviews', asked.join() === 'askalf/r#7' && withPr.title === 'feat: token' && withPr.body === 'Reads it.' && withPr.author === 'askalf' && withPr.number === 7
     && withPr.reviews.length === 1 && withPr.reviews[0].body === 'Earlier: the token is logged.' && !('extra' in withPr.reviews[0]));
   check('--title wins over the PR\'s', buildChange(repo, { base: 'main', pr: 7, title: 'mine', fetchPr: () => ({ pr: { number: 7, title: 'theirs' }, reviews: [] }) }).title === 'mine');
+  const kept = { user: { login: REVIEWER_LOGIN }, state: 'CHANGES_REQUESTED', commit_id: '1'.repeat(40), body: 'kept by the author' };
+  const posted = { user: { login: REVIEWER_LOGIN }, state: 'CHANGES_REQUESTED', commit_id: '2'.repeat(40), body: 'posted on the PR' };
+  check('earlier verdicts the author kept follow the PR\'s own reviews', JSON.stringify(buildChange(repo, { base: 'main', pr: 7, earlier: [kept], fetchPr: () => ({ pr: { number: 7, title: 't' }, reviews: [posted] }) }).reviews.map((r) => r.body))
+    === JSON.stringify(['posted on the PR', 'kept by the author']));
+  check('and stand alone on a branch with no PR', JSON.stringify(buildChange(repo, { base: 'main', earlier: [kept] }).reviews) === JSON.stringify([kept]));
   check('a PR that cannot be read is an error, not a review without it', /could not read/.test((await throws(() => buildChange(repo, { base: 'main', pr: 7, fetchPr: () => ({ pr: null }) })))?.message ?? ''));
   check('HEAD on the base is an error', /nothing to review/.test((await throws(() => buildChange(repo, { base: 'HEAD' })))?.message ?? ''));
   check('a PR read whose reviews fail is an error, not an empty history',
