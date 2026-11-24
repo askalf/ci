@@ -27,12 +27,14 @@ writes that text by hand. A correctness or security finding, or a secret, stands
 with no rule is asked about once and then stands, and a mark the pull request itself adds counts
 for nothing until it has merged. A pull request Dependabot opened (author `dependabot[bot]`, an
 account of type Bot) has its description read without the text Dependabot copies in from the
-dependencies' repositories: an outermost `<details>` block in the shape Dependabot writes (the
-bare tag at the start of a line, a summary of Release notes, Changelog, Commits or Maintainer
-changes on the next, no details block inside it) is one line in the brief that names it, so a
-finding cannot quote it. Dependabot's own lines and anything outside those blocks are read as any
-description is. The blocks are known by their shape, not by who wrote them: a block of that shape
-someone adds to a Dependabot description is left out too. `local.mjs` packs the author's account
+dependencies' repositories. The description is read from the top as the form Dependabot writes:
+a copied block (the line `<details>`, then a `<summary>` line of Release notes, Changelog or
+Commits, then text with no details block of its own up to the closing tag) becomes
+one line in the brief that names it, so a finding cannot quote it, and a line with no markup but
+`<br />` is passed over. At the first line that is neither (another element, a comment, a code
+fence, a block under another summary, Dependabot's own commands block) the filter stops, and the
+rest is read as any description is. The blocks are known by their shape, not by who wrote them:
+a block of that shape someone adds to a Dependabot description is left out too. `local.mjs` packs the author's account
 type with `--pr`, so a local review reads such a description the same way. A `reads-as-generated` finding (how a sentence reads) is minor
 wherever it is, whatever severity the model gave it, and so is a `misleading-text` finding on the
 pull request's description (the file the model names `PR description`): the description is not

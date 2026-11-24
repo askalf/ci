@@ -1097,13 +1097,123 @@ export function askForSubmit(messages) {
 /** The login GitHub gives Dependabot's pull requests. No user account can hold a name that ends in `[bot]`. */
 export const DEPENDABOT_LOGIN = 'dependabot[bot]';
 /** The `<details>` blocks Dependabot fills with other projects' text, by their summary. Its own commands block is not one. */
-export const DEPENDABOT_COPIED = new Set(['release notes', 'changelog', 'commits', 'maintainer changes']);
+export const DEPENDABOT_COPIED = new Set(['release notes', 'changelog', 'commits']);
 export const isDependabot = (pr) => pr?.user?.login === DEPENDABOT_LOGIN && pr?.user?.type === 'Bot';
 
-/** A comment, an opening details tag or a closing one, in the order they come. A comment that never closes runs to the end, as HTML reads it. */
-const DETAILS_TOKEN = /<!--[\s\S]*?(?:-->|$)|<details\b[^>]*>|<\/details\s*>/gi;
-/** A copied block's first two lines as Dependabot writes them: the bare tag on a line, the summary on the next. */
-const COPIED_OPEN = /^<details>\r?\n<summary>([^<\n]*)<\/summary>[ \t]*\r?(?:\n|$)/;
+/** The second line of a copied block as Dependabot writes it: the summary alone on its line. */
+const COPIED_SUMMARY = /^<summary>([^<]*)<\/summary>[ \t]*$/;
+const BROKEN = Symbol('broken');
+
+/**
+ * The markup that starts at `line[p]`, a `<`: { end } for a comment, { end, name, closing } for a
+ * complete tag (quoted attribute values read whole, the name read whole, so `details-panel` is not
+ * `details`), null when the `<` is text, and BROKEN for markup this line does not finish: a
+ * comment or tag that runs past the line, a declaration, a closing tag with anything after its
+ * name. Pure.
+ */
+export function htmlToken(line, p) {
+  if (line.startsWith('<!--', p)) {
+    const e = line.indexOf('-->', p + 4);
+    return e < 0 ? BROKEN : { end: e + 3 };
+  }
+  if (line[p + 1] === '!' || line[p + 1] === '?') return BROKEN;
+  const closing = line[p + 1] === '/';
+  let q = p + (closing ? 2 : 1);
+  if (!/[A-Za-z]/.test(line[q] ?? '')) return closing ? BROKEN : null;
+  const from = q;
+  while (/[A-Za-z0-9-]/.test(line[q] ?? '')) q++;
+  const name = line.slice(from, q).toLowerCase();
+  const space = () => { const at = q; while (line[q] === ' ' || line[q] === '\t') q++; return q > at; };
+  if (closing) {
+    space();
+    return line[q] === '>' ? { end: q + 1, name, closing } : BROKEN;
+  }
+  for (;;) {
+    const spaced = space();
+    if (line[q] === '>') return { end: q + 1, name, closing };
+    if (line.startsWith('/>', q)) return { end: q + 2, name, closing };
+    if (!spaced || q >= line.length) return BROKEN;
+    const attr = q;
+    while (q < line.length && !/[\s"'<>/=`]/.test(line[q])) q++;
+    if (q === attr) return BROKEN;
+    const back = q;
+    space();
+    if (line[q] !== '=') { q = back; continue; }
+    q++;
+    space();
+    if (line[q] === '"' || line[q] === "'") {
+      const e = line.indexOf(line[q], q + 1);
+      if (e < 0) return BROKEN;
+      q = e + 1;
+    } else {
+      const value = q;
+      while (q < line.length && !/[\s"'<>=`]/.test(line[q])) q++;
+      if (q === value) return BROKEN;
+    }
+  }
+}
+
+/**
+ * Where a copied block ends: { line, col } just past its closing details tag, reading from the
+ * line after its summary, or null when it is not a block Dependabot wrote: it holds a details
+ * block of its own, markup a line does not finish, or no closing tag. A tag inside a comment or a
+ * quoted attribute value is not a tag. After a blank line inside the block Markdown is read again
+ * and can make a tag's own opening literal, so from there a comment or tag that holds the text of
+ * a details tag is not skipped: the block is not left out. The end found is never past the first
+ * closing details tag an HTML reader would take. Pure.
+ */
+function copiedBlockEnd(lines, from) {
+  let markdown = false;
+  for (let l = from; l < lines.length; l++) {
+    const line = lines[l].replace(/\r$/, '');
+    if (!line.trim()) { markdown = true; continue; }
+    for (let p = line.indexOf('<'); p >= 0; p = line.indexOf('<', p)) {
+      const tok = htmlToken(line, p);
+      if (tok === BROKEN) return null;
+      if (!tok) { p++; continue; }
+      if (tok.name === 'details') return tok.closing ? { line: l, col: tok.end } : null;
+      if (markdown && /<\/?details/i.test(line.slice(p + 1, tok.end))) return null;
+      p = tok.end;
+    }
+  }
+  return null;
+}
+
+/** A line without its code spans: a run of backticks to the next run of the same length. A run with no partner is text. Pure. */
+export function withoutCodeSpans(line) {
+  const run = (at) => { let n = 0; while (line[at + n] === '`') n++; return n; };
+  let out = '';
+  for (let i = 0; i < line.length;) {
+    if (line[i] !== '`') { out += line[i++]; continue; }
+    const n = run(i);
+    let close = -1;
+    for (let j = i + n; j < line.length;) {
+      if (line[j] !== '`') { j++; continue; }
+      const m = run(j);
+      if (m === n) { close = j; break; }
+      j += m;
+    }
+    if (close < 0) { out += line.slice(i, i + n); i += n; } else { i = close + n; }
+  }
+  return out;
+}
+
+/**
+ * Whether a line outside the copied blocks is one this reader passes over, and the HTML state
+ * after it: null when it is not (a code fence, or markup other than `<br />`), else whether an
+ * HTML block is open, which a tag opens and a blank line closes. Inside an HTML block backticks
+ * are text; outside one a code span is code, so a tag named in a code span is not markup. An
+ * escaped backtick is not passed over: it opens no code span and this reader does not unescape.
+ */
+function passedOver(line, html) {
+  if (!line.trim()) return false;
+  if (/^ {0,3}(?:`{3,}|~{3,})/.test(line)) return null;
+  if (!html && line.includes('\\`')) return null;
+  const read = html ? line : withoutCodeSpans(line);
+  const text = read.replace(/<br ?\/?>/g, '');
+  if (/<[A-Za-z/!?]/.test(text)) return null;
+  return html || text !== read;
+}
 
 /**
  * A Dependabot description without the text Dependabot copies in from the dependencies' own
@@ -1111,43 +1221,46 @@ const COPIED_OPEN = /^<details>\r?\n<summary>([^<\n]*)<\/summary>[ \t]*\r?(?:\n|
  * wording is not this repository's to answer for, and a reviewer that reads it takes a third
  * party's words into its brief.
  *
- * What goes is a block in the one shape Dependabot writes: an outermost `<details>` block that
- * opens with the bare tag at the start of a line, has `<summary>` with one of DEPENDABOT_COPIED
- * on the next line, and holds no details block of its own. The span from its opening tag through
- * its closing tag becomes one line that names it; what follows the closing tag on its line stays.
- * Everything else is kept as written: any other outermost block with all it holds (a block of a
- * copied title inside it too), a block of a copied title that holds another block, and, from a
- * block that never closes, the rest of the text. Tags inside a comment are not tags.
+ * The description is read from the top as the form Dependabot writes, and only that form:
+ * - a copied block: the line `<details>`, the line `<summary>T</summary>` with T one of
+ *   DEPENDABOT_COPIED, then text up to the closing tag copiedBlockEnd finds. It becomes one line
+ *   that names it; what follows the closing tag on its line stays;
+ * - any other line that holds no markup but `<br />` and opens no code fence (a tag named in a
+ *   code span is not markup).
+ * At the first line that is neither, the filter stops: that line and everything after it is kept
+ * as written. So a block under another summary and all it holds, a fenced example, a comment, a
+ * block that never closes or holds another block, and Dependabot's own commands block at the end
+ * are read as any description is. Only a span that begins with those two exact lines is ever left
+ * out, and it never runs past the block's own closing tag.
  *
  * The blocks are known by their shape, not by who wrote them: someone who edits a Dependabot
  * description and writes a block of that shape has it left out like Dependabot's. Pure.
  */
 export function withoutCopiedNotes(body) {
-  const text = String(body ?? '');
-  const tags = [...text.matchAll(DETAILS_TOKEN)].filter((m) => !m[0].startsWith('<!--'));
-  const closes = (m) => m[0][1] === '/';
-  let out = '';
-  let pos = 0;
-  for (let t = 0; t < tags.length; t++) {
-    if (closes(tags[t])) continue; // a closing tag with nothing open is text
-    let depth = 0;
-    let c = t;
-    for (; c < tags.length; c++) {
-      depth += closes(tags[c]) ? -1 : 1;
-      if (depth === 0) break;
-    }
-    if (c === tags.length) break; // it never closes: the rest is kept as written
-    const start = tags[t].index;
-    const end = tags[c].index + tags[c][0].length;
-    const lineStart = start === 0 || text[start - 1] === '\n';
-    const title = lineStart && c === t + 1 ? COPIED_OPEN.exec(text.slice(start, end))?.[1].trim() : undefined;
+  const lines = String(body ?? '').split('\n'); // a line keeps its \r, when it has one
+  const bare = (i) => (lines[i] ?? '').replace(/\r$/, '');
+  const out = [];
+  let html = false;
+  let i = 0;
+  for (; i < lines.length; i++) {
+    const line = bare(i);
+    const title = line === '<details>' ? COPIED_SUMMARY.exec(bare(i + 1))?.[1].trim() : undefined;
     if (title !== undefined && DEPENDABOT_COPIED.has(title.toLowerCase())) {
-      out += `${text.slice(pos, start)}[${title}: copied in by Dependabot from the dependency's repository, not shown]`;
-      pos = end;
+      const end = copiedBlockEnd(lines, i + 2);
+      if (!end) break;
+      const after = lines[end.line].slice(end.col);
+      out.push(`[${title}: copied in by Dependabot from the dependency's repository, not shown]${after}`);
+      i = end.line;
+      html = true; // the block is an HTML block, open until a blank line
+      if (passedOver(after.replace(/\r$/, ''), html) === null) { i++; break; }
+      continue;
     }
-    t = c;
+    const next = passedOver(line, html);
+    if (next === null) break;
+    html = next;
+    out.push(lines[i]);
   }
-  return out + text.slice(pos);
+  return [...out, ...lines.slice(i)].join('\n');
 }
 
 export function buildBrief(pr, files, commits, diff, protectedFiles = [], since = null) {
