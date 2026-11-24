@@ -27,13 +27,14 @@ writes that text by hand. A correctness or security finding, or a secret, stands
 with no rule is asked about once and then stands, and a mark the pull request itself adds counts
 for nothing until it has merged. A pull request Dependabot opened (author `dependabot[bot]`, an
 account of type Bot) has its description read without the text Dependabot copies in from the
-dependencies' repositories. The description is read from the top as the form Dependabot writes:
-a copied block (the line `<details>`, then a `<summary>` line of Release notes, Changelog or
-Commits, then text with no details block of its own up to the closing tag) becomes
-one line in the brief that names it, so a finding cannot quote it, and a line with no markup but
-`<br />` is passed over. At the first line that is neither (another element, a comment, a code
-fence, a block under another summary, Dependabot's own commands block) the filter stops, and the
-rest is read as any description is. The blocks are known by their shape, not by who wrote them:
+dependencies' repositories. The description is read from the top as the form Dependabot writes,
+and Markdown is not interpreted. A copied block is the line `<details>`, then the exact line
+`<summary>Release notes</summary>`, `<summary>Changelog</summary>` or `<summary>Commits</summary>`,
+then the text Dependabot's renderer writes (no blank line, no markup but that renderer's elements
+and its one comment, no details tag's text) up to the line `</details>`. It becomes one line in
+the brief that names it, so a finding cannot quote it. A line with no markup but `<br />` that
+opens no code fence is kept. At the first line that is neither, the filter stops, and the rest is
+read as any description is: where the form is in doubt the text is read, not left out. The blocks are known by their shape, not by who wrote them:
 a block of that shape someone adds to a Dependabot description is left out too. `local.mjs` packs the author's account
 type with `--pr`, so a local review reads such a description the same way. A `reads-as-generated` finding (how a sentence reads) is minor
 wherever it is, whatever severity the model gave it, and so is a `misleading-text` finding on the

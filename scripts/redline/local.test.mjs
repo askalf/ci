@@ -311,7 +311,7 @@ const unpacked = mkdtempSync(join(tmpdir(), 'redline-local-in-'));
   check('a change under .github/ routes to the deep model, as on a PR', r.model === 'deep' && calls.model[0].model === 'deep' && logs.some((l) => /read on deep/.test(l)));
   check('captured data is marked from the base\'s .gitattributes', /redline-protected[^\n]*vendor\.js/.test(first));
   const packed = JSON.parse(readFileSync(join(unpacked, 'change.json'), 'utf8'));
-  const NOTES = ['Updates `alpha` from 1.0.0 to 1.0.1', '<details>', '<summary>Release notes</summary>', 'UPSTREAM-NOTE', '</details>'].join('\n');
+  const NOTES = ['Updates `alpha` from 1.0.0 to 1.0.1', '<details>', '<summary>Release notes</summary>', '<p>UPSTREAM-NOTE</p>', '</details>'].join('\n');
   const briefOf = async (over) => {
     writeFileSync(join(unpacked, 'change.json'), JSON.stringify({ ...packed, body: NOTES, ...over }));
     const before = calls.model.length;

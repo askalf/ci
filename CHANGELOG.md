@@ -14,10 +14,10 @@ names the commit's date and the pull request it came from.
 ## November 2026
 
 - Redline reads a Dependabot pull request's description without the text Dependabot copies in
-  from the dependencies' repositories. Read from the top, a `<details>` block in the shape
-  Dependabot writes, titled Release notes, Changelog or Commits, is one line
+  from the dependencies' repositories. Read from the top, a `<details>` block in exactly the
+  form Dependabot writes, under its Release notes, Changelog or Commits summary line, is one line
   in the brief that names it; at the first line that is neither such a block nor plain text, the
-  filter stops and the rest is read as written. That text is another project's and does not ship; it could use up the 8,000
+  filter stops and the rest is read as written. Markdown is not interpreted. That text is another project's and does not ship; it could use up the 8,000
   characters the brief gives a description before Dependabot's own lines, and a credit line in a
   dependency's release notes blocked a dependency pull request as attribution. Dependabot's own
   lines and anything outside those blocks are read as before, so attribution or a secret there
