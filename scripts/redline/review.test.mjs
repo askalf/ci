@@ -1826,7 +1826,8 @@ console.log('\n  the delta since the last verdict');
     check('...a blank line inside a block keeps it, so a tag that Markdown would read as code is never taken for the block\'s end, with a real closing tag after it or none',
       same(...block('Release notes', '<p>X</p>', '', 'A paragraph that names `</details>` in code, then more.', 'MORE UPSTREAM TEXT'), ...LATER)
       && same('<details>', '<summary>Release notes</summary>', '<p>X</p>', '', 'A paragraph that names `</details>` in code, then more.', 'MORE UPSTREAM TEXT')
-      && same(...block('Release notes', '<pre><code>a', '', 'b', '</code></pre>'), ...LATER));
+      && same(...block('Release notes', '<pre><code>a', '', 'b', '</code></pre>'), ...LATER)
+      && same(...block('Release notes', 'first\r\rsecond'), ...LATER) && same(...block('Release notes', 'first\rsecond'), ...LATER));
     check('...markup that is not the renderer\'s keeps the block: an element outside its set, a tag or a quote that runs past its line, a declaration, a bare <, a closing tag with more after its name',
       same(...block('Release notes', '<span>X</span>'), ...LATER) && same(...block('Release notes', '<textarea>'), ...LATER) && same(...block('Release notes', '<a title="x', '">'), ...LATER) && same(...block('Release notes', '<a title="x>'), ...LATER)
       && same(...block('Release notes', '<![CDATA[ x ]]>'), ...LATER) && same(...block('Release notes', 'a < b'), ...LATER) && same(...block('Release notes', 'X', '</p x>'), ...LATER));

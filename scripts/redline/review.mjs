@@ -1169,7 +1169,8 @@ function copiedBlockEnd(lines, from) {
   for (let l = from; l < lines.length; l++) {
     const line = lines[l].replace(/\r$/, '');
     if (line === '</details>') return l;
-    if (!line.trim() || /<\/?details/i.test(line)) return -1;
+    // A carriage return inside a line is a line end to some readers: two of them hide a blank line.
+    if (!line.trim() || line.includes('\r') || /<\/?details/i.test(line)) return -1;
     for (let p = line.indexOf('<'); p >= 0; p = line.indexOf('<', p)) {
       if (line.startsWith(RENDERED_COMMENT, p)) { p += RENDERED_COMMENT.length; continue; }
       const tok = htmlToken(line, p);
