@@ -755,7 +755,13 @@ export function maskSecrets(text, secrets) {
  * workflow. Pure.
  */
 export function runIdentity(env = process.env) {
-  const whole = (v) => (/^[1-9]\d{0,14}$/.test(String(v ?? '')) ? Number(v) : null);
+  // Decimal digits only, then the same positive safe-integer bound runProblem holds a record to.
+  const whole = (v) => {
+    const s = String(v ?? '');
+    if (!/^\d+$/.test(s)) return null;
+    const n = Number(s);
+    return Number.isSafeInteger(n) && n > 0 ? n : null;
+  };
   const id = whole(env.GITHUB_RUN_ID);
   const attempt = whole(env.GITHUB_RUN_ATTEMPT);
   return id !== null && attempt !== null ? { id, attempt } : null;

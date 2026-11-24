@@ -311,6 +311,14 @@ console.log('\n  fix.json');
   check('and is null when either is missing, blank, zero or not a number', runIdentity({}) === null && runIdentity({ GITHUB_RUN_ID: '5' }) === null
     && runIdentity({ GITHUB_RUN_ID: '', GITHUB_RUN_ATTEMPT: '1' }) === null && runIdentity({ GITHUB_RUN_ID: '0', GITHUB_RUN_ATTEMPT: '1' }) === null
     && runIdentity({ GITHUB_RUN_ID: '5', GITHUB_RUN_ATTEMPT: '1x' }) === null && runIdentity({ GITHUB_RUN_ID: '-5', GITHUB_RUN_ATTEMPT: '1' }) === null);
+  check('runIdentity reads any positive safe integer, as runProblem accepts it, and nothing past that',
+    JSON.stringify(runIdentity({ GITHUB_RUN_ID: '1000000000000000', GITHUB_RUN_ATTEMPT: '1' })) === '{"id":1000000000000000,"attempt":1}'
+    && JSON.stringify(runIdentity({ GITHUB_RUN_ID: String(Number.MAX_SAFE_INTEGER), GITHUB_RUN_ATTEMPT: '3' })) === `{"id":${Number.MAX_SAFE_INTEGER},"attempt":3}`
+    && runIdentity({ GITHUB_RUN_ID: '9007199254740992', GITHUB_RUN_ATTEMPT: '1' }) === null
+    && runIdentity({ GITHUB_RUN_ID: '5', GITHUB_RUN_ATTEMPT: '99999999999999999999' }) === null
+    && runIdentity({ GITHUB_RUN_ID: '1e3', GITHUB_RUN_ATTEMPT: '1' }) === null && runIdentity({ GITHUB_RUN_ID: ' 5', GITHUB_RUN_ATTEMPT: '1' }) === null
+    && runIdentity({ GITHUB_RUN_ID: '0x10', GITHUB_RUN_ATTEMPT: '1' }) === null && runIdentity({ GITHUB_RUN_ID: '000', GITHUB_RUN_ATTEMPT: '1' }) === null
+    && fixProblem(fixRecord({ ...base, outcome: 'refused', notes: 'why', run: runIdentity({ GITHUB_RUN_ID: '1000000000000000', GITHUB_RUN_ATTEMPT: '1' }) })) === null);
   check('fixed passes', fixProblem(fixed) === null && fixed.version === FIX_VERSION);
   check('no_change passes with no commit', fixProblem(fixRecord({ ...base, outcome: 'no_change', notes: 'n', turns: 1 })) === null);
   check('tests_failed passes with files and tests and no commit', fixProblem(fixRecord({ ...base, outcome: 'tests_failed', files: ['a'], tests: { command: 'npm test', exit_code: 1, summary: '' }, notes: 'n' })) === null);
