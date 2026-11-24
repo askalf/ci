@@ -1100,33 +1100,54 @@ export const DEPENDABOT_LOGIN = 'dependabot[bot]';
 export const DEPENDABOT_COPIED = new Set(['release notes', 'changelog', 'commits', 'maintainer changes']);
 export const isDependabot = (pr) => pr?.user?.login === DEPENDABOT_LOGIN && pr?.user?.type === 'Bot';
 
+/** A comment, an opening details tag or a closing one, in the order they come. A comment that never closes runs to the end, as HTML reads it. */
+const DETAILS_TOKEN = /<!--[\s\S]*?(?:-->|$)|<details\b[^>]*>|<\/details\s*>/gi;
+/** A copied block's first two lines as Dependabot writes them: the bare tag on a line, the summary on the next. */
+const COPIED_OPEN = /^<details>\r?\n<summary>([^<\n]*)<\/summary>[ \t]*\r?(?:\n|$)/;
+
 /**
  * A Dependabot description without the text Dependabot copies in from the dependencies' own
- * repositories: each `<details>` block whose summary is one of DEPENDABOT_COPIED becomes one line
- * that names it. Nobody in the reviewed repository writes that text and it does not ship, so its
+ * repositories. Nobody in the reviewed repository writes that text and it does not ship, so its
  * wording is not this repository's to answer for, and a reviewer that reads it takes a third
- * party's words into its brief. What Dependabot says itself (the versions table, each "Updates"
- * line, its commands) and anything a person adds outside those blocks is kept, and is reviewed as
- * any description is. A block that never closes is kept whole. Pure.
+ * party's words into its brief.
+ *
+ * What goes is a block in the one shape Dependabot writes: an outermost `<details>` block that
+ * opens with the bare tag at the start of a line, has `<summary>` with one of DEPENDABOT_COPIED
+ * on the next line, and holds no details block of its own. The span from its opening tag through
+ * its closing tag becomes one line that names it; what follows the closing tag on its line stays.
+ * Everything else is kept as written: any other outermost block with all it holds (a block of a
+ * copied title inside it too), a block of a copied title that holds another block, and, from a
+ * block that never closes, the rest of the text. Tags inside a comment are not tags.
+ *
+ * The blocks are known by their shape, not by who wrote them: someone who edits a Dependabot
+ * description and writes a block of that shape has it left out like Dependabot's. Pure.
  */
 export function withoutCopiedNotes(body) {
-  const lines = String(body ?? '').split('\n');
-  const out = [];
-  for (let i = 0; i < lines.length; i++) {
-    const summary = /^<details>\s*$/.test(lines[i]) ? /^<summary>(.*)<\/summary>\s*$/.exec(lines[i + 1] ?? '') : null;
-    if (!summary || !DEPENDABOT_COPIED.has(summary[1].trim().toLowerCase())) { out.push(lines[i]); continue; }
-    // Copied notes can hold a details block of their own: this one ends where the depth is back at zero.
+  const text = String(body ?? '');
+  const tags = [...text.matchAll(DETAILS_TOKEN)].filter((m) => !m[0].startsWith('<!--'));
+  const closes = (m) => m[0][1] === '/';
+  let out = '';
+  let pos = 0;
+  for (let t = 0; t < tags.length; t++) {
+    if (closes(tags[t])) continue; // a closing tag with nothing open is text
     let depth = 0;
-    let end = -1;
-    for (let j = i; j < lines.length; j++) {
-      depth += (lines[j].match(/<details\b[^>]*>/gi) ?? []).length - (lines[j].match(/<\/details>/gi) ?? []).length;
-      if (depth <= 0) { end = j; break; }
+    let c = t;
+    for (; c < tags.length; c++) {
+      depth += closes(tags[c]) ? -1 : 1;
+      if (depth === 0) break;
     }
-    if (end < 0) { out.push(lines[i]); continue; }
-    out.push(`[${summary[1].trim()}: copied in by Dependabot from the dependency's repository, not shown]`);
-    i = end;
+    if (c === tags.length) break; // it never closes: the rest is kept as written
+    const start = tags[t].index;
+    const end = tags[c].index + tags[c][0].length;
+    const lineStart = start === 0 || text[start - 1] === '\n';
+    const title = lineStart && c === t + 1 ? COPIED_OPEN.exec(text.slice(start, end))?.[1].trim() : undefined;
+    if (title !== undefined && DEPENDABOT_COPIED.has(title.toLowerCase())) {
+      out += `${text.slice(pos, start)}[${title}: copied in by Dependabot from the dependency's repository, not shown]`;
+      pos = end;
+    }
+    t = c;
   }
-  return out.join('\n');
+  return out + text.slice(pos);
 }
 
 export function buildBrief(pr, files, commits, diff, protectedFiles = [], since = null) {

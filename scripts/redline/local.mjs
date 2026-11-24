@@ -8,7 +8,7 @@
 //
 //   pack    runs in the repository to review. It writes a tar to stdout: change.json (the PR as
 //           review.mjs reads it from GitHub: files with per-file patches, commits, the base's
-//           .gitattributes, and with --pr the PR's title, body and earlier reviews) and tree/ (the
+//           .gitattributes, and with --pr the PR's title, body, author and earlier reviews) and tree/ (the
 //           head's files as committed, for the read tools).
 //   review  runs on the host, on an unpacked tar: reviewChange() from review.mjs with the host's
 //           env file (REDLINE_ENV_FILE) and prompt (REDLINE_PROMPT_FILE), the same model routing,
@@ -180,6 +180,9 @@ export function buildChange(cwd, opts = {}) {
     title: opts.title ?? pr?.title ?? last.split('\n')[0],
     body: opts.body ?? pr?.body ?? '',
     author: pr?.user?.login ?? (git(cwd, ['config', 'user.name'], { allowFail: true })?.trim() || 'local'),
+    // GitHub's account type for the author, which review.mjs asks for before it reads a description
+    // as Dependabot's. Empty when the body is not the PR's own (--body-file) or there is no PR.
+    authorType: opts.body === undefined ? String(pr?.user?.type ?? '') : '',
     head: { ref: headRef, sha: head },
     base: { ref: ref.replace(/^origin\//, ''), sha: base },
     files, commits, attributes, reviews,
@@ -289,7 +292,7 @@ export async function reviewLocal(ctx, dir) {
   const c = checked.change;
   const repoRef = { full_name: c.repo };
   const pr = {
-    number: c.number || 0, title: String(c.title ?? ''), body: String(c.body ?? ''), user: { login: String(c.author ?? '') },
+    number: c.number || 0, title: String(c.title ?? ''), body: String(c.body ?? ''), user: { login: String(c.author ?? ''), ...(c.authorType ? { type: String(c.authorType) } : {}) },
     head: { ref: String(c.head.ref ?? ''), sha: c.head.sha, repo: repoRef }, base: { ref: String(c.base.ref ?? ''), sha: c.base.sha, repo: repoRef },
   };
   const review = { ...ctx, repo: c.repo, checkout: join(dir, 'tree') };

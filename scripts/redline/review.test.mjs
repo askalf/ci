@@ -1787,10 +1787,11 @@ console.log('\n  the delta since the last verdict');
     const { withoutCopiedNotes, DEPENDABOT_LOGIN, corpusOf, quoteIsGrounded } = reviewModule;
     const block = (summary, ...inner) => ['<details>', `<summary>${summary}</summary>`, ...inner, '</details>'];
     const NOTE = 'UPSTREAM-NOTE fix the parser, by a contributor and a tool';
+    const MARK = (s) => `[${s}: copied in by Dependabot from the dependency's repository, not shown]`;
     const bodyOf = (...notes) => [
       'Bumps the minor-and-patch group with 2 updates:', '', '| Package | From | To |', '| --- | --- | --- |', '| [alpha](https://example.com/alpha) | `1.0.0` | `1.0.1` |', '',
       'Updates `alpha` from 1.0.0 to 1.0.1',
-      ...block('Release notes', '<blockquote>', `<li>${NOTE}</li>`, ...notes, '<details>', '<summary>More</summary>', 'UPSTREAM-NESTED', '</details>', 'UPSTREAM-AFTER-NESTED', '</blockquote>'),
+      ...block('Release notes', '<blockquote>', `<li>${NOTE}</li>`, ...notes, '</blockquote>'),
       ...block('Changelog', 'UPSTREAM-CHANGELOG'),
       ...block('Commits', '<li>UPSTREAM-COMMIT</li>'),
       ...block('Maintainer changes', 'UPSTREAM-MAINTAINER'),
@@ -1800,20 +1801,35 @@ console.log('\n  the delta since the last verdict');
     const BODY = bodyOf().join('\n');
     const own = withoutCopiedNotes(BODY);
     const KEPT = ['| [alpha](https://example.com/alpha) | `1.0.0` | `1.0.1` |', 'Updates `alpha` from 1.0.0 to 1.0.1', 'Updates `beta` from 2.0.0 to 2.1.0', 'A NOTE A PERSON ADDED', '<summary>Dependabot commands and options</summary>', 'You can trigger Dependabot actions by commenting on this PR:'];
-    check('withoutCopiedNotes: the four copied blocks go, a block nested in one with them, each leaving one line that names it',
-      !own.includes('UPSTREAM-') && ['Release notes', 'Changelog', 'Commits', 'Maintainer changes'].every((s) => own.split('\n').filter((l) => l === `[${s}: copied in by Dependabot from the dependency's repository, not shown]`).length === 1), own);
+    check('withoutCopiedNotes: the four copied blocks go, each leaving one line that names it',
+      !own.includes('UPSTREAM-') && ['Release notes', 'Changelog', 'Commits', 'Maintainer changes'].every((s) => own.split('\n').filter((l) => l === MARK(s)).length === 1), own);
     check('...Dependabot\'s own lines, a line a person added and the commands block stay', KEPT.every((l) => own.split('\n').includes(l)), own);
     const crlf = withoutCopiedNotes(bodyOf().join('\r\n'));
-    check('...the same with CRLF line ends', !crlf.includes('UPSTREAM-') && KEPT.every((l) => crlf.split('\r\n').includes(l) || crlf.split('\n').includes(l)), crlf);
-    const open = ['Updates `alpha` from 1.0.0 to 1.0.1', '<details>', '<summary>Release notes</summary>', 'UPSTREAM-OPEN'].join('\n');
-    check('...a block that never closes is kept whole, and so is a block under another summary',
-      withoutCopiedNotes(open) === open && withoutCopiedNotes(block('Notes from the team', 'KEEP ME').join('\n')).includes('KEEP ME'));
+    check('...the same with CRLF line ends', !crlf.includes('UPSTREAM-') && KEPT.every((l) => crlf.split('\r\n').includes(l)) && crlf.split('\r\n').includes(MARK('Changelog')), crlf);
+    const same = (...lines) => withoutCopiedNotes(lines.join('\n')) === lines.join('\n');
+    check('...a block that never closes is kept as written with all after it, a closed block of a copied title inside it too',
+      same('Updates `alpha` from 1.0.0 to 1.0.1', '<details>', '<summary>Release notes</summary>', 'UPSTREAM-OPEN')
+      && same('<details>', '<summary>Release notes</summary>', 'UPSTREAM-OPEN', ...block('Changelog', 'INNER'), 'AFTER'));
+    check('...a block under another summary is kept whole, a block of a copied title inside it too',
+      same(...block('Notes from the team', 'KEEP ME')) && same(...block('Notes from the team', 'BEFORE', ...block('Commits', 'THE TEAM\'S OWN LIST'), 'AFTER'), 'TAIL'));
+    check('...a block of a copied title that holds a block of its own is not Dependabot\'s shape, and is kept whole',
+      same(...block('Release notes', 'OUTER', ...block('More', 'NESTED'), 'OUTER AGAIN')));
+    const commented = withoutCopiedNotes([...block('Release notes', 'BEFORE THE COMMENT', '<!-- a closing tag in a comment: </details> and an opening one: <details> -->', 'UPSTREAM-AFTER-COMMENT'), 'TAIL'].join('\n'));
+    check('...a tag inside a comment is not a tag: the block ends at its own closing tag', commented === `${MARK('Release notes')}\nTAIL`, commented);
+    check('...a comment that never closes takes the rest with it, so the block does not close and is kept', same(...block('Release notes', 'X', '<!-- never closed', 'Y'), 'TAIL'));
+    const tail = withoutCopiedNotes(['<details>', '<summary>Changelog</summary>', 'UPSTREAM-X', '</details> A NOTE RIGHT AFTER', 'NEXT'].join('\n'));
+    check('...what follows the closing tag on its line stays', tail === `${MARK('Changelog')} A NOTE RIGHT AFTER\nNEXT`, tail);
+    check('...a tag that does not start its line, one with an attribute, or a summary not on the next line is not the shape',
+      same('See <details>', '<summary>Changelog</summary>', 'X', '</details>') && same('<details open>', '<summary>Changelog</summary>', 'X', '</details>') && same('<details>', '', '<summary>Changelog</summary>', 'X', '</details>')
+      && same('<details><summary>Changelog</summary>', 'X', '</details>'));
+    const stray = withoutCopiedNotes(['a stray </details> in a sentence', ...block('Commits', 'UPSTREAM-C'), 'END'].join('\n'));
+    check('...a closing tag with nothing open is text, and the block after it still goes', stray === `a stray </details> in a sentence\n${MARK('Commits')}\nEND`, stray);
     check('...an empty or missing description is an empty one', withoutCopiedNotes('') === '' && withoutCopiedNotes(null) === '' && withoutCopiedNotes(undefined) === '');
     const prBy = (user, body = BODY) => buildBrief({ number: 7, title: 'build(deps): bump the group', body, user, head: { ref: 'dependabot/npm_and_yarn/group', sha: HEAD }, base: { ref: 'main', repo: { full_name: 'askalf/r' } } }, [], [], 'THE DIFF');
     const bot = prBy({ login: DEPENDABOT_LOGIN, type: 'Bot' });
     check('buildBrief: a Dependabot pull request is read without the copied text, so a finding cannot quote it; what a person added can still be quoted',
-      !bot.includes('UPSTREAM-') && !quoteIsGrounded(NOTE, corpusOf(bot)) && quoteIsGrounded('A NOTE A PERSON ADDED', corpusOf(bot)) && bot.includes('[Release notes: copied in by Dependabot'), bot);
-    check('...a person\'s pull request with the same description is read whole, and so is an account that only carries the name',
+      !bot.includes('UPSTREAM-') && !quoteIsGrounded(NOTE, corpusOf(bot)) && quoteIsGrounded('A NOTE A PERSON ADDED', corpusOf(bot)) && bot.includes(MARK('Release notes')), bot);
+    check('...the same description is not filtered for a person, for an account that only carries the name, for a bot under another name, or with no author type',
       [{ login: 'a', type: 'User' }, { login: DEPENDABOT_LOGIN, type: 'User' }, { login: 'dependabot', type: 'Bot' }, { login: DEPENDABOT_LOGIN }].every((u) => quoteIsGrounded(NOTE, corpusOf(prBy(u)))));
     const LONG = bodyOf('UPSTREAM-LONG '.repeat(700)).join('\n');
     check('...the description\'s cut comes after the copied text is left out: a second update below a long block is still shown',
