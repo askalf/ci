@@ -1783,6 +1783,42 @@ console.log('\n  the delta since the last verdict');
   const prOf = (since) => buildBrief({ number: 7, title: 't', body: '', user: { login: 'a' }, head: { ref: 'h', sha: HEAD }, base: { ref: 'main', repo: { full_name: 'askalf/r' } } }, [], [], 'THE DIFF', [], since);
   check('buildBrief: a first review heads the diff plainly; a round with a delta says since when, and where the whole change is',
     prOf(null).includes('\nDiff:\nTHE DIFF') && prOf({ head: OLD, files: DELTA }).includes('Diff since the last review, at aaaaaaa (the whole change against main is one redline_diff call away') && prOf({ head: OLD, files: DELTA }).includes('THE DIFF'));
+  {
+    const { withoutCopiedNotes, DEPENDABOT_LOGIN, corpusOf, quoteIsGrounded } = reviewModule;
+    const block = (summary, ...inner) => ['<details>', `<summary>${summary}</summary>`, ...inner, '</details>'];
+    const NOTE = 'UPSTREAM-NOTE fix the parser, by a contributor and a tool';
+    const bodyOf = (...notes) => [
+      'Bumps the minor-and-patch group with 2 updates:', '', '| Package | From | To |', '| --- | --- | --- |', '| [alpha](https://example.com/alpha) | `1.0.0` | `1.0.1` |', '',
+      'Updates `alpha` from 1.0.0 to 1.0.1',
+      ...block('Release notes', '<blockquote>', `<li>${NOTE}</li>`, ...notes, '<details>', '<summary>More</summary>', 'UPSTREAM-NESTED', '</details>', 'UPSTREAM-AFTER-NESTED', '</blockquote>'),
+      ...block('Changelog', 'UPSTREAM-CHANGELOG'),
+      ...block('Commits', '<li>UPSTREAM-COMMIT</li>'),
+      ...block('Maintainer changes', 'UPSTREAM-MAINTAINER'),
+      '', 'Updates `beta` from 2.0.0 to 2.1.0', 'A NOTE A PERSON ADDED',
+      ...block('Dependabot commands and options', '<br />', 'You can trigger Dependabot actions by commenting on this PR:'),
+    ];
+    const BODY = bodyOf().join('\n');
+    const own = withoutCopiedNotes(BODY);
+    const KEPT = ['| [alpha](https://example.com/alpha) | `1.0.0` | `1.0.1` |', 'Updates `alpha` from 1.0.0 to 1.0.1', 'Updates `beta` from 2.0.0 to 2.1.0', 'A NOTE A PERSON ADDED', '<summary>Dependabot commands and options</summary>', 'You can trigger Dependabot actions by commenting on this PR:'];
+    check('withoutCopiedNotes: the four copied blocks go, a block nested in one with them, each leaving one line that names it',
+      !own.includes('UPSTREAM-') && ['Release notes', 'Changelog', 'Commits', 'Maintainer changes'].every((s) => own.split('\n').filter((l) => l === `[${s}: copied in by Dependabot from the dependency's repository, not shown]`).length === 1), own);
+    check('...Dependabot\'s own lines, a line a person added and the commands block stay', KEPT.every((l) => own.split('\n').includes(l)), own);
+    const crlf = withoutCopiedNotes(bodyOf().join('\r\n'));
+    check('...the same with CRLF line ends', !crlf.includes('UPSTREAM-') && KEPT.every((l) => crlf.split('\r\n').includes(l) || crlf.split('\n').includes(l)), crlf);
+    const open = ['Updates `alpha` from 1.0.0 to 1.0.1', '<details>', '<summary>Release notes</summary>', 'UPSTREAM-OPEN'].join('\n');
+    check('...a block that never closes is kept whole, and so is a block under another summary',
+      withoutCopiedNotes(open) === open && withoutCopiedNotes(block('Notes from the team', 'KEEP ME').join('\n')).includes('KEEP ME'));
+    check('...an empty or missing description is an empty one', withoutCopiedNotes('') === '' && withoutCopiedNotes(null) === '' && withoutCopiedNotes(undefined) === '');
+    const prBy = (user, body = BODY) => buildBrief({ number: 7, title: 'build(deps): bump the group', body, user, head: { ref: 'dependabot/npm_and_yarn/group', sha: HEAD }, base: { ref: 'main', repo: { full_name: 'askalf/r' } } }, [], [], 'THE DIFF');
+    const bot = prBy({ login: DEPENDABOT_LOGIN, type: 'Bot' });
+    check('buildBrief: a Dependabot pull request is read without the copied text, so a finding cannot quote it; what a person added can still be quoted',
+      !bot.includes('UPSTREAM-') && !quoteIsGrounded(NOTE, corpusOf(bot)) && quoteIsGrounded('A NOTE A PERSON ADDED', corpusOf(bot)) && bot.includes('[Release notes: copied in by Dependabot'), bot);
+    check('...a person\'s pull request with the same description is read whole, and so is an account that only carries the name',
+      [{ login: 'a', type: 'User' }, { login: DEPENDABOT_LOGIN, type: 'User' }, { login: 'dependabot', type: 'Bot' }, { login: DEPENDABOT_LOGIN }].every((u) => quoteIsGrounded(NOTE, corpusOf(prBy(u)))));
+    const LONG = bodyOf('UPSTREAM-LONG '.repeat(700)).join('\n');
+    check('...the description\'s cut comes after the copied text is left out: a second update below a long block is still shown',
+      LONG.indexOf('Updates `beta`') > LIMITS.bodyChars && prBy({ login: DEPENDABOT_LOGIN, type: 'Bot' }, LONG).includes('Updates `beta` from 2.0.0 to 2.1.0') && !prBy({ login: 'a', type: 'User' }, LONG).includes('Updates `beta` from 2.0.0 to 2.1.0'));
+  }
   check('runTool redline_diff: the whole change, one path, an unknown path, nothing without files',
     runTool(root, 'redline_diff', {}, { diffFiles: [{ filename: 'src/b.js', status: 'modified', patch: PATCH }] }).includes('+export const token')
     && runTool(root, 'redline_diff', { path: 'src/b.js' }, { diffFiles: [{ filename: 'src/b.js', patch: PATCH }, { filename: 'src/c.js', patch: '+c' }] }).includes('+export const token')

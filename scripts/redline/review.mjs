@@ -1094,8 +1094,44 @@ export function askForSubmit(messages) {
   }
 }
 
+/** The login GitHub gives Dependabot's pull requests. No user account can hold a name that ends in `[bot]`. */
+export const DEPENDABOT_LOGIN = 'dependabot[bot]';
+/** The `<details>` blocks Dependabot fills with other projects' text, by their summary. Its own commands block is not one. */
+export const DEPENDABOT_COPIED = new Set(['release notes', 'changelog', 'commits', 'maintainer changes']);
+export const isDependabot = (pr) => pr?.user?.login === DEPENDABOT_LOGIN && pr?.user?.type === 'Bot';
+
+/**
+ * A Dependabot description without the text Dependabot copies in from the dependencies' own
+ * repositories: each `<details>` block whose summary is one of DEPENDABOT_COPIED becomes one line
+ * that names it. Nobody in the reviewed repository writes that text and it does not ship, so its
+ * wording is not this repository's to answer for, and a reviewer that reads it takes a third
+ * party's words into its brief. What Dependabot says itself (the versions table, each "Updates"
+ * line, its commands) and anything a person adds outside those blocks is kept, and is reviewed as
+ * any description is. A block that never closes is kept whole. Pure.
+ */
+export function withoutCopiedNotes(body) {
+  const lines = String(body ?? '').split('\n');
+  const out = [];
+  for (let i = 0; i < lines.length; i++) {
+    const summary = /^<details>\s*$/.test(lines[i]) ? /^<summary>(.*)<\/summary>\s*$/.exec(lines[i + 1] ?? '') : null;
+    if (!summary || !DEPENDABOT_COPIED.has(summary[1].trim().toLowerCase())) { out.push(lines[i]); continue; }
+    // Copied notes can hold a details block of their own: this one ends where the depth is back at zero.
+    let depth = 0;
+    let end = -1;
+    for (let j = i; j < lines.length; j++) {
+      depth += (lines[j].match(/<details\b[^>]*>/gi) ?? []).length - (lines[j].match(/<\/details>/gi) ?? []).length;
+      if (depth <= 0) { end = j; break; }
+    }
+    if (end < 0) { out.push(lines[i]); continue; }
+    out.push(`[${summary[1].trim()}: copied in by Dependabot from the dependency's repository, not shown]`);
+    i = end;
+  }
+  return out.join('\n');
+}
+
 export function buildBrief(pr, files, commits, diff, protectedFiles = [], since = null) {
-  const body = (pr.body ?? '').slice(0, LIMITS.bodyChars);
+  // The cut comes after the copied text is left out, so Dependabot's own lines are what fill it.
+  const body = (isDependabot(pr) ? withoutCopiedNotes(pr.body) : (pr.body ?? '')).slice(0, LIMITS.bodyChars);
   // A message past LIMITS.commitChars is cut with the cut stated, as context and earlier reviews
   // are: a bare cut reads as a message that ends mid-sentence, and is reviewed as one.
   const commitLines = commits.slice(0, LIMITS.commits).map((c) => {

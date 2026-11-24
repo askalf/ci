@@ -25,7 +25,11 @@ as captured data: a wording finding on it (its own rule `reads-as-generated`, `a
 `misleading-text`; each finding carries a rule) is sent back once and then dropped, since nobody
 writes that text by hand. A correctness or security finding, or a secret, stands there as anywhere, a finding there
 with no rule is asked about once and then stands, and a mark the pull request itself adds counts
-for nothing until it has merged. A `reads-as-generated` finding (how a sentence reads) is minor
+for nothing until it has merged. A pull request Dependabot opened has its description read
+without the text Dependabot copies in from the dependencies' repositories: each `<details>` block
+titled Release notes, Changelog, Commits or Maintainer changes is one line in the brief that names
+it, so a finding cannot quote it. Dependabot's own lines and anything added outside those blocks
+are read as any description is. A `reads-as-generated` finding (how a sentence reads) is minor
 wherever it is, whatever severity the model gave it, and so is a `misleading-text` finding on the
 pull request's description (the file the model names `PR description`): the description is not
 what ships and an author edits it in seconds. A review that asked for changes only for such

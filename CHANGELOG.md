@@ -13,6 +13,13 @@ names the commit's date and the pull request it came from.
 
 ## November 2026
 
+- Redline reads a Dependabot pull request's description without the text Dependabot copies in
+  from the dependencies' repositories. Each `<details>` block titled Release notes, Changelog,
+  Commits or Maintainer changes is one line in the brief that names it. That text is another
+  project's and does not ship; it could use up the 8,000 characters the brief gives a description
+  before Dependabot's own lines, and a credit line in a dependency's release notes blocked a
+  dependency pull request as attribution. Dependabot's own lines and anything a person adds
+  outside those blocks are read as before, so attribution or a secret there still blocks.
 - The Redline model bump reads its records with the job's own token. It reads askalf/redline-rubric's
   artifacts because that repository is public (the bump's run of 2026-11-22 read a second-lens
   record with it), so the pin bump App's second token, minted with Actions read, and its warning
