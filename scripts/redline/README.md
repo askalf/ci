@@ -189,6 +189,26 @@ finished.
 node <ci checkout>/scripts/redline/local.mjs pack --pr 98 | ssh <runner host> /opt/askalf/redline-local.sh
 ```
 
+A review here records nothing, and on a private repository Redline's reviews are not posted, so
+`--pr` alone finds no earlier request there and each review of a branch starts with no memory of
+the last. `--earlier <file>` adds an earlier verdict you kept; give it once per file, oldest
+first. A file is either a CI review's `verdict.json` (its `redline-verdict` artifact) or the
+output of an earlier local review saved as printed (`... | tee review1.txt`), one review per
+file: a file that holds two (`tee -a`) or a review cut before its head marker is refused by
+name. With them the review checks its earlier findings first, as it does in CI. With `pipefail`
+(bash, zsh) and `tee` writing its file, the pipeline's status is the review's: 1 on a request
+for changes, 2 when no review finished, and an SSH failure's own status. `pipefail` reports the
+last command that failed, so a `tee` that cannot write its file can also make it 1 or another
+nonzero status after an approval. To tell the review's status from the capture's, read each
+command's own status (`${PIPESTATUS[@]}` in bash, `${pipestatus[@]}` in zsh) right after the
+pipeline.
+
+```sh
+set -o pipefail
+node <ci checkout>/scripts/redline/local.mjs pack --pr 98 --earlier verdict.json --earlier review1.txt \
+  | ssh <runner host> /opt/askalf/redline-local.sh | tee review2.txt
+```
+
 Only committed work is reviewed, against the merge base with origin's default branch (`--base`
 names another). A local review spends the same model budget as one in CI, the deep key included
 when the change routes there.

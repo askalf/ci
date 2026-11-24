@@ -8,10 +8,11 @@ import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
-  git, repoFromUrl, changedFiles, fileRecords, gitQuoted, patchOf, branchCommits, baseRef, buildChange, packChange, tarOf, checkChange, reviewLocal, parseArgs, hostSettings,
+  git, repoFromUrl, changedFiles, fileRecords, gitQuoted, patchOf, branchCommits, baseRef, buildChange, packChange, tarOf, checkChange, reviewLocal, parseArgs, hostSettings, earlierReview,
 } from './local.mjs';
-import { REVIEWER_LOGIN } from './review.mjs';
+import { REVIEWER_LOGIN, renderBody } from './review.mjs';
 
+const SHA_RE = /^[0-9a-f]{40}$/;
 let pass = 0;
 let fail = 0;
 function check(name, cond) {
@@ -26,6 +27,59 @@ check('https and ssh remotes name owner/repo', repoFromUrl('https://github.com/a
 check('a remote off GitHub names nothing', repoFromUrl('https://example.com/a/b.git') === null && repoFromUrl('') === null);
 check('flags take the next word; the rest is positional', JSON.stringify(parseArgs(['pack', '--pr', '7', '--base', 'origin/dev'])) === JSON.stringify({ _: ['pack'], pr: '7', base: 'origin/dev' }));
 check('a flag with no value is an error', !!(await throws(() => parseArgs(['pack', '--pr']))) && !!(await throws(() => parseArgs(['--pr', '--base', 'x']))));
+check('--earlier is kept once per file, in the order given', JSON.stringify(parseArgs(['pack', '--earlier', 'one.txt', '--pr', '7', '--earlier', 'two.json']).earlier) === JSON.stringify(['one.txt', 'two.json'])
+  && parseArgs(['pack']).earlier === undefined && !!(await throws(() => parseArgs(['pack', '--earlier']))));
+
+console.log('\n  earlierReview: a verdict the author kept, as the row the brief reads');
+{
+  const HEAD = '33d6f41b9646d7a5ad3b33347a9cd4808d8f97e7';
+  const body = `**Verdict: request changes.** One boundary case remains.\n\n### 1. Blocking: \`a.js:3\`\n\nrule:none\n\n<!-- redline:head=${HEAD} -->`;
+  const fromCi = earlierReview(JSON.stringify({ version: 1, repo: 'askalf/r', pr: 7, head_sha: HEAD, event: 'REQUEST_CHANGES', body }), 'verdict.json');
+  check('a CI review\'s verdict.json, with no login of its own', JSON.stringify(fromCi) === JSON.stringify({ state: 'CHANGES_REQUESTED', commit_id: HEAD, body }));
+  check('an approval too', earlierReview(JSON.stringify({ head_sha: HEAD, event: 'APPROVE', body: 'ok' })).state === 'APPROVED');
+  const saved = `redline-local: askalf/ci f090f30\nmodels: routine a, deep b\nturn 1: redline_read; stop=tool_use\nturn 2: redline_submit; stop=tool_use\nRedline local review on gpt-x (nothing posted): REQUEST_CHANGES\n\n${body}\n`;
+  const fromLocal = earlierReview(saved, 'review1.txt');
+  check('the saved output of a local review: the verdict under its line, the head from its marker',
+    JSON.stringify(fromLocal) === JSON.stringify({ state: 'CHANGES_REQUESTED', commit_id: HEAD, body }));
+  check('saved with CRLF line ends', earlierReview(saved.replace(/\n/g, '\r\n')).commit_id === HEAD);
+  const bad = async (text) => (await throws(() => earlierReview(text, 'kept.txt')))?.message ?? '';
+  check('JSON that is not a verdict names the file and what is missing', /kept\.txt is JSON but not a verdict\.json/.test(await bad(JSON.stringify({ head_sha: HEAD, event: 'COMMENT', body: 'x' })))
+    && /not a verdict\.json/.test(await bad(JSON.stringify({ head_sha: '33d6f41', event: 'APPROVE', body: 'x' }))) && /not a verdict\.json/.test(await bad('[]')));
+  check('text with no local review line, or a verdict with no head marker, is refused',
+    /kept\.txt is neither/.test(await bad('some notes')) && /kept\.txt is neither/.test(await bad('Redline local review on gpt-x (nothing posted): APPROVE\n\nno marker here')));
+  const OTHER = 'a'.repeat(40);
+  const quoting = `**Verdict: request changes.** A quoted marker.\n\n### 1. Blocking: \`a.js:3\`\n\n> <!-- redline:head=${OTHER} -->\n\nrule:none\n\n<!-- redline:head=${HEAD} -->`;
+  check('the head is the footer the verdict ends with, not a marker a finding quotes',
+    earlierReview(`Redline local review on gpt-x (nothing posted): REQUEST_CHANGES\n\n${quoting}\n`).commit_id === HEAD
+    && earlierReview(JSON.stringify({ head_sha: HEAD, event: 'APPROVE', body: quoting })).commit_id === HEAD);
+  check('a saved review cut before its footer is refused, even when a finding quotes a marker',
+    /kept\.txt is neither/.test(await bad(`Redline local review on gpt-x (nothing posted): REQUEST_CHANGES\n\n${quoting.slice(0, quoting.lastIndexOf('<!--'))}`))
+    && /kept\.txt is neither/.test(await bad(`Redline local review on gpt-x (nothing posted): REQUEST_CHANGES\n\n${body.slice(0, -10)}`))
+    && /kept\.txt is neither/.test(await bad(`Redline local review on gpt-x (nothing posted): REQUEST_CHANGES\n\n${body} and more text`)));
+  check('a verdict.json with a head_sha that is not a string, or a blank body, is refused',
+    /not a verdict\.json/.test(await bad(JSON.stringify({ head_sha: [HEAD], event: 'APPROVE', body: 'x' })))
+    && /not a verdict\.json/.test(await bad(JSON.stringify({ head_sha: { toString: HEAD }, event: 'APPROVE', body: 'x' })))
+    && /not a verdict\.json/.test(await bad(JSON.stringify({ head_sha: HEAD, event: 'REQUEST_CHANGES', body: '' })))
+    && /not a verdict\.json/.test(await bad(JSON.stringify({ head_sha: HEAD, event: 'REQUEST_CHANGES', body: ' \n\t' }))));
+  const LATER = 'b'.repeat(40);
+  const approval = `Redline local review on gpt-x (nothing posted): APPROVE\n\n**Verdict: approve.** Fine.\n\n<!-- redline:head=${HEAD} -->\n`;
+  const request = `Redline local review on gpt-x (nothing posted): REQUEST_CHANGES\n\n${body.replace(HEAD, LATER)}\n`;
+  check('a file holding two saved reviews (tee -a) is refused by name, in either order and with CRLF',
+    /kept\.txt holds 2 local reviews/.test(await bad(approval + request)) && /kept\.txt holds 2 local reviews/.test(await bad(request + approval))
+    && /kept\.txt holds 2 local reviews/.test(await bad(`models: a\n${approval}turn 1: x\n${request}`.replace(/\n/g, '\r\n'))));
+  const startup = renderBody({ summary: 'One message is unclear.', rule: 'none', findings: [{ severity: 'blocking', file: 'a.js', line: 3, quote: 'log(e)', problem: 'The log names no cause.',
+    suggestion: 'Redline local review on startup failed.\nRedline local review on gpt-x (nothing posted)\n\nlog(e.message)' }] }, 'REQUEST_CHANGES', HEAD);
+  const savedStartup = `turn 1: redline_submit; stop=tool_use\nRedline local review on gpt-x (nothing posted): REQUEST_CHANGES\n\n${startup}\n`;
+  check('a rendered suggestion whose lines start like the review line is verdict text, not a second review',
+    startup.includes('\nRedline local review on startup failed.\n')
+    && JSON.stringify(earlierReview(savedStartup, 'review1.txt')) === JSON.stringify({ state: 'CHANGES_REQUESTED', commit_id: HEAD, body: startup })
+    && earlierReview(savedStartup.replace(/\n/g, '\r\n')).body === startup
+    && /kept\.txt holds 2 local reviews/.test(await bad(savedStartup + approval)) && /kept\.txt holds 2 local reviews/.test(await bad(approval + savedStartup)));
+  check('a second review cut before its footer still makes two', /kept\.txt holds 2 local reviews/.test(await bad(approval + 'Redline local review on gpt-x (nothing posted): REQUEST_CHANGES\n\n**Verdict')));
+  check('a review line and a footer with no verdict text between them is refused',
+    /kept\.txt has a local review line and a head marker but no verdict text/.test(await bad(`Redline local review on gpt-x (nothing posted): APPROVE\n\n<!-- redline:head=${HEAD} -->\n`))
+    && /kept\.txt has a local review line and a head marker but no verdict text/.test(await bad(`Redline local review on gpt-x (nothing posted): REQUEST_CHANGES\r\n\r\n \r\n\r\n<!-- redline:head=${HEAD} -->\r\n`)));
+}
 
 // A repository with a main branch and a feature branch that adds, changes, renames, removes and
 // adds a binary file, in two commits.
@@ -205,6 +259,13 @@ console.log('\n  buildChange');
   check('--pr reads the PR\'s title, body, author and reviews', asked.join() === 'askalf/r#7' && withPr.title === 'feat: token' && withPr.body === 'Reads it.' && withPr.author === 'askalf' && withPr.number === 7
     && withPr.reviews.length === 1 && withPr.reviews[0].body === 'Earlier: the token is logged.' && !('extra' in withPr.reviews[0]));
   check('--title wins over the PR\'s', buildChange(repo, { base: 'main', pr: 7, title: 'mine', fetchPr: () => ({ pr: { number: 7, title: 'theirs' }, reviews: [] }) }).title === 'mine');
+  const kept = { state: 'CHANGES_REQUESTED', commit_id: '1'.repeat(40), body: 'kept by the author' };
+  const posted = { user: { login: REVIEWER_LOGIN }, state: 'CHANGES_REQUESTED', commit_id: '2'.repeat(40), body: 'posted on the PR' };
+  const both = buildChange(repo, { base: 'main', pr: 7, earlier: [kept], fetchPr: () => ({ pr: { number: 7, title: 't' }, reviews: [posted] }) });
+  check('earlier verdicts the author kept are packed apart from the PR\'s own reviews', JSON.stringify(both.reviews.map((r) => r.body)) === JSON.stringify(['posted on the PR'])
+    && JSON.stringify(both.earlier) === JSON.stringify([kept]));
+  check('and stand alone on a branch with no PR', JSON.stringify(buildChange(repo, { base: 'main', earlier: [kept] }).earlier) === JSON.stringify([kept])
+    && buildChange(repo, { base: 'main', earlier: [kept] }).reviews.length === 0);
   check('a PR that cannot be read is an error, not a review without it', /could not read/.test((await throws(() => buildChange(repo, { base: 'main', pr: 7, fetchPr: () => ({ pr: null }) })))?.message ?? ''));
   check('HEAD on the base is an error', /nothing to review/.test((await throws(() => buildChange(repo, { base: 'HEAD' })))?.message ?? ''));
   check('a PR read whose reviews fail is an error, not an empty history',
@@ -307,8 +368,72 @@ const unpacked = mkdtempSync(join(tmpdir(), 'redline-local-in-'));
   check('the read tools read the packed tree', JSON.stringify(calls.model[1].messages.at(-1)).includes('process.env.TOKEN'));
   check('a change under .github/ routes to the deep model, as on a PR', r.model === 'deep' && calls.model[0].model === 'deep' && logs.some((l) => /read on deep/.test(l)));
   check('captured data is marked from the base\'s .gitattributes', /redline-protected[^\n]*vendor\.js/.test(first));
+  const packed = JSON.parse(readFileSync(join(unpacked, 'change.json'), 'utf8'));
+  writeFileSync(join(unpacked, 'change.json'), JSON.stringify({ ...packed, earlier: [{ state: 'CHANGES_REQUESTED', commit_id: '1'.repeat(40), body: '' }] }));
+  check('a packed earlier verdict with a blank body stops before any model call', /earlier verdict/.test((await throws(() => reviewLocal(ctx, unpacked)))?.message ?? '') && calls.model.length === 2);
+  writeFileSync(join(unpacked, 'change.json'), JSON.stringify(packed));
   writeFileSync(join(unpacked, 'change.json'), JSON.stringify({ repo: 'a/b' }));
   check('a broken change.json stops before any model call', /full head and base/.test((await throws(() => reviewLocal(ctx, unpacked)))?.message ?? '') && calls.model.length === 2);
+}
+
+console.log('\n  earlier verdicts read on a host with another reviewer login');
+{
+  // The workstation packs with its login (the default here); the host reads reviews by another.
+  const dir = mkdtempSync(join(tmpdir(), 'redline-local-login-'));
+  const kept = earlierReview(JSON.stringify({ head_sha: '1'.repeat(40), event: 'REQUEST_CHANGES', body: 'KEPT REQUEST: the token is logged.\n\n<!-- redline:head=' + '1'.repeat(40) + ' -->' }));
+  const x = spawnSync('tar', ['-x', '-f', '-'], { cwd: dir, input: packChange(repo, buildChange(repo, { base: 'main', repo: 'askalf/r', earlier: [kept] })) });
+  const child = `
+    import { reviewLocal } from ${JSON.stringify(new URL('./local.mjs', import.meta.url).href)};
+    const sent = [];
+    const submit = [{ type: 'tool_use', id: 's1', name: 'redline_submit', input: { verdict: 'APPROVE', summary: 'Fine.', findings: [] } }];
+    const fetch = async (url, init = {}) => { sent.push(JSON.parse(init.body)); return { ok: true, status: 200, headers: new Headers(), json: async () => ({ content: submit }), text: async () => '' }; };
+    let t = 0;
+    const ctx = { darioUrl: 'http://dario/', darioKey: 'k', model: 'routine', deepModel: 'deep', pinModel: '', fallbackModel: '', system: 'sys', context: '',
+      fetch, sleep: async () => {}, now: () => (t += 1000), log: () => {} };
+    await reviewLocal(ctx, process.argv[1]);
+    process.stdout.write(JSON.stringify(sent[0].messages[0].content));`;
+  const run = (login) => spawnSync(process.execPath, ['--input-type=module', '-e', child, dir], { encoding: 'utf8', env: { ...process.env, REDLINE_REVIEWER_LOGIN: login } });
+  const other = run('another-reviewer');
+  check('the host gives kept verdicts its own reviewer login, so their findings reach the model', x.status === 0 && other.status === 0 && other.stdout.includes('KEPT REQUEST: the token is logged.'));
+  rmSync(dir, { recursive: true, force: true });
+}
+
+console.log('\n  the review command, its output saved through a pipe');
+{
+  // A verdict longer than a pipe holds, read by a consumer that starts late, as tee behind ssh can:
+  // the whole verdict, footer included, reaches it and reads back as an earlier review.
+  const { createServer } = await import('node:http');
+  const { spawn } = await import('node:child_process');
+  const dir = mkdtempSync(join(tmpdir(), 'redline-local-pipe-'));
+  const x = spawnSync('tar', ['-x', '-f', '-'], { cwd: dir, input: packChange(repo, buildChange(repo, { base: 'main', repo: 'askalf/r' })) });
+  const summary = 'The change reads the token once and keeps it out of the logs. '.repeat(40000).trim();
+  const server = createServer((req, res) => {
+    req.resume();
+    req.on('end', () => {
+      res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify({ content: [{ type: 'tool_use', id: 's1', name: 'redline_submit', input: { verdict: 'APPROVE', summary, findings: [] } }] }));
+    });
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  writeFileSync(join(dir, 'host.env'), `DARIO_URL=http://127.0.0.1:${server.address().port}\nDARIO_API_KEY=k\nREDLINE_MODEL=routine\nREDLINE_DEEP_MODEL=routine\n`);
+  writeFileSync(join(dir, 'prompt.md'), 'sys\n');
+  const child = spawn(process.execPath, [fileURLToPath(new URL('./local.mjs', import.meta.url)), 'review', dir],
+    { env: { ...process.env, REDLINE_ENV_FILE: join(dir, 'host.env'), REDLINE_PROMPT_FILE: join(dir, 'prompt.md') }, stdio: ['ignore', 'pipe', 'pipe'] });
+  child.stdout.pause();
+  const exited = new Promise((r) => child.on('exit', r));
+  await Promise.race([exited, new Promise((r) => setTimeout(r, 1500))]);
+  const chunks = [];
+  child.stdout.on('data', (d) => chunks.push(d));
+  child.stdout.resume();
+  const status = await exited;
+  await new Promise((r) => (child.stdout.readableEnded ? r() : child.stdout.on('end', r)));
+  server.close();
+  const out = Buffer.concat(chunks).toString('utf8');
+  let read = null;
+  try { read = earlierReview(out, 'review1.txt'); } catch (e) { read = e; }
+  check('a long verdict written to a slow pipe arrives whole and reads back by earlierReview',
+    x.status === 0 && status === 0 && out.length > 2 ** 20 && read?.state === 'APPROVED' && read.body.includes(summary) && SHA_RE.test(read.commit_id));
+  rmSync(dir, { recursive: true, force: true });
 }
 
 console.log('\n  the pack command');
