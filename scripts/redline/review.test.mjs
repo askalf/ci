@@ -1830,6 +1830,9 @@ console.log('\n  the delta since the last verdict');
     check('...markup that is not the renderer\'s keeps the block: an element outside its set, a tag or a quote that runs past its line, a declaration, a bare <, a closing tag with more after its name',
       same(...block('Release notes', '<span>X</span>'), ...LATER) && same(...block('Release notes', '<textarea>'), ...LATER) && same(...block('Release notes', '<a title="x', '">'), ...LATER) && same(...block('Release notes', '<a title="x>'), ...LATER)
       && same(...block('Release notes', '<![CDATA[ x ]]>'), ...LATER) && same(...block('Release notes', 'a < b'), ...LATER) && same(...block('Release notes', 'X', '</p x>'), ...LATER));
+    check('...a less-than sign inside a quoted attribute value is not the renderer\'s, which escapes it: the block and what follows are kept; the escaped form in the same place is left out',
+      same(...block('Release notes', '<a title="size < 2">limit</a>', 'A MAINTAINER\'S TEXT'), 'A SUFFIX', ...LATER) && same(...block('Release notes', "<a title='<b'>x</a>"), ...LATER)
+      && withoutCopiedNotes([...block('Release notes', '<a title="size &lt; 2">limit</a>', 'UPSTREAM-TEXT'), 'A SUFFIX'].join('\n')) === [MARK('Release notes'), 'A SUFFIX'].join('\n'));
     check('...text after the closing tag on its line, or before it, keeps the block, so a note there is read',
       same('<details>', '<summary>Changelog</summary>', 'X', '</details> A NOTE RIGHT AFTER', 'NEXT', ...LATER) && same('<details>', '<summary>Changelog</summary>', 'X', 'Y</details>', ...LATER) && same('<details>', '<summary>Changelog</summary>', 'X', ' </details>', ...LATER));
     check('...an opening that is not the bare tag alone on its line is not the shape, and stops the filter',

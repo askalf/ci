@@ -1159,7 +1159,7 @@ export function htmlToken(line, p) {
  * The index of the line that closes a copied block, reading from the line after its summary, or
  * -1 when the text is not what Dependabot's renderer writes. That text is one HTML block: no
  * blank line (after one Markdown is read again, and a tag could be literal), and on every line
- * each `<` starts either the renderer's one comment or a complete tag for an element in
+ * each `<` starts either the renderer's one comment or a complete tag, with no `<` inside it, for an element in
  * RENDERED_TAGS. The block closes at the first line that is `</details>` and nothing else. A
  * details tag's text anywhere before that line, in a tag, an attribute value or prose, is not
  * that form. So the closing line found is the first closing details tag there is: nothing is
@@ -1174,6 +1174,8 @@ function copiedBlockEnd(lines, from) {
       if (line.startsWith(RENDERED_COMMENT, p)) { p += RENDERED_COMMENT.length; continue; }
       const tok = htmlToken(line, p);
       if (!tok || tok === BROKEN || !RENDERED_TAGS.has(tok.name)) return -1;
+      // The renderer escapes a literal less-than sign wherever it stands, an attribute value included.
+      if (line.slice(p + 1, tok.end).includes('<')) return -1;
       p = tok.end;
     }
   }
