@@ -1159,28 +1159,44 @@ export function htmlToken(line, p) {
 }
 
 /**
+ * Elements whose contents HTML reads as text up to their own closing tag (raw text, escapable raw
+ * text, plaintext), so a details tag inside one is not a tag.
+ */
+const RAW_TEXT = new Set(['script', 'style', 'textarea', 'title', 'xmp', 'iframe', 'noembed', 'noframes', 'noscript', 'plaintext']);
+
+/** Whether `line[p]` follows an odd run of backslashes, which Markdown reads as an escape. Pure. */
+const escapedAt = (line, p) => { let n = 0; while (line[p - 1 - n] === '\\') n++; return n % 2 === 1; };
+
+/**
  * Where a copied block ends: { line, col } just past its closing details tag, reading from the
  * line after its summary, or null when it is not a block Dependabot wrote: it holds a details
- * block of its own, markup a line does not finish, or no closing tag. A tag inside a comment or a
- * quoted attribute value is not a tag. After a blank line inside the block Markdown is read again
- * and can make a tag's own opening literal, so from there a comment or tag that holds the text of
- * a details tag is not skipped: the block is not left out. From there a details tag may also be
- * code (in a code span, one that runs over lines, a fenced or an indented block), so once a
- * backtick or a fence has been read, or on an indented line, a details tag keeps the block too.
- * The end found is never past the first closing details tag an HTML reader would take. Pure.
+ * block of its own, markup a line does not finish, an element whose contents are raw text, or no
+ * closing tag. A tag inside a comment or a quoted attribute value is not a tag. After a blank line
+ * inside the block Markdown is read again and can make a tag's own opening literal, so from there
+ * a comment or tag that holds the text of a details tag is not skipped, and markup after an
+ * escaping backslash is not read at all: the block is not left out. From there a details tag may
+ * also be code: on a line that holds a backtick, later in a paragraph that holds a backtick run
+ * its own line does not close (a code span can run over lines, not past a blank line), anywhere
+ * after a code fence, or on an indented line. Such a tag keeps the block too. A paragraph whose
+ * code spans all close on their lines leaves the lines after it as they were. The end found is
+ * never past the first closing details tag an HTML reader would take. Pure.
  */
 function copiedBlockEnd(lines, from) {
   let markdown = false;
-  let code = false;
+  let fence = false;
+  let open = false;
   for (let l = from; l < lines.length; l++) {
     const line = lines[l].replace(/\r$/, '');
-    if (!line.trim()) { markdown = true; continue; }
-    if (markdown && (line.includes('`') || /^ {0,3}~{3,}/.test(line))) code = true;
-    const literal = code || (markdown && /^(?: *\t| {4})/.test(line));
+    if (!line.trim()) { markdown = true; open = false; continue; }
+    if (markdown && /^ {0,3}(?:`{3,}|~{3,})/.test(line)) fence = true;
+    const literal = fence || open || (markdown && (line.includes('`') || /^(?: *\t| {4})/.test(line)));
+    if (markdown && withoutCodeSpans(line).includes('`')) open = true;
     for (let p = line.indexOf('<'); p >= 0; p = line.indexOf('<', p)) {
       const tok = htmlToken(line, p);
       if (tok === BROKEN) return null;
       if (!tok) { p++; continue; }
+      if (markdown && escapedAt(line, p)) return null;
+      if (!tok.closing && RAW_TEXT.has(tok.name)) return null;
       if (tok.name === 'details') return tok.closing && !literal ? { line: l, col: tok.end } : null;
       if (markdown && /<\/?details/i.test(line.slice(p + 1, tok.end))) return null;
       p = tok.end;
@@ -1216,18 +1232,21 @@ export function withoutCodeSpans(line) {
  * escaped backtick is not passed over: it opens no code span and this reader does not unescape.
  * A backtick in a link destination or title, or in a link reference definition, is part of it
  * and opens no code span, so code spans are read only before the first `](` on the line, and
- * not at all on a line that defines a link.
+ * not at all on a line that defines a link. A code span can run over the lines of a paragraph, so
+ * once a backtick run is left open on a line (`open`, until a blank line) no later line of that
+ * paragraph has spans taken out: its markup is read as markup and stops the filter. Returns
+ * { html, open } for the next line, or null.
  */
-function passedOver(line, html) {
-  if (!line.trim()) return false;
+function passedOver(line, html, open = false) {
+  if (!line.trim()) return { html: false, open: false };
   if (/^ {0,3}(?:`{3,}|~{3,})/.test(line)) return null;
   if (!html && line.includes('\\`')) return null;
   const link = /^ {0,3}\[[^\]]*\]:/.test(line) ? 0 : line.indexOf('](');
   const inline = link < 0 ? line : line.slice(0, link);
-  const read = html ? line : withoutCodeSpans(inline) + line.slice(inline.length);
+  const read = html || open ? line : withoutCodeSpans(inline) + line.slice(inline.length);
   const text = read.replace(/<br ?\/?>/g, '');
   if (/<[A-Za-z/!?]/.test(text)) return null;
-  return html || text !== read;
+  return { html: html || text !== read, open: open || withoutCodeSpans(inline).includes('`') };
 }
 
 /**
@@ -1256,6 +1275,7 @@ export function withoutCopiedNotes(body) {
   const bare = (i) => (lines[i] ?? '').replace(/\r$/, '');
   const out = [];
   let html = false;
+  let open = false;
   let i = 0;
   for (; i < lines.length; i++) {
     const line = bare(i);
@@ -1267,12 +1287,13 @@ export function withoutCopiedNotes(body) {
       out.push(`[${title}: copied in by Dependabot from the dependency's repository, not shown]${after}`);
       i = end.line;
       html = true; // the block is an HTML block, open until a blank line
+      open = false;
       if (passedOver(after.replace(/\r$/, ''), html) === null) { i++; break; }
       continue;
     }
-    const next = passedOver(line, html);
+    const next = passedOver(line, html, open);
     if (next === null) break;
-    html = next;
+    ({ html, open } = next);
     out.push(lines[i]);
   }
   return [...out, ...lines.slice(i)].join('\n');

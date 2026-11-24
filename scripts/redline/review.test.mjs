@@ -1868,6 +1868,21 @@ console.log('\n  the delta since the last verdict');
     check('...a summary that is not exactly the line Dependabot writes is not the shape: its block and the blocks after it are kept',
       ['  COMMITS  ', 'commits', ' Commits', 'Commits ', 'Release Notes'].every((s) => same(...block(s, 'KEEP ME'), ...block('Commits', 'LATER')))
       && same('<details>', '<summary>Commits</summary> ', 'X', '</details>', ...block('Changelog', 'LATER')));
+    check('...a code span runs over the lines of a paragraph: a tag after a backtick left open on an earlier line is markup and stops the filter, and the subsection survives byte for byte',
+      same('See `one', 'two` <details> then `', ...block('Commits', 'THE TEAM\'S OWN LIST'), 'AFTER', '</details>')
+      && gone('See `one', 'two`', '', ...block('Commits', 'UPSTREAM-C')));
+    const escapedClose = withoutCopiedNotes(['<details>', '<summary>Changelog</summary>', 'UPSTREAM-X', '', 'UPSTREAM-Y \\\\</details>', 'TAIL'].join('\n'));
+    check('...after a blank line an escaped closing tag is text and keeps the block, with or without a real close after it; an escaped backslash before one does not',
+      same(...block('Release notes', 'X', '', 'Write \\</details> to close it.', 'UPSTREAM-MORE'), 'TAIL')
+      && same('<details>', '<summary>Release notes</summary>', 'X', '', 'Write \\</details> to close it.', 'UPSTREAM-MORE')
+      && escapedClose === `${MARK('Changelog')}\nTAIL`, escapedClose);
+    check('...an element whose contents are raw text keeps the block: a details tag in a textarea or a style element is not a tag',
+      same(...block('Release notes', '<textarea>Example: </details></textarea>', 'UPSTREAM-MORE'), 'TAIL')
+      && same(...block('Release notes', '<style>/* </details> */</style>', 'UPSTREAM-MORE'), 'TAIL')
+      && same(...block('Release notes', 'X', '', '<textarea>Example: </details></textarea>', 'UPSTREAM-MORE'), 'TAIL'));
+    const renamed = withoutCopiedNotes([...block('Release notes', 'UPSTREAM-A', '', 'UPSTREAM-RENAMED `foo` to `bar`.', ''), ...block('Commits', 'UPSTREAM-C'), 'A MAINTAINER\'S NOTE'].join('\n'));
+    check('...a paragraph whose code spans close on their line does not keep a later close: this block and the next go, a later note stays',
+      renamed === [MARK('Release notes'), MARK('Commits'), 'A MAINTAINER\'S NOTE'].join('\n'), renamed);
     const prBy = (user, body = BODY) => buildBrief({ number: 7, title: 'build(deps): bump the group', body, user, head: { ref: 'dependabot/npm_and_yarn/group', sha: HEAD }, base: { ref: 'main', repo: { full_name: 'askalf/r' } } }, [], [], 'THE DIFF');
     const bot = prBy({ login: DEPENDABOT_LOGIN, type: 'Bot' });
     check('buildBrief: a Dependabot pull request is read without the copied text, so a finding cannot quote it; what a person added can still be quoted',
