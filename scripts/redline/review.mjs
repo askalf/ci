@@ -102,7 +102,8 @@
 // models.json goes (modelsRecord: the pins, the model list dario served, the newest of each tracked
 // family, the model the review was read on). The env file's REDLINE_MODELS_FILE, when set, names a
 // file of model pins with no secret in it (withModelsFile) whose settings replace the env file's
-// own; a set name whose file cannot be read ends the run. REDLINE_CONTEXT_FILE, when set,
+// own, REDLINE_ROUND_CAP among them when the file sets it; a set name whose file cannot be read
+// ends the run. REDLINE_CONTEXT_FILE, when set,
 // names facts a workflow gathered before the review (files at another ref, search results, a rule
 // list) that the checkout and the PR cannot show; they go into the brief after the diff, as data, and
 // a set variable whose file cannot be read ends the run.
@@ -652,10 +653,13 @@ export function capNoticeQuote(r) {
   return body ? { commit_id: CAP_LAST_AT.exec(parts[0])?.[1] ?? '', body } : null;
 }
 
+/** A round cap as it is written: a whole number from 0 to 999. */
+const ROUND_CAP_VALUE = /^\d{1,3}$/;
+
 /** REDLINE_ROUND_CAP as a count: a non-negative integer, 0 for no cap; anything else is the default. */
 export function roundCapOf(value) {
   const s = String(value ?? '').trim();
-  return /^\d{1,3}$/.test(s) ? Number(s) : DEFAULT_ROUND_CAP;
+  return ROUND_CAP_VALUE.test(s) ? Number(s) : DEFAULT_ROUND_CAP;
 }
 
 /**
@@ -1814,6 +1818,12 @@ export function modelContext(secrets, dario) {
 
 /** The model settings REDLINE_MODELS_FILE may set, each replacing the env file's own. */
 export const MODEL_KEYS = ['REDLINE_MODEL', 'REDLINE_DEEP_MODEL', 'REDLINE_PIN_MODEL', 'REDLINE_FALLBACK_MODEL'];
+/**
+ * The one setting REDLINE_MODELS_FILE may set that is not a model: the round cap (roundCapOf).
+ * Without it a host whose pins come from a reviewed repository still kept its cap where no review
+ * sees it: in its env file, which holds its secrets, or in the runner's environment.
+ */
+export const ROUND_CAP_KEY = 'REDLINE_ROUND_CAP';
 
 /**
  * The matcher for a `<KEY>_TRACKS` value: a model id with one `*` where its version goes
@@ -1874,7 +1884,10 @@ export function compareVersions(a, b) {
  * The env file's settings with REDLINE_MODELS_FILE's model pins laid over them. That file holds
  * no secret: the host installs it from a reviewed repository, and the model bump moves its pins.
  * A key of MODEL_KEYS it sets replaces the env file's (said in notes when the two differ), and
- * `<KEY>_TRACKS` names the family the pin follows. Returns { secrets, tracks, notes } or { error }.
+ * `<KEY>_TRACKS` names the family the pin follows. ROUND_CAP_KEY, when the file sets it, replaces
+ * the env file's the same way. There it must be a whole number from 0 to 999 and anything else is
+ * an error, where the env file's own value that is not one counts as the default (roundCapOf).
+ * Returns { secrets, tracks, notes } or { error }.
  */
 export function withModelsFile(secrets, readFile = (p) => readFileSync(p, 'utf8')) {
   const file = secrets.REDLINE_MODELS_FILE || '';
@@ -1897,6 +1910,12 @@ export function withModelsFile(secrets, readFile = (p) => readFileSync(p, 'utf8'
       if (!trackMatcher(t)) return { error: `${k}_TRACKS in ${file} must be a model id with one * for its version, such as gpt-*-sol; got ${t}` };
       tracks[k] = t;
     }
+  }
+  if (Object.hasOwn(pins, ROUND_CAP_KEY)) {
+    const cap = pins[ROUND_CAP_KEY];
+    if (!ROUND_CAP_VALUE.test(cap)) return { error: `${ROUND_CAP_KEY} in ${file} must be a whole number from 0 to 999 (0 is no cap); got ${cap || 'nothing'}` };
+    if (Object.hasOwn(secrets, ROUND_CAP_KEY) && secrets[ROUND_CAP_KEY] !== cap) notes.push(`${ROUND_CAP_KEY} in the env file (${secrets[ROUND_CAP_KEY] || 'empty'}) is replaced by the models file (${cap})`);
+    out[ROUND_CAP_KEY] = cap;
   }
   return { secrets: out, tracks, notes };
 }
@@ -1941,6 +1960,15 @@ export function modelsRecord({ repo, pr, headSha, lens, at, pins, tracks, catalo
 
 async function main() {
   const env = process.env;
+  // The runner's workspace outlives the job, and the workflow uploads a verdict or a models record
+  // whenever the file is there. So what an earlier run left is removed before main reads the env
+  // file, the models file, the prompt or the context file: a run that main ends on one of them
+  // leaves nothing of another run's to upload. A run that fails before main starts, on a setting
+  // read while the module loads, does not get here and still leaves them.
+  const verdictFile = env.REDLINE_VERDICT_FILE || '';
+  if (verdictFile) rmSync(verdictFile, { force: true });
+  const modelsFile = env.REDLINE_MODELS_OUT || '';
+  if (modelsFile) rmSync(modelsFile, { force: true });
   const need = (k, src = env) => { if (!src[k]) { console.error(`::error::${k} is not set`); process.exit(2); } return src[k]; };
   let secrets;
   try { secrets = parseEnvFile(readFileSync(need('REDLINE_ENV_FILE'), 'utf8')); } catch (e) {
@@ -1958,10 +1986,6 @@ async function main() {
       console.error(`::error::REDLINE_CONTEXT_FILE: cannot read ${env.REDLINE_CONTEXT_FILE} (${e.code ?? e.message})`); process.exit(2);
     }
   }
-  // The runner's workspace outlives the job, so a file from an earlier run is removed before this
-  // one can leave it to be uploaded.
-  const verdictFile = env.REDLINE_VERDICT_FILE || '';
-  if (verdictFile) rmSync(verdictFile, { force: true });
   const dario = darioAccess(secrets);
   if (dario.error) { console.error(`::error::${dario.error}`); process.exit(2); }
   if (dario.warning) console.log(`::warning::${dario.warning}`);
@@ -1986,8 +2010,6 @@ async function main() {
   if (catalog.ids) console.log(`dario lists ${catalog.ids.length} models: ${catalog.ids.join(', ')}`);
   else console.log(`::warning::${catalog.why}; the review goes on without the list`);
   // Written whatever the review's outcome, so a run that fails still says what it was given.
-  const modelsFile = env.REDLINE_MODELS_OUT || '';
-  if (modelsFile) rmSync(modelsFile, { force: true });
   const writeModels = () => {
     const rec = modelsRecord({
       repo: ctx.repo, pr: ctx.pr, headSha: ctx.headSha, lens: LENS || 'first', at: new Date().toISOString(),

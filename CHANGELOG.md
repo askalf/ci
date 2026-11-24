@@ -13,6 +13,21 @@ names the commit's date and the pull request it came from.
 
 ## November 2026
 
+- The file `REDLINE_MODELS_FILE` names may set `REDLINE_ROUND_CAP`. The models file could not set
+  the cap: it took only the four model pins, so a host whose pins come from a reviewed repository
+  still kept its cap in its env file or in the runner's environment, where no review sees it. A
+  cap in the models file replaces the env file's, and the log says so when the two differ. There
+  it must be a whole number from 0 to 999 (0 turns the cap off), and anything else ends the run, as
+  a family with no `*` does. The env file's own value is read as before, one that is not such a
+  number counts as the default, and the process environment's is still read when neither file
+  sets the key.
+- A run that `main` ends on the env file, the models file, the prompt or the context file leaves
+  no file of an earlier run to upload. `review.mjs` removed an earlier run's `verdict.json` only
+  after it had read those four, and its `models.json` later still. A run that ended on one of
+  them (a file that cannot be read, a family with no `*`) left both in the runner's workspace, and
+  the workflow uploads a verdict or a models record whenever the file is there. `main` now removes
+  both before it reads any of the four. A run that fails before `main` starts, on a setting read
+  while the module loads (a reviewer login that is not a login), still leaves them.
 - A review that asks for changes only through findings that do not block, a claim in the pull
   request description among them, is asked once which side is wrong. Such a review approves,
   because a claim the code does not back is corrected in the description with no commit, and the
