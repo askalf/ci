@@ -1,12 +1,13 @@
 // Writes the tools Redline hands a model to one file per lane, the tool surface as a file that
 // truecopy can pin and poison-scan: tools.json is TOOLS in review.mjs (the reviewer's read-only
-// tools), fix-tools.json is TOOLS in fix.mjs (the fixer's, which write and run in the checkout).
+// tools), fix-tools.json is TOOLS in fix.mjs (the fixer's, which write and run in the checkout),
+// build-tools.json is TOOLS in build.mjs (the fixer's tools as the build lane words them).
 // The descriptions are what the model reads and acts on, so a change to one has to be regenerated
 // and re-pinned on purpose. The system prompts are not here: they are installed on the runner hosts
 // and never committed to this repository.
 //
-//   node scripts/redline/dump-tools.mjs           regenerate both files
-//   node scripts/redline/dump-tools.mjs --check   exit 1 if either no longer matches its TOOLS
+//   node scripts/redline/dump-tools.mjs           regenerate the files
+//   node scripts/redline/dump-tools.mjs --check   exit 1 if one no longer matches its TOOLS
 //
 // The entries are written exactly as the Messages API receives them (input_schema, not MCP's
 // inputSchema); truecopy scans the whole tool object either way.
@@ -14,10 +15,12 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { TOOLS as REVIEW_TOOLS } from './review.mjs';
 import { TOOLS as FIX_TOOLS } from './fix.mjs';
+import { TOOLS as BUILD_TOOLS } from './build.mjs';
 
 const SURFACES = [
   { file: 'tools.json', name: 'redline', tools: REVIEW_TOOLS, source: 'review.mjs' },
   { file: 'fix-tools.json', name: 'redline-fix', tools: FIX_TOOLS, source: 'fix.mjs' },
+  { file: 'build-tools.json', name: 'redline-build', tools: BUILD_TOOLS, source: 'build.mjs' },
 ];
 
 const check = process.argv.includes('--check');

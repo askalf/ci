@@ -54,7 +54,7 @@ One CI setup in four layers, and this repository is the gate.
 | **ci-wizard measures it** | A read-only audit of a repository's GitHub Actions: where the time goes and what to fix first, with the cause confirmed in the workflow file before a finding names it. A fix is measured the same way before and after it lands here. | [askalf/ci-wizard](https://github.com/askalf/ci-wizard) |
 | **pitlane runs it, as the lab** | Self-hosted, ephemeral, non-root runners we run ourselves, one job each, where ci-wizard's method is proven. Every job's queue wait, from GitHub creating it to a runner starting it, is measured, and the last 24 hours are published live against two targets: a median under 5 s and a p90 under 30 s. The badge above is that median. | [the proof page](https://pitlane.askalf.org/), its [JSON](https://pitlane.askalf.org/stats.json) and the runner code, [askalf/pitlane](https://github.com/askalf/pitlane) |
 | **This repository gates it** | Redline, the AI code review every pull request has to pass. The caller runs it as a reusable workflow at one pinned commit, and the finished review is posted on the pull request as an approval or a request for changes. That posted review is what a merge waits on: a ruleset that requires an approving review lets the pull request merge only once its latest push is approved ([what this repository's ruleset requires](#what-holds-a-merge)). Beside it: the public-text check, the fleet statuses a merge waits on, and shared steps such as a checkout that retries. | here |
-| **truecopy-action is the integrity gate inside it** | The gate that fails the build on a tampered skill. [@askalf/truecopy](https://www.npmjs.com/package/@askalf/truecopy) pins the exact bytes of each vetted tool definition in `truecopy.lock`, and the action fails the job when those bytes change or newer detection flags them. Here it pins the tools the reviewer and the fixer read. | [askalf/truecopy-action](https://github.com/askalf/truecopy-action); [`truecopy-gate.yml`](#the-truecopy-gate) here |
+| **truecopy-action is the integrity gate inside it** | The gate that fails the build on a tampered skill. [@askalf/truecopy](https://www.npmjs.com/package/@askalf/truecopy) pins the exact bytes of each vetted tool definition in `truecopy.lock`, and the action fails the job when those bytes change or newer detection flags them. Here it pins the tools the reviewer, the fixer and the builder read. | [askalf/truecopy-action](https://github.com/askalf/truecopy-action); [`truecopy-gate.yml`](#the-truecopy-gate) here |
 
 ## Who can use this
 
@@ -81,13 +81,14 @@ The inputs, each optional, with the value every askalf caller runs:
 | `env-file` | redline-review.yml | `/etc/askalf/redline.env` | the host file with the endpoint's address and key and the model settings |
 | `prompt-file` | redline-review.yml | `/etc/askalf/redline-prompt.md` | the host file with the reviewer's rubric |
 | `env-file`, `prompt-file` | redline-fix-run.yml | `/etc/askalf/fix-exec.env`, `/etc/askalf/fix-prompt.md` | the same two for the fix lane |
+| `env-file`, `prompt-file` | redline-build-run.yml | `/etc/askalf/fix-exec.env`, `/etc/askalf/build-prompt.md` | the fix lane's env file, which the build lane shares, and the builder's prompt |
 | `reviewer-login` | redline-review.yml, redline-post-verdict.yml | `sprayberry-redline` | the account whose posted reviews are Redline's: the one the post caller's token posts as |
 | `dispatch-actor` | redline-review.yml, redline-post-verdict.yml | `askalf` | the account whose dispatch of the caller's `redline.yml` on the default branch is trusted: its run is posted, and read as review history |
-| `ci-repo` | redline-review.yml, redline-post-verdict.yml, redline-fix-run.yml, public-text.yml | `askalf/ci` | where the scripts are fetched from; `redline-ref` must be a commit on its `main`, and the poster trusts a review run only if it called this repository's `redline-review.yml` |
+| `ci-repo` | redline-review.yml, redline-post-verdict.yml, redline-fix-run.yml, redline-build-run.yml, public-text.yml | `askalf/ci` | where the scripts are fetched from; `redline-ref` must be a commit on its `main`, and the poster trusts a review run only if it called this repository's `redline-review.yml` |
 
 A caller passes the same `reviewer-login` and the same `dispatch-actor` to the review and to the
 post, and a fork passes its
-own `ci-repo` to all four. `uses:` takes no expression, so a fork's callers also name the fork
+own `ci-repo` to every workflow in that row. `uses:` takes no expression, so a fork's callers also name the fork
 there. In the fork itself, the pin bump (`redline-pin-bump.yml`) runs once the repository variable
 `REDLINE_CALLERS` lists its callers (space-separated owner/name; without it the bump runs in
 askalf/ci only), on the runner labels in `REDLINE_PIN_BUMP_RUNS_ON` (a JSON list, default
@@ -194,7 +195,7 @@ What to know before choosing it:
 - **Fleet:** the askalf repositories that call these workflows. The fleet statuses are the
   `fleet/verify` and `fleet/review` commit statuses a merge there waits on.
 - **Exec runner:** the self-hosted runner a repository's build and test jobs run on, and the fix
-  lane with them. The `redline` runner only reads pull requests.
+  and build lanes with them. The `redline` runner only reads pull requests.
 - **Ops tick:** the scheduled job on our runner host that dispatches the fix lane and the
   dispatch-mode reviews, and pushes a verified fix to the pull request branch. It is not in this
   repository.
@@ -211,6 +212,7 @@ full commit sha of `main`, so a change here reaches it only through a reviewed b
 |---|---|
 | [`redline-review.yml`](.github/workflows/redline-review.yml) | Redline, the AI review: `scripts/redline/review.mjs` reads the pull request with read-only tools on the caller's self-hosted runner and returns APPROVE or REQUEST_CHANGES; the job passes or fails with it, and the caller's post workflow posts the verdict as a review. |
 | [`redline-fix-run.yml`](.github/workflows/redline-fix-run.yml) | The first-party answer to a REQUEST_CHANGES: `scripts/redline/fix.mjs` edits and tests the reviewed head on the caller's exec runner and uploads the fix as an artifact. Nothing in the job pushes or comments. |
+| [`redline-build-run.yml`](.github/workflows/redline-build-run.yml) | A ticket turned into a change: `scripts/redline/build.mjs` does the fix lane's work in a checkout of a base commit, from a ticket's title and brief, and uploads one commit and its pull request description as an artifact. Nothing in the job pushes, opens a pull request or writes under `.github/`. No repository calls it yet ([the build](scripts/redline/README.md#the-build-redline-build-runyml-and-buildmjs)). |
 | [`public-text.yml`](.github/workflows/public-text.yml) | Fails a pull request that overuses em or en dashes, or whose title, description or a commit message credits a model or an AI tool. It reads the pull request through the API and checks out none of its code. |
 | [`actions/checkout-with-retry`](actions/checkout-with-retry/action.yml) | `actions/checkout` as up to three steps, so a job that starts before its runner's credential is in place still checks out. |
 | [`actions/drift-report`](actions/drift-report/action.yml) | The report step of a drift watcher: one issue under a label, one bot pull request carrying the changed files, and the issue closed on a clean run. |
@@ -229,7 +231,7 @@ full commit sha of `main`, so a change here reaches it only through a reviewed b
 | `fleet-status-self-test.yml` | Runs the two fleet-status actions from the checkout as a caller would, the status one as a dry run. |
 | `redline-sidecar-self-test.yml` | Hosted mode's dario sidecar for real: the start step of `redline-review.yml` against the pinned dario image and a stand-in lock service, on a pull request that changes either, and weekly. |
 | `scorecard-publish.yml` | This repository's caller of the Scorecard publish check, after each run of `scorecard.yml`. |
-| `truecopy-gate.yml` | Verifies `truecopy.lock`, the pins on the reviewer's and the fixer's tools, on every pull request and push to `main`. |
+| `truecopy-gate.yml` | Verifies `truecopy.lock`, the pins on the reviewer's, the fixer's and the builder's tools, on every pull request and push to `main`. |
 
 ## Calling it
 
@@ -270,13 +272,14 @@ and no runner label: it runs on a GitHub-hosted runner.
 
 ## The prompts live on the host
 
-The reviewer's rubric and the fixer's brief are never committed here. Each runner host carries them as
+The reviewer's rubric, the fixer's brief and the builder's prompt are never committed here. Each runner host carries them as
 files, and the workflows hand the scripts their paths:
 
 | file | read by | env | owner and mode |
 |---|---|---|---|
 | `/etc/askalf/redline-prompt.md` | `review.mjs` | `REDLINE_PROMPT_FILE` | readable by the account that runs the `redline` runner |
 | `/etc/askalf/fix-prompt.md` | `fix.mjs` | `FIX_PROMPT_FILE` | readable by the exec runner's account only, like `fix-exec.env`; never by an account that runs untrusted code |
+| `/etc/askalf/build-prompt.md` | `build.mjs` | `FIX_PROMPT_FILE`, as the build workflow sets it | the same as `fix-prompt.md` |
 
 The scripts have no bundled fallback: a variable that is unset, a file that cannot be read or an
 empty file fails the job with an error naming the variable. The tests use the three-line stand-ins in
@@ -286,7 +289,7 @@ definition, whatever it says.
 Next to the prompts the hosts hold the credential files the scripts read (`/etc/askalf/redline.env`,
 `/etc/askalf/fix-exec.env`): no secret is stored in GitHub. Hosted mode is the exception a caller
 chooses: there the review's key and rubric are that caller's repository secrets
-([Without a runner host](#without-a-runner-host)). The fix lane has no hosted mode.
+([Without a runner host](#without-a-runner-host)). The fix and build lanes have no hosted mode.
 
 `fix-exec.env` may also set `FIX_EFFORT` (`low`, `medium`, `high`, `xhigh` or `max`). A fix run
 answering the reviewer's first change request on a pull request sends that level as
@@ -429,23 +432,25 @@ already approved. Actions here must be pinned to a full commit sha (the reposito
 `redline-self-test.yml` runs the tests on every pull request, and it is a required check; a
 path-filtered required check never reports on a pull request outside its paths, so it is not path
 filtered. The tests touch no network: `review.test.mjs` and `fix.test.mjs` run against a stubbed
-GitHub and model, `local.test.mjs` runs the pre-push review against a throwaway repository and a
+GitHub and model, `build.test.mjs` runs the build lane against a stubbed model and a throwaway
+repository, `local.test.mjs` runs the pre-push review against a throwaway repository and a
 stubbed model, `public-text.test.mjs` runs the dash and credit rules,
 `report.test.mjs` runs the drift report against a fake `gh` and `git`, `fleet-status.test.mjs` and
 `check.test.mjs` run the fleet lanes and their checker against a stubbed GitHub and a fixture caller,
 `scorecard-publish/check.test.mjs` runs the Scorecard publish check against a stubbed scorecard.dev
 and GitHub,
 and `pin-bump.test.mjs` runs the pin bump's bump step against a fake `gh`. The same job runs the
-`tools.json` and `fix-tools.json` drift check.
+`tools.json`, `fix-tools.json` and `build-tools.json` drift check.
 
 ## The truecopy gate
 
 `truecopy.lock` pins the tool surfaces the models read: `scripts/redline/tools.json`, the reviewer's
-read-only tools, and `scripts/redline/fix-tools.json`, the fixer's tools, which write and run in the
-checkout. `truecopy-gate.yml` verifies both on every pull request and push to `main`:
-`dump-tools.mjs --check` proves each file still matches `TOOLS` in `review.mjs` or `fix.mjs`, then
+read-only tools, `scripts/redline/fix-tools.json`, the fixer's tools, which write and run in the
+checkout, and `scripts/redline/build-tools.json`, the same tools as the build lane words them.
+`truecopy-gate.yml` verifies all three on every pull request and push to `main`:
+`dump-tools.mjs --check` proves each file still matches `TOOLS` in `review.mjs`, `fix.mjs` or `build.mjs`, then
 [truecopy-action](https://github.com/askalf/truecopy-action) checks the Sigstore attestation of the
 `@askalf/truecopy` tarball it installs and runs `truecopy verify`, which proves the pinned bytes did
 not move and still scan clean. A changed tool fails until it is re-pinned with
-`truecopy add scripts/redline/tools.json` (or `fix-tools.json`). The prompts are not in the lock:
+`truecopy add scripts/redline/tools.json` (or `fix-tools.json`, or `build-tools.json`). The prompts are not in the lock:
 they live on the runner hosts, not in this repository, so there is nothing here to pin.

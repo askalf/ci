@@ -13,6 +13,18 @@ names the commit's date and the pull request it came from.
 
 ## November 2026
 
+- A build lane turns a ticket into a change. `redline-build-run.yml` and `scripts/redline/build.mjs`
+  start from a ticket's id, title and brief and a commit of the default branch, and leave one commit
+  on top of that commit, as the fix lane leaves one on a pull request's head. The work in the
+  checkout is the fix lane's own, split out of `fix.mjs` as `workCheckout` so both lanes run it: the
+  run account, the allowlist, the test gate, the limits, the secret checks and the commit as askalf.
+  The fix lane's behaviour is unchanged. A build writes nothing under `.github/`, must describe the
+  pull request its commit becomes (`fix_describe`, asked for once, then the summary stands in),
+  keeps the model's own subject prefix, and uploads the `redline-build` artifact: `build.json`,
+  `notes.md`, `description.md` and `build.bundle`. It pushes nothing and opens no pull request. The
+  ticket's title and brief show in the run's log, so on a public repository they are public. Its
+  tools are pinned as `build-tools.json`. No repository calls the workflow yet: a caller pins a
+  commit that is already on `main`, so it comes in a later change.
 - A review before the push can be given Redline's earlier verdicts on the branch.
   `local.mjs pack --earlier <file>`, once per file and oldest first, adds a verdict the author
   kept to the earlier reviews the brief shows: a CI review's `verdict.json`, or the saved output

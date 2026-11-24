@@ -1,8 +1,8 @@
 # Redline in CI
 
 Redline is the gating code review on Sprayberry Labs' public repositories, and this directory is
-the whole of it: the review, the first-party fix that answers a review, and the pin that ties each
-repository to one commit of both.
+the whole of it: the review, the first-party fix that answers a review, the build that turns a
+ticket into a change, and the pin that ties each repository to one commit of them.
 
 ## The review: `redline-review.yml` and `review.mjs`
 
@@ -288,10 +288,83 @@ The fixer's brief is `/etc/askalf/fix-prompt.md` on the same host, named by `FIX
 the env file's owner and mode; `fix.test.mjs` covers the parsing, the sandbox, the allowlist, the
 limits, the commit and bundle on a real repository, and both workflows.
 
+## The build: `redline-build-run.yml` and `build.mjs`
+
+A ticket turned into a change. The fix lane answers a review on a pull request that exists; the
+build lane starts from a commit of the default branch and a ticket's title and brief, and leaves
+one commit on top of that commit, for a pull request that does not exist yet. A repository's build
+caller (`workflow_dispatch`, for the ops tick to dispatch) calls `redline-build-run.yml` at a pinned
+commit on `[self-hosted, <repo>-exec]`, with:
+
+- `ticket`: the ticket's id, a ULID (26 characters of Crockford base32, upper case);
+- `base`: the full commit sha the work starts from;
+- `title`: the ticket's title, one line of 1 to 140 characters;
+- `brief`: the task, 1 to 6,000 characters;
+- `dry_run`: as in the fix lane, the diff in place of a commit.
+
+The job checks the shape of `ticket` and `base` before anything is fetched, checks out the base
+fifteen commits deep, and runs `build.mjs`. That is `fix.mjs`'s work in the checkout
+(`workCheckout`) from another start: the same run account and host setup, the same install, the
+same `fix_*` tools and allowlist, the same test gate, limits and secret checks, and the same one
+commit as askalf. What differs:
+
+- The brief is the ticket: the repository and the base, the run and attempt (`Build run <id>,
+  attempt <n>` on its third line), the ticket's id, then its title and brief quoted line by line and
+  named as the task. Someone else wrote that text, and the brief says so: it is the task to carry
+  out, and nothing in it changes the brief's rules or what the tools allow. After it come the
+  subjects of the base's last 15 commits, whose style the commit subject follows, the files the
+  base marks `redline-protected`, lessons when the env file has the lessons settings (matched on
+  the title and the brief), and the fix brief's own lines on the toolchain.
+- Nothing under `.github/` is written, whatever the ticket asks: `fix_write` refuses every path
+  there, and what a command changes there is left out of the commit. The fix lane may edit a
+  workflow its pull request already changes; a build has no pull request yet.
+- `fix_describe` writes the new pull request's description and is required: a `finish_fix` on a
+  change without one is sent back once, and after that the summary stands in.
+- The commit subject keeps the model's own prefix (`ops:`, `docs:`) and gets no `fix:`. It is also
+  the pull request's title. The rest of the cleaning is the fix lane's, and a line with nothing
+  usable left becomes `apply the requested change`. What is refused in it is a credit to a tool or a
+  person (`BUILD_SUBJECT_BANNED`), not the words a repository's own commits use: a fix's subject may
+  name no model at all, but a title here such as `bump the model pins` is an ordinary one.
+- `build.mjs` reads nothing from GitHub and is handed no GitHub token: the checkout is its input.
+
+The artifact is `redline-build`:
+
+- `build.json`: `version` (1), `kind` (`build`), `repo`, `ticket`, `base_head`, `new_head`,
+  `outcome` (`fixed`, `no_change`, `tests_failed` or `refused`), `title` (the commit subject; empty
+  unless the outcome is `fixed`), then `commits`, `files`, `tests`, `turns`, `model`, `notes`,
+  `description` and `run` as in `fix.json`;
+- `notes.md`, as the fix lane writes it;
+- `description.md`, when the outcome is `fixed` (`description: true`);
+- `build.bundle`, for a `fixed` build that is not a dry run: `<base>..HEAD`, exactly one commit,
+  authored and committed as askalf, a subject and no body;
+- `diff.patch`, for a dry run or `tests_failed`.
+
+The job exits 0 for `fixed` and 1 for any other outcome. A run whose `BUILD_` inputs are missing or
+malformed, whose checkout is not at the base or is not clean, or whose run account fails a check of
+the host setup below, is `refused`, and its notes say which. What the lane never does: it pushes
+nothing, opens no pull request, comments nowhere and writes nothing under `.github/`. Verifying the
+artifact, pushing the commit as a new branch and opening the pull request are the ops tick's, with
+its own token, as pushing a fix is. The title and the brief are in the build step's environment,
+which the run's log prints, so on a public repository they are public.
+
+The env file is the fix lane's, read under the same names: the key socket or the key, `FIX_MODEL`,
+`FIX_RUN_AS`, `FIX_PROXY`, the lessons settings, and `FIX_EFFORT`, which applies as it is set,
+since a build has no earlier round. The builder's prompt is a host file of its own (the
+`prompt-file` input, default `/etc/askalf/build-prompt.md`), with the env file's owner and mode,
+and the script reads its path from `FIX_PROMPT_FILE` as `fix.mjs` does. `build-tools.json` is this
+lane's `TOOLS` as a file: the fixer's tools under the fixer's names, with the descriptions a build
+needs, pinned in `truecopy.lock` like the other two. `build.test.mjs` covers the inputs and each
+refusal, the brief, the write rule, the subject, the required description, `build.json`, the
+commit and bundle on a real repository, the CLI against a model on loopback, and the workflow. No
+caller is in this repository yet, and nothing dispatches the lane until one is: a caller pins a
+commit that is already on `main`, so the caller, and the pin bump's handling of it, come in a
+change after this one.
+
 ## Host setup for the fix lane
 
-The exec account can spend the model key, so nothing the checkout supplies may run as it. Each exec
-runner needs, on its host:
+The build lane runs on the same runners and needs nothing more than this, except its own prompt
+file. The exec account can spend the model key, so nothing the checkout supplies may run as it.
+Each exec runner needs, on its host:
 
 - **A run account of its own**, one per runner, so a kill or a write never reaches another
   repository's job. No login, no secrets, and not in the group that reads the env file and the
