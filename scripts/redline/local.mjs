@@ -152,9 +152,11 @@ function ghApi(path) {
 
 /**
  * The line a local review prints above its verdict text, and the marker every verdict ends with:
- * the head is read from that footer, its own last line, never from a marker a finding quotes.
+ * the head is read from that footer, its own last line, never from a marker a finding quotes. A
+ * saved file holds one review: one such line, then verdict text, then the footer.
  */
-const LOCAL_REVIEW = /^Redline local review on .* \(nothing posted\): (APPROVE|REQUEST_CHANGES)\r?\n\r?\n([\s\S]*)$/m;
+const LOCAL_REVIEW_START = /^Redline local review on /gm;
+const LOCAL_REVIEW = /^Redline local review on .* \(nothing posted\): (APPROVE|REQUEST_CHANGES)\n\n([\s\S]*)$/m;
 const HEAD_FOOTER = /(?:^|\n)<!-- redline:head=([0-9a-f]{40}) -->[ \t]*$/;
 
 /**
@@ -175,11 +177,17 @@ export function earlierReview(text, name = 'the file') {
     }
     return { state, commit_id: v.head_sha, body: v.body };
   }
-  const m = LOCAL_REVIEW.exec(text);
-  const body = m ? m[2].replace(/\r\n/g, '\n').trimEnd() : '';
-  const head = HEAD_FOOTER.exec(body)?.[1];
-  if (!m || !head) throw new Error(`${name} is neither a verdict.json nor the saved output of a local review (its "Redline local review on ..." line and the head marker the verdict ends with)`);
-  return { state: m[1] === 'APPROVE' ? 'APPROVED' : 'CHANGES_REQUESTED', commit_id: head, body: body.trim() };
+  const saved = String(text).replace(/\r\n/g, '\n');
+  // Two runs in one file (tee -a) would give one run's verdict and another's head: refused, as is
+  // any file whose single review is not verdict text ending in its footer.
+  const runs = saved.match(LOCAL_REVIEW_START)?.length ?? 0;
+  if (runs > 1) throw new Error(`${name} holds ${runs} local reviews; keep one review per file and give each its own --earlier`);
+  const m = runs === 1 ? LOCAL_REVIEW.exec(saved) : null;
+  const body = m ? m[2].trimEnd() : '';
+  const footer = HEAD_FOOTER.exec(body);
+  if (!m || !footer) throw new Error(`${name} is neither a verdict.json nor the saved output of a local review (its "Redline local review on ..." line and the head marker the verdict ends with)`);
+  if (!body.slice(0, footer.index).trim()) throw new Error(`${name} has a local review line and a head marker but no verdict text between them`);
+  return { state: m[1] === 'APPROVE' ? 'APPROVED' : 'CHANGES_REQUESTED', commit_id: footer[1], body: body.trim() };
 }
 
 /**
@@ -429,7 +437,10 @@ async function main() {
       process.exit(2);
     }
     console.log(`Redline local review on ${result.model} (nothing posted): ${result.verdict}\n\n${result.body}`);
-    process.exit(result.verdict === 'REQUEST_CHANGES' ? 1 : 0);
+    // Exit once stdout has drained: process.exit would drop what a pipe has not taken yet, the
+    // head marker the verdict ends with included, and the saved review could not be read back.
+    process.exitCode = result.verdict === 'REQUEST_CHANGES' ? 1 : 0;
+    return;
   }
   console.error('usage: local.mjs pack [--base <ref>] [--pr <n>] [--title <t>] [--body-file <f>] [--earlier <file>]... | local.mjs review <dir>');
   process.exit(2);
