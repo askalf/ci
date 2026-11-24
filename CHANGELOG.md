@@ -13,6 +13,13 @@ names the commit's date and the pull request it came from.
 
 ## November 2026
 
+- A review before the push reads on the models the review in CI reads on. `local.mjs review` took
+  its models from the env file alone and never laid the pins of `REDLINE_MODELS_FILE` over them, as
+  `review.mjs` does. On a host that keeps model keys in the env file for callers pinned to an older
+  Redline, a branch was read by one model before the push and by another in CI: on 2026-11-24 a
+  local review ran on `gpt-6-astra` while the pins named `gpt-6.2-astra`. It now reads the pins
+  the same way (`hostSettings`), prints the routine and deep models it holds, and stops when the
+  models file cannot be read.
 - The Redline model bump reads its records with the job's own token. It reads askalf/redline-rubric's
   artifacts because that repository is public (the bump's run of 2026-11-22 read a second-lens
   record with it), so the pin bump App's second token, minted with Actions read, and its warning
