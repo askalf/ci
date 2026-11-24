@@ -2265,6 +2265,13 @@ console.log('\n  model pins: the models file, the newest of a family, the list d
   check('an env file cap that is not a count is replaced without being printed', pasted.secrets.REDLINE_ROUND_CAP === '8' && pasted.notes.length === 1
     && pasted.notes[0] === 'REDLINE_ROUND_CAP in the env file (not a count, so the default) is replaced by the models file (8)' && !pasted.notes.join().includes('pasted'));
   check('an empty env file cap is said the same way', capFrom({ REDLINE_ROUND_CAP: '' }, 'REDLINE_ROUND_CAP=8\n').notes[0] === 'REDLINE_ROUND_CAP in the env file (not a count, so the default) is replaced by the models file (8)');
+  // A quoted count with spaces in it: the env parser keeps the spaces and roundCapOf trims them, so it is a count, and 0 is no cap.
+  const padded = parseEnvFile('REDLINE_ROUND_CAP=" 0 "\n');
+  check('a quoted, space-padded count in the env file is said as the count it is read as', padded.REDLINE_ROUND_CAP === ' 0 ' && roundCapOf(padded.REDLINE_ROUND_CAP) === 0
+    && capFrom(padded, 'REDLINE_ROUND_CAP=8\n').notes[0] === 'REDLINE_ROUND_CAP in the env file (0) is replaced by the models file (8)');
+  check('the same count written another way in the two files is no note', capFrom({ REDLINE_ROUND_CAP: ' 8 ' }, 'REDLINE_ROUND_CAP=8\n').notes.length === 0 && capFrom({ REDLINE_ROUND_CAP: '08' }, 'REDLINE_ROUND_CAP=8\n').notes.length === 0);
+  const paddedPin = capFrom({ REDLINE_ROUND_CAP: '4' }, 'REDLINE_ROUND_CAP=" 8 "\n');
+  check('a quoted, space-padded count in the models file is taken trimmed', paddedPin.error === undefined && paddedPin.secrets.REDLINE_ROUND_CAP === '8' && paddedPin.notes[0] === 'REDLINE_ROUND_CAP in the env file (4) is replaced by the models file (8)');
 
   let seen = null;
   const listing = async (url, init) => { seen = { url, key: init.headers['x-api-key'] }; return new Response(JSON.stringify({ data: [{ id: 'gpt-6.2-sol' }, { id: 'claude-opus-5-5' }, { id: 'gpt-6.2-sol' }, { id: 7 }, {}] }), { status: 200 }); };

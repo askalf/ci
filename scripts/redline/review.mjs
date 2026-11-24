@@ -1883,8 +1883,9 @@ export function compareVersions(a, b) {
  * `<KEY>_TRACKS` names the family the pin follows. ROUND_CAP_KEY, when the file sets it, replaces
  * the env file's the same way. There it must be a whole number from 0 to 999 and anything else is
  * an error, where the env file's own value that is not one counts as the default (roundCapOf).
- * The note gives the env file's value only when it is such a number: that file holds the host's
- * secrets, and whatever else was typed on that line stays out of the log.
+ * Both values are read trimmed, as roundCapOf reads the env file's, and there is a note only when
+ * they are not the same count. The note gives the env file's value only when it is a count: that
+ * file holds the host's secrets, and whatever else was typed on that line stays out of the log.
  * Returns { secrets, tracks, notes } or { error }.
  */
 export function withModelsFile(secrets, readFile = (p) => readFileSync(p, 'utf8')) {
@@ -1910,11 +1911,14 @@ export function withModelsFile(secrets, readFile = (p) => readFileSync(p, 'utf8'
     }
   }
   if (Object.hasOwn(pins, ROUND_CAP_KEY)) {
-    const cap = pins[ROUND_CAP_KEY];
+    const cap = String(pins[ROUND_CAP_KEY]).trim();
     if (!ROUND_CAP_VALUE.test(cap)) return { error: `${ROUND_CAP_KEY} in ${file} must be a whole number from 0 to 999 (0 is no cap); got ${cap || 'nothing'}` };
-    if (Object.hasOwn(secrets, ROUND_CAP_KEY) && secrets[ROUND_CAP_KEY] !== cap) {
-      const was = ROUND_CAP_VALUE.test(secrets[ROUND_CAP_KEY]) ? secrets[ROUND_CAP_KEY] : 'not a count, so the default';
-      notes.push(`${ROUND_CAP_KEY} in the env file (${was}) is replaced by the models file (${cap})`);
+    if (Object.hasOwn(secrets, ROUND_CAP_KEY)) {
+      const old = String(secrets[ROUND_CAP_KEY]).trim();
+      const oldIsCount = ROUND_CAP_VALUE.test(old);
+      if (!oldIsCount || Number(old) !== Number(cap)) {
+        notes.push(`${ROUND_CAP_KEY} in the env file (${oldIsCount ? old : 'not a count, so the default'}) is replaced by the models file (${cap})`);
+      }
     }
     out[ROUND_CAP_KEY] = cap;
   }
