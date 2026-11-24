@@ -1851,6 +1851,23 @@ console.log('\n  the delta since the last verdict');
       htmlToken('<a href="x>y">', 0).end === 14 && htmlToken('x</DETAILS >', 1).name === 'details' && htmlToken('x</DETAILS >', 1).closing && htmlToken('<details-panel>', 0).name === 'details-panel'
       && htmlToken('<br/>', 0).end === 5 && htmlToken('<!-- c -->x', 0).end === 10 && htmlToken('a < b', 2) === null && htmlToken('<2.0', 0) === null
       && [['<!-- c', 0], ['<a href="x', 0], ['<a', 0], ['<a b=>', 0], ['</a b>', 0], ['</>', 0], ['<!doctype x>', 0], ['<?x?>', 0], ['<a"b">', 0]].every(([l, p]) => typeof htmlToken(l, p) === 'symbol'));
+    check('...a comment HTML can end before its --> keeps the block: --!> before it, <!--> and <!--->',
+      same(...block('Release notes', 'UPSTREAM-X', '<!-- note --!> </details> A MAINTAINER\'S NOTE <!-- end -->', 'MORE'), 'TAIL')
+      && same(...block('Release notes', '<!--> </details> NOTE -->'), 'TAIL') && same(...block('Release notes', '<!---> </details> NOTE -->'), 'TAIL')
+      && typeof htmlToken('<!-- a --!> b -->', 0) === 'symbol' && htmlToken('<!---->', 0).end === 7 && htmlToken('<!-- a -- b -->', 0).end === 15);
+    check('...after a blank line a closing details tag that may be code keeps the block: in a code span, with or without a real close after it, in a span over lines, after a fence, indented',
+      same(...block('Release notes', 'X', '', 'Close it with `</details>` here.', 'UPSTREAM-MORE'), 'TAIL')
+      && same('<details>', '<summary>Release notes</summary>', 'X', '', 'Close it with `</details>` here.', 'UPSTREAM-MORE')
+      && same(...block('Release notes', 'X', '', 'a `span', '</details> still code`', 'UPSTREAM-MORE'), 'TAIL')
+      && same(...block('Release notes', 'X', '', '~~~', '</details>', '~~~', 'UPSTREAM-MORE'), 'TAIL')
+      && same(...block('Release notes', 'X', '', '    </details>', 'UPSTREAM-MORE'), 'TAIL') && same(...block('Release notes', 'X', '', '\t</details>', 'UPSTREAM-MORE'), 'TAIL')
+      && gone(...block('Release notes', 'UPSTREAM-A `code` before the blank line', '', 'UPSTREAM-B')));
+    check('...a backtick in a link destination or a link definition opens no code span: the tag after it stops the filter, and the element and its subsection survive together',
+      same('[docs](https://example.org/`v) <details> then `', ...block('Commits', 'THE TEAM\'S OWN LIST'), 'AFTER', '</details>')
+      && same('[docs]: https://example.org/`v <details> `', ...block('Commits', 'X'), '</details>'));
+    check('...a summary that is not exactly the line Dependabot writes is not the shape: its block and the blocks after it are kept',
+      ['  COMMITS  ', 'commits', ' Commits', 'Commits ', 'Release Notes'].every((s) => same(...block(s, 'KEEP ME'), ...block('Commits', 'LATER')))
+      && same('<details>', '<summary>Commits</summary> ', 'X', '</details>', ...block('Changelog', 'LATER')));
     const prBy = (user, body = BODY) => buildBrief({ number: 7, title: 'build(deps): bump the group', body, user, head: { ref: 'dependabot/npm_and_yarn/group', sha: HEAD }, base: { ref: 'main', repo: { full_name: 'askalf/r' } } }, [], [], 'THE DIFF');
     const bot = prBy({ login: DEPENDABOT_LOGIN, type: 'Bot' });
     check('buildBrief: a Dependabot pull request is read without the copied text, so a finding cannot quote it; what a person added can still be quoted',

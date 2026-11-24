@@ -1096,12 +1096,13 @@ export function askForSubmit(messages) {
 
 /** The login GitHub gives Dependabot's pull requests. No user account can hold a name that ends in `[bot]`. */
 export const DEPENDABOT_LOGIN = 'dependabot[bot]';
-/** The `<details>` blocks Dependabot fills with other projects' text, by their summary. Its own commands block is not one. */
-export const DEPENDABOT_COPIED = new Set(['release notes', 'changelog', 'commits']);
+/**
+ * The `<details>` blocks Dependabot fills with other projects' text, by their summary as Dependabot
+ * writes it: the line `<summary>T</summary>`, T exactly one of these. Its own commands block is not one.
+ */
+export const DEPENDABOT_COPIED = new Set(['Release notes', 'Changelog', 'Commits']);
 export const isDependabot = (pr) => pr?.user?.login === DEPENDABOT_LOGIN && pr?.user?.type === 'Bot';
 
-/** The second line of a copied block as Dependabot writes it: the summary alone on its line. */
-const COPIED_SUMMARY = /^<summary>([^<]*)<\/summary>[ \t]*$/;
 const BROKEN = Symbol('broken');
 
 /**
@@ -1109,12 +1110,16 @@ const BROKEN = Symbol('broken');
  * complete tag (quoted attribute values read whole, the name read whole, so `details-panel` is not
  * `details`), null when the `<` is text, and BROKEN for markup this line does not finish: a
  * comment or tag that runs past the line, a declaration, a closing tag with anything after its
- * name. Pure.
+ * name. A comment HTML can end somewhere other than its first `-->` (at `--!>`, or at once in
+ * `<!-->` and `<!--->`) is BROKEN too, so no reader is taken past where another would stop. Pure.
  */
 export function htmlToken(line, p) {
   if (line.startsWith('<!--', p)) {
+    if (line.startsWith('>', p + 4) || line.startsWith('->', p + 4)) return BROKEN;
     const e = line.indexOf('-->', p + 4);
-    return e < 0 ? BROKEN : { end: e + 3 };
+    if (e < 0) return BROKEN;
+    const bang = line.indexOf('--!>', p + 4);
+    return bang >= 0 && bang < e ? BROKEN : { end: e + 3 };
   }
   if (line[p + 1] === '!' || line[p + 1] === '?') return BROKEN;
   const closing = line[p + 1] === '/';
@@ -1159,19 +1164,24 @@ export function htmlToken(line, p) {
  * block of its own, markup a line does not finish, or no closing tag. A tag inside a comment or a
  * quoted attribute value is not a tag. After a blank line inside the block Markdown is read again
  * and can make a tag's own opening literal, so from there a comment or tag that holds the text of
- * a details tag is not skipped: the block is not left out. The end found is never past the first
- * closing details tag an HTML reader would take. Pure.
+ * a details tag is not skipped: the block is not left out. From there a details tag may also be
+ * code (in a code span, one that runs over lines, a fenced or an indented block), so once a
+ * backtick or a fence has been read, or on an indented line, a details tag keeps the block too.
+ * The end found is never past the first closing details tag an HTML reader would take. Pure.
  */
 function copiedBlockEnd(lines, from) {
   let markdown = false;
+  let code = false;
   for (let l = from; l < lines.length; l++) {
     const line = lines[l].replace(/\r$/, '');
     if (!line.trim()) { markdown = true; continue; }
+    if (markdown && (line.includes('`') || /^ {0,3}~{3,}/.test(line))) code = true;
+    const literal = code || (markdown && /^(?: *\t| {4})/.test(line));
     for (let p = line.indexOf('<'); p >= 0; p = line.indexOf('<', p)) {
       const tok = htmlToken(line, p);
       if (tok === BROKEN) return null;
       if (!tok) { p++; continue; }
-      if (tok.name === 'details') return tok.closing ? { line: l, col: tok.end } : null;
+      if (tok.name === 'details') return tok.closing && !literal ? { line: l, col: tok.end } : null;
       if (markdown && /<\/?details/i.test(line.slice(p + 1, tok.end))) return null;
       p = tok.end;
     }
@@ -1204,12 +1214,17 @@ export function withoutCodeSpans(line) {
  * HTML block is open, which a tag opens and a blank line closes. Inside an HTML block backticks
  * are text; outside one a code span is code, so a tag named in a code span is not markup. An
  * escaped backtick is not passed over: it opens no code span and this reader does not unescape.
+ * A backtick in a link destination or title, or in a link reference definition, is part of it
+ * and opens no code span, so code spans are read only before the first `](` on the line, and
+ * not at all on a line that defines a link.
  */
 function passedOver(line, html) {
   if (!line.trim()) return false;
   if (/^ {0,3}(?:`{3,}|~{3,})/.test(line)) return null;
   if (!html && line.includes('\\`')) return null;
-  const read = html ? line : withoutCodeSpans(line);
+  const link = /^ {0,3}\[[^\]]*\]:/.test(line) ? 0 : line.indexOf('](');
+  const inline = link < 0 ? line : line.slice(0, link);
+  const read = html ? line : withoutCodeSpans(inline) + line.slice(inline.length);
   const text = read.replace(/<br ?\/?>/g, '');
   if (/<[A-Za-z/!?]/.test(text)) return null;
   return html || text !== read;
@@ -1244,8 +1259,8 @@ export function withoutCopiedNotes(body) {
   let i = 0;
   for (; i < lines.length; i++) {
     const line = bare(i);
-    const title = line === '<details>' ? COPIED_SUMMARY.exec(bare(i + 1))?.[1].trim() : undefined;
-    if (title !== undefined && DEPENDABOT_COPIED.has(title.toLowerCase())) {
+    const title = line === '<details>' ? [...DEPENDABOT_COPIED].find((t) => bare(i + 1) === `<summary>${t}</summary>`) : undefined;
+    if (title !== undefined) {
       const end = copiedBlockEnd(lines, i + 2);
       if (!end) break;
       const after = lines[end.line].slice(end.col);
