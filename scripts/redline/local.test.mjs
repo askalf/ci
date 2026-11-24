@@ -384,7 +384,7 @@ const unpacked = mkdtempSync(join(tmpdir(), 'redline-local-in-'));
   };
   const asBot = await briefOf({ author: DEPENDABOT_LOGIN, authorType: 'Bot' });
   check('a packed Dependabot pull request is read as CI reads it, without the text Dependabot copies in',
-    !asBot.includes('UPSTREAM-NOTE') && asBot.includes('Updates `alpha` from 1.0.0 to 1.0.1') && asBot.includes('[Release notes: copied in by Dependabot'), asBot);
+    !asBot.includes('UPSTREAM-NOTE') && asBot.includes('Updates `alpha` from 1.0.0 to 1.0.1') && asBot.includes('[Release notes: copied in by Dependabot'));
   check('...a pack with no author type, or a person\'s, is not filtered',
     (await briefOf({ author: DEPENDABOT_LOGIN, authorType: '' })).includes('UPSTREAM-NOTE') && (await briefOf({ author: 'askalf', authorType: 'User' })).includes('UPSTREAM-NOTE'));
   writeFileSync(join(unpacked, 'change.json'), JSON.stringify({ repo: 'a/b' }));

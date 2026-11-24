@@ -1802,11 +1802,11 @@ console.log('\n  the delta since the last verdict');
     const own = withoutCopiedNotes(BODY);
     const KEPT = ['| [alpha](https://example.com/alpha) | `1.0.0` | `1.0.1` |', 'Updates `alpha` from 1.0.0 to 1.0.1', '<br />', 'Updates `beta` from 2.0.0 to 2.1.0', 'A NOTE A PERSON ADDED, on a requirement <2.0 and `code`'];
     check('withoutCopiedNotes: the three copied blocks go, each leaving one line that names it',
-      !own.includes('UPSTREAM-') && ['Release notes', 'Changelog', 'Commits'].every((s) => own.split('\n').filter((l) => l === MARK(s)).length === 1), own);
+      !own.includes('UPSTREAM-') && ['Release notes', 'Changelog', 'Commits'].every((s) => own.split('\n').filter((l) => l === MARK(s)).length === 1));
     check('...Dependabot\'s own lines and a line a person added stay, and the commands block is kept as written',
-      KEPT.every((l) => own.split('\n').includes(l)) && own.endsWith(COMMANDS.join('\n')), own);
+      KEPT.every((l) => own.split('\n').includes(l)) && own.endsWith(COMMANDS.join('\n')));
     const crlf = withoutCopiedNotes(bodyOf().join('\r\n'));
-    check('...the same with CRLF line ends', !crlf.includes('UPSTREAM-') && KEPT.every((l) => crlf.split('\r\n').includes(l)) && crlf.split('\r\n').includes(MARK('Changelog')) && crlf.endsWith(COMMANDS.join('\r\n')), crlf);
+    check('...the same with CRLF line ends', !crlf.includes('UPSTREAM-') && KEPT.every((l) => crlf.split('\r\n').includes(l)) && crlf.split('\r\n').includes(MARK('Changelog')) && crlf.endsWith(COMMANDS.join('\r\n')));
     const same = (...lines) => withoutCopiedNotes(lines.join('\n')) === lines.join('\n');
     const LATER = block('Commits', 'A LATER BLOCK');
     check('...a summary line that is not one of the three exact lines is not a copied block: it and a block after it are kept',
@@ -1848,7 +1848,7 @@ console.log('\n  the delta since the last verdict');
     check('...other markup outside the blocks stops the filter: a closing tag with nothing open, another element, a comment, a line break written another way',
       same('a stray </details> in a sentence', ...LATER) && same('<div>', ...LATER, '</div>') && same('<!-- a note', ...LATER, '-->') && same('<!-- a note -->', ...LATER) && same('<br>', ...LATER) && same('<br/>', ...LATER));
     const afterStop = withoutCopiedNotes([...block('Changelog', '<p>UPSTREAM-A</p>'), '<span>a person\'s markup</span>', ...LATER].join('\n'));
-    check('...a block before the line that stops the filter is still left out', afterStop === [MARK('Changelog'), '<span>a person\'s markup</span>', ...LATER].join('\n'), afterStop);
+    check('...a block before the line that stops the filter is still left out', afterStop === [MARK('Changelog'), '<span>a person\'s markup</span>', ...LATER].join('\n'));
     check('...an empty or missing description is an empty one', withoutCopiedNotes('') === '' && withoutCopiedNotes(null) === '' && withoutCopiedNotes(undefined) === '');
     check('htmlToken: a complete tag with its whole name and its quoted values, text, and markup the line does not finish',
       htmlToken('<a href="x>y">', 0).end === 14 && htmlToken('x</DETAILS >', 1).name === 'details' && htmlToken('x</DETAILS >', 1).closing && htmlToken('<details-panel>', 0).name === 'details-panel'
@@ -1857,7 +1857,7 @@ console.log('\n  the delta since the last verdict');
     const prBy = (user, body = BODY) => buildBrief({ number: 7, title: 'build(deps): bump the group', body, user, head: { ref: 'dependabot/npm_and_yarn/group', sha: HEAD }, base: { ref: 'main', repo: { full_name: 'askalf/r' } } }, [], [], 'THE DIFF');
     const bot = prBy({ login: DEPENDABOT_LOGIN, type: 'Bot' });
     check('buildBrief: a Dependabot pull request is read without the copied text, so a finding cannot quote it; what a person added can still be quoted',
-      !bot.includes('UPSTREAM-') && !quoteIsGrounded(NOTE, corpusOf(bot)) && quoteIsGrounded('A NOTE A PERSON ADDED, on a requirement <2.0 and `code`', corpusOf(bot)) && bot.includes(MARK('Release notes')), bot);
+      !bot.includes('UPSTREAM-') && !quoteIsGrounded(NOTE, corpusOf(bot)) && quoteIsGrounded('A NOTE A PERSON ADDED, on a requirement <2.0 and `code`', corpusOf(bot)) && bot.includes(MARK('Release notes')));
     check('...the same description is not filtered for a person, for an account that only carries the name, for a bot under another name, or with no author type',
       [{ login: 'a', type: 'User' }, { login: DEPENDABOT_LOGIN, type: 'User' }, { login: 'dependabot', type: 'Bot' }, { login: DEPENDABOT_LOGIN }].every((u) => quoteIsGrounded(NOTE, corpusOf(prBy(u)))));
     const LONG = bodyOf(`<li>${'UPSTREAM-LONG '.repeat(700)}</li>`).join('\n');
