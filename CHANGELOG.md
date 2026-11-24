@@ -26,6 +26,16 @@ names the commit's date and the pull request it came from.
   secret in the description still blocks. It is asked once, and only with a turn left; a review
   that answers the same way approves as before, and its body now says that it asked for changes
   only for findings that do not block. A review held only by wording is not asked.
+- Redline reads a Dependabot pull request's description without the text Dependabot copies in
+  from the dependencies' repositories. Read from the top, a `<details>` block in exactly the
+  form Dependabot writes, under its Release notes, Changelog or Commits summary line, is one line
+  in the brief that names it; at the first line that is neither such a block nor plain text, the
+  filter stops and the rest is read as written. Markdown is not interpreted. That text is another project's and does not ship; it could use up the 8,000
+  characters the brief gives a description before Dependabot's own lines, and a credit line in a
+  dependency's release notes blocked a dependency pull request as attribution. Dependabot's own
+  lines and anything outside those blocks are read as before, so attribution or a secret there
+  still blocks. A block of that shape is left out whoever wrote it. `local.mjs pack --pr` carries
+  the author's account type, so a local review reads the description as CI does.
 - A review before the push can be given Redline's earlier verdicts on the branch.
   `local.mjs pack --earlier <file>`, once per file and oldest first, adds a verdict the author
   kept to the earlier reviews the brief shows: a CI review's `verdict.json`, or the saved output

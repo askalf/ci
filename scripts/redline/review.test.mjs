@@ -1854,6 +1854,87 @@ console.log('\n  the delta since the last verdict');
   const prOf = (since) => buildBrief({ number: 7, title: 't', body: '', user: { login: 'a' }, head: { ref: 'h', sha: HEAD }, base: { ref: 'main', repo: { full_name: 'askalf/r' } } }, [], [], 'THE DIFF', [], since);
   check('buildBrief: a first review heads the diff plainly; a round with a delta says since when, and where the whole change is',
     prOf(null).includes('\nDiff:\nTHE DIFF') && prOf({ head: OLD, files: DELTA }).includes('Diff since the last review, at aaaaaaa (the whole change against main is one redline_diff call away') && prOf({ head: OLD, files: DELTA }).includes('THE DIFF'));
+  {
+    const { withoutCopiedNotes, htmlToken, DEPENDABOT_LOGIN, corpusOf, quoteIsGrounded } = reviewModule;
+    const block = (summary, ...inner) => ['<details>', `<summary>${summary}</summary>`, ...inner, '</details>'];
+    const NOTE = 'UPSTREAM-NOTE fix the parser, by a contributor and a tool';
+    const MARK = (s) => `[${s}: copied in by Dependabot from the dependency's repository, not shown]`;
+    const COMMANDS = block('Dependabot commands and options', '<br />', '', 'You can trigger Dependabot actions by commenting on this PR:');
+    const bodyOf = (...notes) => [
+      'Bumps the minor-and-patch group with 2 updates:', '', '| Package | From | To |', '| --- | --- | --- |', '| [alpha](https://example.com/alpha) | `1.0.0` | `1.0.1` |', '',
+      'Updates `alpha` from 1.0.0 to 1.0.1',
+      ...block('Release notes', '<p><em>Sourced from <a href="https://example.com/alpha/releases">alpha\'s releases</a>.</em></p>', '<blockquote>', '<h2>v1.0.1</h2>', '<ul>', `<li>${NOTE} <!-- raw HTML omitted --></li>`, ...notes, '</ul>', '</blockquote>'),
+      ...block('Changelog', '<blockquote>', '<p>UPSTREAM-CHANGELOG</p>', '</blockquote>'),
+      ...block('Commits', '<ul>', '<li><a href="https://example.com/c/1"><code>abc1234</code></a> UPSTREAM-COMMIT</li>', '</ul>'),
+      '<br />', '', 'Updates `beta` from 2.0.0 to 2.1.0', 'A NOTE A PERSON ADDED, on a requirement <2.0 and `code`', '', '---', '',
+      ...COMMANDS,
+    ];
+    const BODY = bodyOf().join('\n');
+    const own = withoutCopiedNotes(BODY);
+    const KEPT = ['| [alpha](https://example.com/alpha) | `1.0.0` | `1.0.1` |', 'Updates `alpha` from 1.0.0 to 1.0.1', '<br />', 'Updates `beta` from 2.0.0 to 2.1.0', 'A NOTE A PERSON ADDED, on a requirement <2.0 and `code`'];
+    check('withoutCopiedNotes: the three copied blocks go, each leaving one line that names it',
+      !own.includes('UPSTREAM-') && ['Release notes', 'Changelog', 'Commits'].every((s) => own.split('\n').filter((l) => l === MARK(s)).length === 1));
+    check('...Dependabot\'s own lines and a line a person added stay, and the commands block is kept as written',
+      KEPT.every((l) => own.split('\n').includes(l)) && own.endsWith(COMMANDS.join('\n')));
+    const crlf = withoutCopiedNotes(bodyOf().join('\r\n'));
+    check('...the same with CRLF line ends', !crlf.includes('UPSTREAM-') && KEPT.every((l) => crlf.split('\r\n').includes(l)) && crlf.split('\r\n').includes(MARK('Changelog')) && crlf.endsWith(COMMANDS.join('\r\n')));
+    const same = (...lines) => withoutCopiedNotes(lines.join('\n')) === lines.join('\n');
+    const LATER = block('Commits', 'A LATER BLOCK');
+    check('...a summary line that is not one of the three exact lines is not a copied block: it and a block after it are kept',
+      ['<summary>  COMMITS  </summary>', '<summary>commits</summary>', '<summary>Commits </summary>', '<summary> Commits</summary>', '<summary>Commits</summary> x', '<summary>Maintainer changes</summary>', '<summary>Notes from the team</summary>']
+        .every((s) => same('<details>', s, 'A MAINTAINER\'S TEXT', '</details>', ...LATER)));
+    check('...a block under another summary is kept whole, a block of a copied title inside it and all after it too',
+      same(...block('Notes from the team', 'BEFORE', ...block('Commits', 'THE TEAM\'S OWN LIST'), 'AFTER'), 'TAIL', ...LATER));
+    check('...a block that never closes is kept as written with all after it, a closed block of a copied title inside it too',
+      same('Updates `alpha` from 1.0.0 to 1.0.1', '<details>', '<summary>Release notes</summary>', 'UPSTREAM-OPEN')
+      && same('<details>', '<summary>Release notes</summary>', 'UPSTREAM-OPEN', ...block('Changelog', 'INNER'), 'AFTER'));
+    check('...a copied-title block that holds a block of its own, or a details tag\'s text anywhere (an attribute value, a longer element name, prose), is kept whole with all after it',
+      same(...block('Release notes', 'OUTER', ...block('More', 'NESTED'), 'OUTER AGAIN'), ...LATER) && same(...block('Release notes', '<a title="</details>">X</a>', 'Y'), ...LATER)
+      && same(...block('Release notes', "<a title='<details>'>X</a>"), ...LATER) && same(...block('Changelog', '<details-panel>X</details-panel>'), ...LATER) && same(...block('Changelog', 'the &lt;/details&gt; tag, written </DETAILS here'), ...LATER));
+    check('...a comment that is not the renderer\'s one comment keeps the block: an ending HTML also takes, a tag inside it, one that runs past its line',
+      same(...block('Release notes', '<!-- note --!> </details> A MAINTAINER\'S NOTE <!-- end -->', 'MORE'), 'TAIL', ...LATER) && same(...block('Release notes', '<!-- note --!> A MAINTAINER\'S NOTE <!-- end -->', 'MORE'), ...LATER)
+      && same(...block('Release notes', '<!-- a closing tag: x -->', 'Y'), ...LATER) && same(...block('Release notes', 'X', '<!-- never closed', 'Y'), ...LATER) && same(...block('Release notes', '<!--raw HTML omitted-->'), ...LATER));
+    check('...a blank line inside a block keeps it, so a tag that Markdown would read as code is never taken for the block\'s end, with a real closing tag after it or none',
+      same(...block('Release notes', '<p>X</p>', '', 'A paragraph that names `</details>` in code, then more.', 'MORE UPSTREAM TEXT'), ...LATER)
+      && same('<details>', '<summary>Release notes</summary>', '<p>X</p>', '', 'A paragraph that names `</details>` in code, then more.', 'MORE UPSTREAM TEXT')
+      && same(...block('Release notes', '<pre><code>a', '', 'b', '</code></pre>'), ...LATER)
+      && same(...block('Release notes', 'first\r\rsecond'), ...LATER) && same(...block('Release notes', 'first\rsecond'), ...LATER));
+    check('...markup that is not the renderer\'s keeps the block: an element outside its set, a tag or a quote that runs past its line, a declaration, a bare <, a closing tag with more after its name',
+      same(...block('Release notes', '<span>X</span>'), ...LATER) && same(...block('Release notes', '<textarea>'), ...LATER) && same(...block('Release notes', '<a title="x', '">'), ...LATER) && same(...block('Release notes', '<a title="x>'), ...LATER)
+      && same(...block('Release notes', '<![CDATA[ x ]]>'), ...LATER) && same(...block('Release notes', 'a < b'), ...LATER) && same(...block('Release notes', 'X', '</p x>'), ...LATER));
+    check('...a less-than sign inside a quoted attribute value is not the renderer\'s, which escapes it: the block and what follows are kept; the escaped form in the same place is left out',
+      same(...block('Release notes', '<a title="size < 2">limit</a>', 'A MAINTAINER\'S TEXT'), 'A SUFFIX', ...LATER) && same(...block('Release notes', "<a title='<b'>x</a>"), ...LATER)
+      && withoutCopiedNotes([...block('Release notes', '<a title="size &lt; 2">limit</a>', 'UPSTREAM-TEXT'), 'A SUFFIX'].join('\n')) === [MARK('Release notes'), 'A SUFFIX'].join('\n'));
+    check('...text after the closing tag on its line, or before it, keeps the block, so a note there is read',
+      same('<details>', '<summary>Changelog</summary>', 'X', '</details> A NOTE RIGHT AFTER', 'NEXT', ...LATER) && same('<details>', '<summary>Changelog</summary>', 'X', 'Y</details>', ...LATER) && same('<details>', '<summary>Changelog</summary>', 'X', ' </details>', ...LATER));
+    check('...an opening that is not the bare tag alone on its line is not the shape, and stops the filter',
+      same('See <details>', '<summary>Changelog</summary>', 'X', '</details>', ...LATER) && same('<details open>', '<summary>Changelog</summary>', 'X', '</details>', ...LATER) && same('<details>', '', '<summary>Changelog</summary>', 'X', '</details>', ...LATER)
+      && same('<details><summary>Changelog</summary>', 'X', '</details>', ...LATER) && same(' <details>', '<summary>Changelog</summary>', 'X', '</details>', ...LATER) && same('<DETAILS>', '<summary>Changelog</summary>', 'X', '</details>', ...LATER));
+    check('...a fenced example of the shape survives byte for byte, with a tilde fence, an indented fence and indented code too',
+      same('An example:', '```html', ...block('Commits', 'A MAINTAINER\'S EXAMPLE'), '```', 'after it', ...LATER) && same('~~~', ...block('Commits', 'EXAMPLE'), '~~~') && same('   ```', ...block('Commits', 'EXAMPLE'), '   ```')
+      && same(...block('Changelog', 'X').map((l) => `    ${l}`), ...LATER));
+    check('...Markdown is not interpreted: a tag named in a code span, in a link, or after an escaped backtick stops the filter like any markup, and the block after it is kept',
+      same('The `<details>` tag is named here.', '', ...LATER) && same('[docs](https://example.org/`v) <details> then `', '<summary>Team notes</summary>', ...block('Commits', 'THE TEAM\'S SUBSECTION'), '</details>')
+      && same('An escaped \\`<details>\\` here', ...LATER) && same('An autolink <https://example.com>', ...LATER));
+    check('...other markup outside the blocks stops the filter: a closing tag with nothing open, another element, a comment, a line break written another way',
+      same('a stray </details> in a sentence', ...LATER) && same('<div>', ...LATER, '</div>') && same('<!-- a note', ...LATER, '-->') && same('<!-- a note -->', ...LATER) && same('<br>', ...LATER) && same('<br/>', ...LATER));
+    const afterStop = withoutCopiedNotes([...block('Changelog', '<p>UPSTREAM-A</p>'), '<span>a person\'s markup</span>', ...LATER].join('\n'));
+    check('...a block before the line that stops the filter is still left out', afterStop === [MARK('Changelog'), '<span>a person\'s markup</span>', ...LATER].join('\n'));
+    check('...an empty or missing description is an empty one', withoutCopiedNotes('') === '' && withoutCopiedNotes(null) === '' && withoutCopiedNotes(undefined) === '');
+    check('htmlToken: a complete tag with its whole name and its quoted values, text, and markup the line does not finish',
+      htmlToken('<a href="x>y">', 0).end === 14 && htmlToken('x</DETAILS >', 1).name === 'details' && htmlToken('x</DETAILS >', 1).closing && htmlToken('<details-panel>', 0).name === 'details-panel'
+      && htmlToken('<br/>', 0).end === 5 && htmlToken('<a href=x data-k = "v" hidden>', 0).end === 30 && htmlToken('a < b', 2) === null && htmlToken('<2.0', 0) === null
+      && [['<!-- c -->', 0], ['<a href="x', 0], ['<a', 0], ['<a b=>', 0], ['</a b>', 0], ['</>', 0], ['<!doctype x>', 0], ['<?x?>', 0], ['<a"b">', 0], ['<a/b>', 0]].every(([l, p]) => typeof htmlToken(l, p) === 'symbol'));
+    const prBy = (user, body = BODY) => buildBrief({ number: 7, title: 'build(deps): bump the group', body, user, head: { ref: 'dependabot/npm_and_yarn/group', sha: HEAD }, base: { ref: 'main', repo: { full_name: 'askalf/r' } } }, [], [], 'THE DIFF');
+    const bot = prBy({ login: DEPENDABOT_LOGIN, type: 'Bot' });
+    check('buildBrief: a Dependabot pull request is read without the copied text, so a finding cannot quote it; what a person added can still be quoted',
+      !bot.includes('UPSTREAM-') && !quoteIsGrounded(NOTE, corpusOf(bot)) && quoteIsGrounded('A NOTE A PERSON ADDED, on a requirement <2.0 and `code`', corpusOf(bot)) && bot.includes(MARK('Release notes')));
+    check('...the same description is not filtered for a person, for an account that only carries the name, for a bot under another name, or with no author type',
+      [{ login: 'a', type: 'User' }, { login: DEPENDABOT_LOGIN, type: 'User' }, { login: 'dependabot', type: 'Bot' }, { login: DEPENDABOT_LOGIN }].every((u) => quoteIsGrounded(NOTE, corpusOf(prBy(u)))));
+    const LONG = bodyOf(`<li>${'UPSTREAM-LONG '.repeat(700)}</li>`).join('\n');
+    check('...the description\'s cut comes after the copied text is left out: a second update below a long block is still shown',
+      LONG.indexOf('Updates `beta`') > LIMITS.bodyChars && prBy({ login: DEPENDABOT_LOGIN, type: 'Bot' }, LONG).includes('Updates `beta` from 2.0.0 to 2.1.0') && !prBy({ login: 'a', type: 'User' }, LONG).includes('Updates `beta` from 2.0.0 to 2.1.0'));
+  }
   check('runTool redline_diff: the whole change, one path, an unknown path, nothing without files',
     runTool(root, 'redline_diff', {}, { diffFiles: [{ filename: 'src/b.js', status: 'modified', patch: PATCH }] }).includes('+export const token')
     && runTool(root, 'redline_diff', { path: 'src/b.js' }, { diffFiles: [{ filename: 'src/b.js', patch: PATCH }, { filename: 'src/c.js', patch: '+c' }] }).includes('+export const token')
