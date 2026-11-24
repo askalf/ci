@@ -40,7 +40,14 @@ type with `--pr`, so a local review reads such a description the same way. A `re
 wherever it is, whatever severity the model gave it, and so is a `misleading-text` finding on the
 pull request's description (the file the model names `PR description`): the description is not
 what ships and an author edits it in seconds. A review that asked for changes only for such
-findings approves; attribution and a secret in the description still block. `redline_search` runs in a child process killed
+findings approves; attribution and a secret in the description still block. When at least one
+of the findings eased that way is a claim in the description, and the reviewer has a turn left,
+it is asked once which side is wrong before the review approves: a defect the code would have
+whatever the description said can be given at its code line instead, where it is weighed like any
+other finding and can block. The question gives the reviewer that one chance; it does not move
+the finding itself. A review held only by wording is not asked. A review that gives the same
+answer again approves, and its body says that it asked for changes only for findings that do not
+block. `redline_search` runs in a child process killed
 after 10 seconds, so a pattern that backtracks without end cannot stall the review.
 
 Hosted mode. A caller with no runner host passes `hosted-runner` (a GitHub-hosted runner label)

@@ -13,6 +13,19 @@ names the commit's date and the pull request it came from.
 
 ## November 2026
 
+- A review that asks for changes only through findings that do not block, a claim in the pull
+  request description among them, is asked once which side is wrong. Such a review approves,
+  because a claim the code does not back is corrected in the description with no commit, and the
+  approval kept the summary the reviewer had written for a request for changes. A defect in the
+  code that the reviewer wrote up as "the description promises this" was approved with it: on
+  2026-11-24, of five reviews before the push of one pull request's heads, two were approvals
+  whose summary asked for changes, and one of those listed under the description a failed
+  download that stops every later one. The reviewer is now told that such a claim does not block
+  and asked to give a defect in the code at its code line, with the severity the review rules
+  give it there, or to keep the claim as a note; every finding is then weighed as before, so a
+  secret in the description still blocks. It is asked once, and only with a turn left; a review
+  that answers the same way approves as before, and its body now says that it asked for changes
+  only for findings that do not block. A review held only by wording is not asked.
 - Redline reads a Dependabot pull request's description without the text Dependabot copies in
   from the dependencies' repositories. Read from the top, a `<details>` block in exactly the
   form Dependabot writes, under its Release notes, Changelog or Commits summary line, is one line
