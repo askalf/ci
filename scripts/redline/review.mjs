@@ -1818,11 +1818,7 @@ export function modelContext(secrets, dario) {
 
 /** The model settings REDLINE_MODELS_FILE may set, each replacing the env file's own. */
 export const MODEL_KEYS = ['REDLINE_MODEL', 'REDLINE_DEEP_MODEL', 'REDLINE_PIN_MODEL', 'REDLINE_FALLBACK_MODEL'];
-/**
- * The one setting REDLINE_MODELS_FILE may set that is not a model: the round cap (roundCapOf).
- * Without it a host whose pins come from a reviewed repository still kept its cap where no review
- * sees it: in its env file, which holds its secrets, or in the runner's environment.
- */
+/** The one setting REDLINE_MODELS_FILE may set that is not a model: the round cap (roundCapOf). */
 export const ROUND_CAP_KEY = 'REDLINE_ROUND_CAP';
 
 /**
@@ -1887,6 +1883,8 @@ export function compareVersions(a, b) {
  * `<KEY>_TRACKS` names the family the pin follows. ROUND_CAP_KEY, when the file sets it, replaces
  * the env file's the same way. There it must be a whole number from 0 to 999 and anything else is
  * an error, where the env file's own value that is not one counts as the default (roundCapOf).
+ * The note gives the env file's value only when it is such a number: that file holds the host's
+ * secrets, and whatever else was typed on that line stays out of the log.
  * Returns { secrets, tracks, notes } or { error }.
  */
 export function withModelsFile(secrets, readFile = (p) => readFileSync(p, 'utf8')) {
@@ -1914,7 +1912,10 @@ export function withModelsFile(secrets, readFile = (p) => readFileSync(p, 'utf8'
   if (Object.hasOwn(pins, ROUND_CAP_KEY)) {
     const cap = pins[ROUND_CAP_KEY];
     if (!ROUND_CAP_VALUE.test(cap)) return { error: `${ROUND_CAP_KEY} in ${file} must be a whole number from 0 to 999 (0 is no cap); got ${cap || 'nothing'}` };
-    if (Object.hasOwn(secrets, ROUND_CAP_KEY) && secrets[ROUND_CAP_KEY] !== cap) notes.push(`${ROUND_CAP_KEY} in the env file (${secrets[ROUND_CAP_KEY] || 'empty'}) is replaced by the models file (${cap})`);
+    if (Object.hasOwn(secrets, ROUND_CAP_KEY) && secrets[ROUND_CAP_KEY] !== cap) {
+      const was = ROUND_CAP_VALUE.test(secrets[ROUND_CAP_KEY]) ? secrets[ROUND_CAP_KEY] : 'not a count, so the default';
+      notes.push(`${ROUND_CAP_KEY} in the env file (${was}) is replaced by the models file (${cap})`);
+    }
     out[ROUND_CAP_KEY] = cap;
   }
   return { secrets: out, tracks, notes };

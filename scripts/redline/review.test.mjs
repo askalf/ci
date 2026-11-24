@@ -2254,7 +2254,17 @@ console.log('\n  model pins: the models file, the newest of a family, the list d
   check('a cap in the models file that is not a whole number from 0 to 999 is an error naming the file',
     ['', 'eight', '-1', '1000', '8 rounds', '8.0', '+8'].every((v) => /^REDLINE_ROUND_CAP in \/m\.env must be a whole number from 0 to 999/.test(capFrom({ REDLINE_ROUND_CAP: '4' }, `REDLINE_ROUND_CAP=${v}\n`).error ?? '')));
   check('an empty cap in the models file is said as nothing', / got nothing$/.test(capFrom({}, 'REDLINE_ROUND_CAP=\n').error ?? ''));
-  check('the env file\'s own cap is read as before: anything but a count is the default', roundCapOf('eight') === DEFAULT_ROUND_CAP && roundCapOf('') === DEFAULT_ROUND_CAP && roundCapOf('12') === 12);
+  // The env file's own cap, with a models file that sets none: taken as it is written, never an
+  // error, and read as a count afterwards as it always was.
+  const envCap = (v) => capFrom({ REDLINE_ROUND_CAP: v }, 'REDLINE_MODEL=m');
+  check('the env file\'s own cap that is not a count is no error and counts as the default',
+    ['eight', '', '-1', '1000'].every((v) => envCap(v).error === undefined && envCap(v).secrets.REDLINE_ROUND_CAP === v && roundCapOf(envCap(v).secrets.REDLINE_ROUND_CAP) === DEFAULT_ROUND_CAP));
+  check('the env file\'s own cap that is a count is read as that count', envCap('12').error === undefined && roundCapOf(envCap('12').secrets.REDLINE_ROUND_CAP) === 12);
+  // The env file holds the host's secrets: what was typed on its cap line reaches the log only when it is a count.
+  const pasted = capFrom({ REDLINE_ROUND_CAP: 'pasted-by-mistake' }, 'REDLINE_ROUND_CAP=8\n');
+  check('an env file cap that is not a count is replaced without being printed', pasted.secrets.REDLINE_ROUND_CAP === '8' && pasted.notes.length === 1
+    && pasted.notes[0] === 'REDLINE_ROUND_CAP in the env file (not a count, so the default) is replaced by the models file (8)' && !pasted.notes.join().includes('pasted'));
+  check('an empty env file cap is said the same way', capFrom({ REDLINE_ROUND_CAP: '' }, 'REDLINE_ROUND_CAP=8\n').notes[0] === 'REDLINE_ROUND_CAP in the env file (not a count, so the default) is replaced by the models file (8)');
 
   let seen = null;
   const listing = async (url, init) => { seen = { url, key: init.headers['x-api-key'] }; return new Response(JSON.stringify({ data: [{ id: 'gpt-6.2-sol' }, { id: 'claude-opus-5-5' }, { id: 'gpt-6.2-sol' }, { id: 7 }, {}] }), { status: 200 }); };

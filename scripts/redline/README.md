@@ -129,7 +129,8 @@ family a pin follows, as a model id with one `*` for its version: `gpt-*-sol`, `
 
 The same file may set `REDLINE_ROUND_CAP`, the one setting in it that is not a model, so a
 host's round cap can come from a reviewed repository too. It replaces the env file's, and the
-log says so when the two differ. There it must be a whole number from 0 to 999 (0 turns the cap
+log says so when the two differ, giving the env file's value only when it is such a number.
+There it must be a whole number from 0 to 999 (0 turns the cap
 off): anything else ends the run. The env file's own `REDLINE_ROUND_CAP` is read as before, and a
 value there that is not such a number counts as the default.
 

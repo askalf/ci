@@ -16,7 +16,8 @@ names the commit's date and the pull request it came from.
 - The file `REDLINE_MODELS_FILE` names may set `REDLINE_ROUND_CAP`. The models file could not set
   the cap: it took only the four model pins, so a host whose pins come from a reviewed repository
   still kept its cap in its env file or in the runner's environment, where no review sees it. A
-  cap in the models file replaces the env file's, and the log says so when the two differ. There
+  cap in the models file replaces the env file's, and the log says so when the two differ, giving
+  the env file's value only when it is a count: that file holds the host's secrets. There
   it must be a whole number from 0 to 999 (0 turns the cap off), and anything else ends the run, as
   a family with no `*` does. The env file's own value is read as before, one that is not such a
   number counts as the default, and the process environment's is still read when neither file
