@@ -25,7 +25,18 @@ as captured data: a wording finding on it (its own rule `reads-as-generated`, `a
 `misleading-text`; each finding carries a rule) is sent back once and then dropped, since nobody
 writes that text by hand. A correctness or security finding, or a secret, stands there as anywhere, a finding there
 with no rule is asked about once and then stands, and a mark the pull request itself adds counts
-for nothing until it has merged. A `reads-as-generated` finding (how a sentence reads) is minor
+for nothing until it has merged. A pull request Dependabot opened (author `dependabot[bot]`, an
+account of type Bot) has its description read without the text Dependabot copies in from the
+dependencies' repositories. The description is read from the top as the form Dependabot writes,
+and Markdown is not interpreted. A copied block is the line `<details>`, then the exact line
+`<summary>Release notes</summary>`, `<summary>Changelog</summary>` or `<summary>Commits</summary>`,
+then the text Dependabot's renderer writes (no blank line, no markup but that renderer's elements
+and its one comment, no details tag's text) up to the line `</details>`. It becomes one line in
+the brief that names it, so a finding cannot quote it. A line with no markup but `<br />` that
+opens no code fence is kept. At the first line that is neither, the filter stops, and the rest is
+read as any description is: where the form is in doubt the text is read, not left out. The blocks are known by their shape, not by who wrote them:
+a block of that shape someone adds to a Dependabot description is left out too. `local.mjs` packs the author's account
+type with `--pr`, so a local review reads such a description the same way. A `reads-as-generated` finding (how a sentence reads) is minor
 wherever it is, whatever severity the model gave it, and so is a `misleading-text` finding on the
 pull request's description (the file the model names `PR description`): the description is not
 what ships and an author edits it in seconds. A review that asked for changes only for such

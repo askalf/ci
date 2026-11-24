@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 import {
   git, repoFromUrl, changedFiles, fileRecords, gitQuoted, patchOf, branchCommits, baseRef, buildChange, packChange, tarOf, checkChange, reviewLocal, parseArgs, hostSettings, earlierReview,
 } from './local.mjs';
-import { REVIEWER_LOGIN, renderBody } from './review.mjs';
+import { REVIEWER_LOGIN, DEPENDABOT_LOGIN, renderBody } from './review.mjs';
 
 const SHA_RE = /^[0-9a-f]{40}$/;
 let pass = 0;
@@ -258,6 +258,9 @@ console.log('\n  buildChange');
   });
   check('--pr reads the PR\'s title, body, author and reviews', asked.join() === 'askalf/r#7' && withPr.title === 'feat: token' && withPr.body === 'Reads it.' && withPr.author === 'askalf' && withPr.number === 7
     && withPr.reviews.length === 1 && withPr.reviews[0].body === 'Earlier: the token is logged.' && !('extra' in withPr.reviews[0]));
+  const botPr = (opts = {}) => buildChange(repo, { base: 'main', repo: 'askalf/r', pr: 7, ...opts, fetchPr: () => ({ pr: { number: 7, title: 'bump', body: 'Bumps it.', user: { login: DEPENDABOT_LOGIN, type: 'Bot' } }, reviews: [] }) });
+  check('--pr packs the author\'s account type with the login; a body from a file is not the PR\'s, so it carries none',
+    botPr().author === DEPENDABOT_LOGIN && botPr().authorType === 'Bot' && botPr({ body: 'mine' }).authorType === '' && withPr.authorType === '' && c.authorType === '');
   check('--title wins over the PR\'s', buildChange(repo, { base: 'main', pr: 7, title: 'mine', fetchPr: () => ({ pr: { number: 7, title: 'theirs' }, reviews: [] }) }).title === 'mine');
   const kept = { state: 'CHANGES_REQUESTED', commit_id: '1'.repeat(40), body: 'kept by the author' };
   const posted = { user: { login: REVIEWER_LOGIN }, state: 'CHANGES_REQUESTED', commit_id: '2'.repeat(40), body: 'posted on the PR' };
@@ -372,8 +375,21 @@ const unpacked = mkdtempSync(join(tmpdir(), 'redline-local-in-'));
   writeFileSync(join(unpacked, 'change.json'), JSON.stringify({ ...packed, earlier: [{ state: 'CHANGES_REQUESTED', commit_id: '1'.repeat(40), body: '' }] }));
   check('a packed earlier verdict with a blank body stops before any model call', /earlier verdict/.test((await throws(() => reviewLocal(ctx, unpacked)))?.message ?? '') && calls.model.length === 2);
   writeFileSync(join(unpacked, 'change.json'), JSON.stringify(packed));
+  const NOTES = ['Updates `alpha` from 1.0.0 to 1.0.1', '<details>', '<summary>Release notes</summary>', '<p>UPSTREAM-NOTE</p>', '</details>'].join('\n');
+  const briefOf = async (over) => {
+    writeFileSync(join(unpacked, 'change.json'), JSON.stringify({ ...packed, body: NOTES, ...over }));
+    const before = calls.model.length;
+    await reviewLocal(ctx, unpacked);
+    return calls.model[before].messages[0].content;
+  };
+  const asBot = await briefOf({ author: DEPENDABOT_LOGIN, authorType: 'Bot' });
+  check('a packed Dependabot pull request is read as CI reads it, without the text Dependabot copies in',
+    !asBot.includes('UPSTREAM-NOTE') && asBot.includes('Updates `alpha` from 1.0.0 to 1.0.1') && asBot.includes('[Release notes: copied in by Dependabot'));
+  check('...a pack with no author type, or a person\'s, is not filtered',
+    (await briefOf({ author: DEPENDABOT_LOGIN, authorType: '' })).includes('UPSTREAM-NOTE') && (await briefOf({ author: 'askalf', authorType: 'User' })).includes('UPSTREAM-NOTE'));
   writeFileSync(join(unpacked, 'change.json'), JSON.stringify({ repo: 'a/b' }));
-  check('a broken change.json stops before any model call', /full head and base/.test((await throws(() => reviewLocal(ctx, unpacked)))?.message ?? '') && calls.model.length === 2);
+  const modelCalls = calls.model.length;
+  check('a broken change.json stops before any model call', /full head and base/.test((await throws(() => reviewLocal(ctx, unpacked)))?.message ?? '') && calls.model.length === modelCalls);
 }
 
 console.log('\n  earlier verdicts read on a host with another reviewer login');

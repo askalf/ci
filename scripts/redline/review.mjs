@@ -1094,8 +1094,142 @@ export function askForSubmit(messages) {
   }
 }
 
+/** The login GitHub gives Dependabot's pull requests. No user account can hold a name that ends in `[bot]`. */
+export const DEPENDABOT_LOGIN = 'dependabot[bot]';
+/**
+ * The second line of each block Dependabot fills with other projects' text, as Dependabot writes
+ * it, and the name the brief gives the block. Its own commands block is not one.
+ */
+export const COPIED_SUMMARIES = new Map([
+  ['<summary>Release notes</summary>', 'Release notes'], ['<summary>Changelog</summary>', 'Changelog'], ['<summary>Commits</summary>', 'Commits'],
+]);
+/** The one comment Dependabot's renderer writes into copied text, where the notes held HTML of their own. */
+const RENDERED_COMMENT = '<!-- raw HTML omitted -->';
+/** The elements that renderer writes for Markdown. None of them holds raw text, so inside them a tag is a tag. */
+const RENDERED_TAGS = new Set(['p', 'em', 'strong', 'del', 'a', 'img', 'code', 'pre', 'blockquote', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'ul', 'ol', 'li', 'table', 'thead', 'tbody', 'tr', 'th', 'td', 'br', 'hr']);
+export const isDependabot = (pr) => pr?.user?.login === DEPENDABOT_LOGIN && pr?.user?.type === 'Bot';
+
+const BROKEN = Symbol('broken');
+
+/**
+ * The tag that starts at `line[p]`, a `<`: { end, name, closing } for a complete tag (quoted
+ * attribute values read whole, the name read whole and lowercased), null when the `<` is text,
+ * and BROKEN for markup this line does not finish or that is no tag: one that runs past the line,
+ * an unclosed quote, a comment or declaration, a closing tag with anything after its name. Pure.
+ */
+export function htmlToken(line, p) {
+  if (line[p + 1] === '!' || line[p + 1] === '?') return BROKEN;
+  const closing = line[p + 1] === '/';
+  let q = p + (closing ? 2 : 1);
+  if (!/[A-Za-z]/.test(line[q] ?? '')) return closing ? BROKEN : null;
+  const from = q;
+  while (/[A-Za-z0-9-]/.test(line[q] ?? '')) q++;
+  const name = line.slice(from, q).toLowerCase();
+  const space = () => { const at = q; while (line[q] === ' ' || line[q] === '\t') q++; return q > at; };
+  if (closing) {
+    space();
+    return line[q] === '>' ? { end: q + 1, name, closing } : BROKEN;
+  }
+  for (;;) {
+    const spaced = space();
+    if (line[q] === '>') return { end: q + 1, name, closing };
+    if (line.startsWith('/>', q)) return { end: q + 2, name, closing };
+    if (!spaced || q >= line.length) return BROKEN;
+    const attr = q;
+    while (q < line.length && !/[\s"'<>/=`]/.test(line[q])) q++;
+    if (q === attr) return BROKEN;
+    const back = q;
+    space();
+    if (line[q] !== '=') { q = back; continue; }
+    q++;
+    space();
+    if (line[q] === '"' || line[q] === "'") {
+      const e = line.indexOf(line[q], q + 1);
+      if (e < 0) return BROKEN;
+      q = e + 1;
+    } else {
+      const value = q;
+      while (q < line.length && !/[\s"'<>=`]/.test(line[q])) q++;
+      if (q === value) return BROKEN;
+    }
+  }
+}
+
+/**
+ * The index of the line that closes a copied block, reading from the line after its summary, or
+ * -1 when the text is not what Dependabot's renderer writes. That text is one HTML block: no
+ * blank line (after one Markdown is read again, and a tag could be literal), and on every line
+ * each `<` starts either the renderer's one comment or a complete tag, with no `<` inside it, for an element in
+ * RENDERED_TAGS. The block closes at the first line that is `</details>` and nothing else. A
+ * details tag's text anywhere before that line, in a tag, an attribute value or prose, is not
+ * that form. So the closing line found is the first closing details tag there is: nothing is
+ * read past, and nothing that could be literal is taken for it. Pure.
+ */
+function copiedBlockEnd(lines, from) {
+  for (let l = from; l < lines.length; l++) {
+    const line = lines[l].replace(/\r$/, '');
+    if (line === '</details>') return l;
+    // A carriage return inside a line is a line end to some readers: two of them hide a blank line.
+    if (!line.trim() || line.includes('\r') || /<\/?details/i.test(line)) return -1;
+    for (let p = line.indexOf('<'); p >= 0; p = line.indexOf('<', p)) {
+      if (line.startsWith(RENDERED_COMMENT, p)) { p += RENDERED_COMMENT.length; continue; }
+      const tok = htmlToken(line, p);
+      if (!tok || tok === BROKEN || !RENDERED_TAGS.has(tok.name)) return -1;
+      // The renderer escapes a literal less-than sign wherever it stands, an attribute value included.
+      if (line.slice(p + 1, tok.end).includes('<')) return -1;
+      p = tok.end;
+    }
+  }
+  return -1;
+}
+
+/** Whether a line outside the copied blocks is plain: it opens no code fence and holds no markup but `<br />`. A `<` that starts no tag, comment or declaration is text. Pure. */
+const plainLine = (line) => !/^ {0,3}(?:`{3,}|~{3,})/.test(line) && !/<[A-Za-z/!?]/.test(line.replaceAll('<br />', ''));
+
+/**
+ * A Dependabot description without the text Dependabot copies in from the dependencies' own
+ * repositories. Nobody in the reviewed repository writes that text and it does not ship, so its
+ * wording is not this repository's to answer for, and a reviewer that reads it takes a third
+ * party's words into its brief.
+ *
+ * The description is read from the top as the form Dependabot writes, and nothing is guessed:
+ * - a copied block: the line `<details>`, a line that is one of COPIED_SUMMARIES, then text as
+ *   copiedBlockEnd knows it, up to the line `</details>`. It becomes one line that names it;
+ * - a plain line (plainLine), which is kept.
+ * At the first line that is neither, the filter stops: that line and everything after it is kept
+ * as written. So a block under any other summary line and all it holds, a block whose text is not
+ * the renderer's (another block inside it, a blank line, other markup, text after its closing
+ * tag), a fenced example, a comment, a tag named in a code span, and Dependabot's own commands
+ * block at the end are read as any description is. Markdown is not interpreted at all: where the
+ * form is in doubt the text is read, not left out.
+ *
+ * The blocks are known by their shape, not by who wrote them: someone who edits a Dependabot
+ * description and writes a block of that shape has it left out like Dependabot's. Pure.
+ */
+export function withoutCopiedNotes(body) {
+  const lines = String(body ?? '').split('\n'); // a line keeps its \r, when it has one
+  const bare = (i) => (lines[i] ?? '').replace(/\r$/, '');
+  const out = [];
+  let i = 0;
+  for (; i < lines.length; i++) {
+    const line = bare(i);
+    const title = line === '<details>' ? COPIED_SUMMARIES.get(bare(i + 1)) : undefined;
+    if (title) {
+      const end = copiedBlockEnd(lines, i + 2);
+      if (end < 0) break;
+      out.push(`[${title}: copied in by Dependabot from the dependency's repository, not shown]${lines[end].endsWith('\r') ? '\r' : ''}`);
+      i = end;
+      continue;
+    }
+    if (!plainLine(line)) break;
+    out.push(lines[i]);
+  }
+  return [...out, ...lines.slice(i)].join('\n');
+}
+
 export function buildBrief(pr, files, commits, diff, protectedFiles = [], since = null) {
-  const body = (pr.body ?? '').slice(0, LIMITS.bodyChars);
+  // The cut comes after the copied text is left out, so Dependabot's own lines are what fill it.
+  const body = (isDependabot(pr) ? withoutCopiedNotes(pr.body) : (pr.body ?? '')).slice(0, LIMITS.bodyChars);
   // A message past LIMITS.commitChars is cut with the cut stated, as context and earlier reviews
   // are: a bare cut reads as a message that ends mid-sentence, and is reviewed as one.
   const commitLines = commits.slice(0, LIMITS.commits).map((c) => {
