@@ -17,7 +17,7 @@ import {
 import { fetchCandidate, CANDIDATE_ARTIFACT, CANDIDATE_FILES } from './candidate.mjs';
 import {
   TOOLS as FIX_TOOLS, AUTHOR, LIMITS, OUTCOMES, LESSONS, PROTECTED_ATTR, DEFAULT_MODEL, safeWritePath, stageable, commitSubject, descriptionProblem,
-  hasAttributionTrailer, toolchainLines, lessonsAccess,
+  hasAttributionTrailer, toolchainLines, lessonsAccess, sealResult,
 } from './fix.mjs';
 
 let pass = 0;
@@ -412,7 +412,8 @@ if (!gitOk) {
     const built = await runBuild(w.ctx);
     saveBuild(w.out, built.record, built.description, built.replay);
     const replayFile = JSON.parse(readFileSync(join(w.out, CANDIDATE_REPLAY), 'utf8'));
-    check('a fixed build\'s candidate carries replay.json: the summary, tests_run and whether the build script ran', replayFile.summary.startsWith('Resets the cursor') && replayFile.ran_build === false && typeof replayFile.tests_run === 'string');
+    check('a fixed build\'s candidate carries replay.json: the summary and whether the build script ran, and nothing else of the model\'s', replayFile.summary.startsWith('Resets the cursor') && replayFile.ran_build === false
+      && JSON.stringify(Object.keys(replayFile).sort()) === '["ran_build","summary"]');
     const fresh = () => {
       const dir = mkdtempSync(join(tmpdir(), 'redline-build-verify-'));
       sh(dir, ['init', '-q']);
@@ -420,7 +421,7 @@ if (!gitOk) {
       sh(dir, ['-c', 'advice.detachedHead=false', 'checkout', '-q', repo.head]);
       return { dir, git: (args) => { const r = spawnSync('git', args, { cwd: dir, encoding: 'utf8' }); return r.status === 0 ? r.stdout.trim() : null; } };
     };
-    const want = { repo: 'askalf/r', ticket: ULID, base: repo.head, run: { id: 7, attempt: 1 } };
+    const want = { repo: 'askalf/r', ticket: ULID, base: repo.head, run: { id: 7, attempt: 1 }, buildAttempt: 1, dryRun: false };
     const c = fresh();
     const read = readCandidate(w.out, want, c.git);
     check('the candidate is read for this repository, ticket, base, run and attempt, its commit fetched from its bundle', 'replay' in read && read.replay.tree === sh(repo.dir, ['rev-parse', `${built.record.new_head}^{tree}`])
@@ -434,7 +435,11 @@ if (!gitOk) {
     rmSync(out2, { recursive: true, force: true });
     rmSync(c.dir, { recursive: true, force: true });
     // What is not this run's, or not one commit on the base, is not verified.
-    for (const [name, patch] of [['another ticket', { ticket: '01JD8QW3V5N7R9T1X2Y4Z6A8BD' }], ['another base', { base: OTHER }], ['another attempt', { run: { id: 7, attempt: 2 } }], ['another run', { run: { id: 8, attempt: 1 } }]]) {
+    // A re-run of the verify job alone runs in a later attempt and reads the build job's own one.
+    const rerun = fresh();
+    check('a verify job re-run alone verifies the build job\'s candidate: its attempt is the build job\'s, not this one\'s', 'replay' in readCandidate(w.out, { ...want, run: { id: 7, attempt: 2 } }, rerun.git));
+    rmSync(rerun.dir, { recursive: true, force: true });
+    for (const [name, patch] of [['another ticket', { ticket: '01JD8QW3V5N7R9T1X2Y4Z6A8BD' }], ['another base', { base: OTHER }], ['another build attempt', { buildAttempt: 2 }], ['another run', { run: { id: 8, attempt: 1 } }]]) {
       const d = fresh();
       const r = readCandidate(w.out, { ...want, ...patch }, d.git);
       check(`a candidate for ${name} is not verified`, 'problem' in r && /names another/.test(r.problem), JSON.stringify(r));
@@ -453,6 +458,9 @@ if (!gitOk) {
     check('nor one with no replay.json', /no readable replay\.json/.test(readCandidate(forged, want, d2.git).problem ?? ''));
     rmSync(d2.dir, { recursive: true, force: true });
     rmSync(forged, { recursive: true, force: true });
+    const leaked = sealResult({ ...w.ctx, darioKey: 'dk_secret_0123456789' }, { record: built.record, description: built.description, replay: { summary: 'ran with dk_secret_0123456789', ran_build: false } }, 'build.bundle',
+      (fields) => buildRecord({ repo: 'askalf/r', ticket: ULID, base: repo.head, model: 'm', run: { id: 7, attempt: 1 }, ...fields }));
+    check('a credential in the replay facts alone makes the result a refusal, with no replay to upload', leaked.record.outcome === 'refused' && leaked.replay === undefined && /carried a credential/.test(leaked.record.notes));
     const failed = { ...buildRecord({ repo: 'askalf/r', ticket: ULID, base: repo.head, model: 'm', run: { id: 7, attempt: 1 }, outcome: 'tests_failed', notes: 'The tests failed.' }) };
     const through = mkdtempSync(join(tmpdir(), 'redline-build-through-'));
     saveBuild(through, failed);
@@ -464,33 +472,57 @@ if (!gitOk) {
     done(w, repo);
   }
   {
-    // The candidate's fetch: one list of this run's artifacts, its zip through the redirect to
-    // storage, fetched without the token, and only the files build.mjs reads.
-    const entries = { 'build.json': '{}', 'notes.md': 'n', 'build.bundle': 'b', 'stray.sh': 'x' };
-    const zip = storedZip(entries);
+    // A dry run is verified too: its diff is applied to the index alone for its tree, which is built
+    // again with no model, and the dry run's result is the verify job's.
+    const repo = makeRepo();
+    const w = world(repo, { dryRun: true, turns: [write, describe, finish()] });
+    w.ctx.run = { id: 7, attempt: 1 };
+    const built = await runBuild(w.ctx);
+    saveBuild(w.out, built.record, built.description, built.replay);
+    const dir = mkdtempSync(join(tmpdir(), 'redline-build-verify-'));
+    sh(dir, ['init', '-q']);
+    sh(dir, ['fetch', '-q', repo.dir, repo.head]);
+    sh(dir, ['-c', 'advice.detachedHead=false', 'checkout', '-q', repo.head]);
+    const git = (args) => { const r = spawnSync('git', args, { cwd: dir, encoding: 'utf8' }); return r.status === 0 ? r.stdout.trim() : null; };
+    const want = { repo: 'askalf/r', ticket: ULID, base: repo.head, run: { id: 7, attempt: 1 }, buildAttempt: 1, dryRun: true };
+    const read = readCandidate(w.out, want, git);
+    check('a dry run\'s candidate gives the tree its diff makes, and leaves the checkout\'s index at the base', 'replay' in read && git(['diff', '--cached', '--name-only']) === '' && git(['status', '--porcelain']) === '', JSON.stringify(read).slice(0, 200));
+    check('a dry run is not taken for a real one, nor a real one for a dry run', /dry run where this run is not/.test(readCandidate(w.out, { ...want, dryRun: false }, git).problem ?? ''));
+    const out2 = join(dir, '..', `redline-build-out-${Math.random().toString(36).slice(2)}`);
+    const v = 'replay' in read ? await runBuild({ ...w.ctx, checkout: dir, out: out2, dryRun: true, replay: read.replay, fetch: async () => { throw new Error('no model in a verify run'); } }) : null;
+    check('the verify job\'s dry run is fixed with the same diff, no commit, and its own tests', v?.record.outcome === 'fixed' && v.record.new_head === null && existsSync(join(out2, 'diff.patch'))
+      && readFileSync(join(out2, 'diff.patch'), 'utf8') === readFileSync(join(w.out, 'diff.patch'), 'utf8') && buildProblem(v.record) === null, v?.record.notes);
+    rmSync(out2, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true });
+    done(w, repo);
+  }
+  {
+    // The candidate's fetch: the build job's own artifact by its id, checked to be this run's
+    // candidate, its zip through the redirect to storage, fetched without the token, and only the
+    // files build.mjs reads.
+    const zip = storedZip({ 'build.json': '{}', 'notes.md': 'n', 'build.bundle': 'b', 'stray.sh': 'x' });
     const asked = [];
+    const meta = { 12: { id: 12, name: CANDIDATE_ARTIFACT, expired: false, size_in_bytes: 10, workflow_run: { id: 7 } }, 13: { id: 13, name: CANDIDATE_ARTIFACT, workflow_run: { id: 8 } },
+      14: { id: 14, name: 'redline-build', workflow_run: { id: 7 } }, 15: { id: 15, name: CANDIDATE_ARTIFACT, expired: true, workflow_run: { id: 7 } } };
     const stub = async (url, init = {}) => {
       asked.push({ url: String(url), auth: init.headers?.authorization ?? null });
-      if (String(url).includes('/runs/7/artifacts')) return { status: 200, json: async () => ({ artifacts: [
-        { id: 1, name: CANDIDATE_ARTIFACT, expired: false, size_in_bytes: 10, workflow_run: { id: 8 } },
-        { id: 2, name: CANDIDATE_ARTIFACT, expired: false, size_in_bytes: 10, workflow_run: { id: 7 } },
-      ] }) };
-      if (String(url).endsWith('/artifacts/2/zip')) return { status: 302, headers: { get: (h) => (h === 'location' ? 'https://storage.example/zip' : null) } };
+      const m = /\/actions\/artifacts\/(\d+)$/.exec(String(url));
+      if (m) return meta[m[1]] ? { status: 200, json: async () => meta[m[1]] } : { status: 404, json: async () => ({}) };
+      if (String(url).endsWith('/artifacts/12/zip')) return { status: 302, headers: { get: (h) => (h === 'location' ? 'https://storage.example/zip' : null) } };
       if (String(url) === 'https://storage.example/zip') return { status: 200, headers: { get: () => null }, arrayBuffer: async () => zip.buffer.slice(zip.byteOffset, zip.byteOffset + zip.length) };
       return { status: 404, json: async () => ({}) };
     };
-    const dir = join(mkdtempSync(join(tmpdir(), 'redline-build-cand-')), 'c');
-    const got = await fetchCandidate({ repo: 'askalf/r', runId: 7, token: 'ghs_test', dir, fetch: stub });
-    check('the candidate of this run alone is fetched, and only the files build.mjs reads are written', JSON.stringify(got.files) === '["build.json","notes.md","build.bundle"]'
-      && readdirSync(dir).sort().join() === 'build.bundle,build.json,notes.md' && CANDIDATE_FILES.includes('replay.json') && !asked.some((a) => a.url.endsWith('/artifacts/1/zip')));
+    const root = mkdtempSync(join(tmpdir(), 'redline-build-cand-'));
+    const got = await fetchCandidate({ repo: 'askalf/r', runId: 7, artifactId: '12', token: 'ghs_test', dir: join(root, 'c'), fetch: stub });
+    check('the build job\'s candidate is fetched by its id, and only the files build.mjs reads are written', JSON.stringify(got.files) === '["build.json","notes.md","build.bundle"]'
+      && readdirSync(join(root, 'c')).sort().join() === 'build.bundle,build.json,notes.md' && CANDIDATE_FILES.includes('replay.json') && asked[0]?.url === 'https://api.github.com/repos/askalf/r/actions/artifacts/12');
     check('the token goes to GitHub and never to the storage the zip is fetched from', asked.filter((a) => a.url.startsWith('https://api.github.com/')).every((a) => a.auth === 'Bearer ghs_test')
       && asked.find((a) => a.url === 'https://storage.example/zip')?.auth === null);
-    const none = await fetchCandidate({ repo: 'askalf/r', runId: 9, token: 't', dir: join(dir, '..', 'n'), fetch: async () => ({ status: 200, json: async () => ({ artifacts: [] }) }) });
-    check('a run with no candidate is none, not a failure', 'none' in none);
-    let threw = '';
-    try { await fetchCandidate({ repo: 'askalf/r', runId: 7, token: 't', dir: join(dir, '..', 'x'), fetch: async () => ({ status: 500, json: async () => ({}) }) }); } catch (e) { threw = e.message; }
-    check('a list that fails throws, so the step retries and then fails', /could not be listed \(HTTP 500\)/.test(threw));
-    rmSync(join(dir, '..'), { recursive: true, force: true });
+    check('no id from the build job is no candidate, and nothing is asked', 'none' in await fetchCandidate({ repo: 'askalf/r', runId: 7, artifactId: '', token: 't', dir: join(root, 'n'), fetch: async () => { throw new Error('asked'); } }));
+    const refused = async (artifactId) => { try { await fetchCandidate({ repo: 'askalf/r', runId: 7, artifactId, token: 't', dir: join(root, 'x'), fetch: stub }); return ''; } catch (e) { return e.message; } };
+    check('another run\'s candidate, another artifact, an expired one, one that cannot be read and an id that is not one are all refused',
+      /is not this run's/.test(await refused('13')) && /is not this run's/.test(await refused('14')) && /has expired/.test(await refused('15')) && /could not be read \(HTTP 404\)/.test(await refused('99')) && /is not an artifact id/.test(await refused('12; x')));
+    rmSync(root, { recursive: true, force: true });
   }
 
   console.log('\n  runBuild: fix_describe is required');
@@ -924,7 +956,7 @@ if (!gitOk) {
       sh(clone, ['fetch', '-q', repo.dir, repo.head]);
       sh(clone, ['-c', 'advice.detachedHead=false', 'checkout', '-q', repo.head]);
       const gitIn = (args) => { const r = spawnSync('git', args, { cwd: clone, encoding: 'utf8' }); return r.status === 0 ? r.stdout.trim() : null; };
-      const read = readCandidate(w.out, { repo: 'askalf/r', ticket: ULID, base: repo.head, run: { id: 7, attempt: 1 } }, gitIn);
+      const read = readCandidate(w.out, { repo: 'askalf/r', ticket: ULID, base: repo.head, run: { id: 7, attempt: 1 }, buildAttempt: 1, dryRun: false }, gitIn);
       const out2 = join(clone, '..', `redline-build-out-${Math.random().toString(36).slice(2)}`);
       const v = 'replay' in read ? await runBuild({ ...w.ctx, checkout: clone, out: out2, replay: read.replay, fetch: async () => { throw new Error('no model in a verify run'); } }) : null;
       check('in the verify job, with the candidate alone, the file is not there and the build is tests_failed', v?.record.outcome === 'tests_failed' && v.record.tests?.exit_code === 1 && buildProblem(v.record) === null, JSON.stringify(read).slice(0, 200));
@@ -1266,7 +1298,7 @@ console.log('\n  the reusable workflow');
   const upload = steps[uploadAt] ?? '';
   check('the build job uploads whatever the outcome, as redline-build-candidate from this run\'s own output, short-lived, overwriting',
     upload.includes('if: always()\n') && upload.includes('name: redline-build-candidate\n') && upload.includes(`path: ${OUT}\n`) && /retention-days: [1-7]\n/.test(upload) && upload.includes('overwrite: true'));
-  check('the upload step is the fix workflow\'s but for the two names and the run\'s own output', own(upload).replace('Upload the candidate', 'Upload the fix').replace('name: redline-build-candidate', 'name: redline-fix').replace(`path: ${OUT}`, 'path: fix-out').replace(/^ {6}# .*\n/gm, '') === own(fixSteps[at('Upload the fix', fixSteps)]).replace(/^ {6}# .*\n/gm, ''));
+  check('the upload step is the fix workflow\'s but for the two names, its id and the run\'s own output', own(upload).replace('Upload the candidate', 'Upload the fix').replace('        id: candidate\n', '').replace('name: redline-build-candidate', 'name: redline-fix').replace(`path: ${OUT}`, 'path: fix-out').replace(/^ {6}# .*\n/gm, '') === own(fixSteps[at('Upload the fix', fixSteps)]).replace(/^ {6}# .*\n/gm, ''));
   check('the cleanup removes the checkout, the script and this run\'s output', /run: rm -rf work \.redline "\$OUT"\s*$/.test(own(steps[cleanAt] ?? '')) && (steps[cleanAt] ?? '').includes(`OUT: ${OUT}\n`) && (steps[cleanAt] ?? '').includes('if: always()'));
   const timeout = (text) => Number(/timeout-minutes: (\d+)/.exec(text)?.[1]);
   check('each job has the fix job\'s timeout, past the lane\'s hard deadline with five minutes to spare',
@@ -1287,15 +1319,18 @@ console.log('\n  the reusable workflow');
   const fetchCand = vSteps[vAt('Fetch the candidate')] ?? '';
   check('the candidate is fetched by candidate.mjs with the job token, into this run\'s own directory',
     fetchCand.includes('run: node .redline/scripts/redline/candidate.mjs') && fetchCand.includes('GH_READ_TOKEN: ${{ github.token }}\n') && fetchCand.includes('RUN_ID: ${{ github.run_id }}\n')
-    && fetchCand.includes(`CANDIDATE_OUT: \${{ github.workspace }}/${CANDIDATE}\n`));
+    && fetchCand.includes(`CANDIDATE_OUT: \${{ github.workspace }}/${CANDIDATE}\n`) && fetchCand.includes('CANDIDATE_ID: ${{ needs.build.outputs.candidate }}\n'));
+  check('the build job gives the verify job its attempt and its candidate\'s id as outputs, which a re-run of verify alone still reads',
+    /\n    outputs:\n      attempt: \$\{\{ github\.run_attempt \}\}\n      candidate: \$\{\{ steps\.candidate\.outputs\.artifact-id \}\}\n/.test(buildJob) && /\n        id: candidate\n        if: always\(\)\n        uses: actions\/upload-artifact@/.test(steps[uploadAt] ?? ''));
   const verifyStep = vSteps[vAt('Verify')] ?? '';
   const envOf = (step) => [...step.matchAll(/^ {10}([A-Z_]+): (.*)$/gm)].map((m) => `${m[1]}=${m[2]}`);
   check('the verify step runs build.mjs with the build step\'s env and the candidate, and holds no token',
-    verifyStep.includes('run: node .redline/scripts/redline/build.mjs') && JSON.stringify(envOf(verifyStep).filter((e) => !e.startsWith('BUILD_CANDIDATE='))) === JSON.stringify(envOf(build))
+    verifyStep.includes('run: node .redline/scripts/redline/build.mjs') && JSON.stringify(envOf(verifyStep).filter((e) => !/^BUILD_(CANDIDATE|RUN_ATTEMPT)=/.test(e))) === JSON.stringify(envOf(build))
+    && verifyStep.includes('BUILD_RUN_ATTEMPT: ${{ needs.build.outputs.attempt }}\n')
     && verifyStep.includes(`BUILD_CANDIDATE: \${{ github.workspace }}/${CANDIDATE}\n`) && !/github\.token|GH_READ_TOKEN|secrets\./.test(verifyStep) && (verifyJob.match(/github\.token/g) ?? []).length === 3);
   const vUpload = vSteps[vAt('Upload the build')] ?? '';
   check('the verify job uploads redline-build, the artifact the ops tick reads, whatever the outcome, as the build job uploads its candidate',
-    own(vUpload).replace(/^ {6}# .*\n/gm, '') === own(upload).replace('Upload the candidate', 'Upload the build').replace('name: redline-build-candidate', 'name: redline-build').replace(/^ {6}# .*\n/gm, '')
+    own(vUpload).replace(/^ {6}# .*\n/gm, '') === own(upload).replace('Upload the candidate', 'Upload the build').replace('        id: candidate\n', '').replace('name: redline-build-candidate', 'name: redline-build').replace(/^ {6}# .*\n/gm, '')
     && (wf.match(/name: redline-build\n/g) ?? []).length === 1);
   check('its cleanup removes the checkout, the script, this run\'s output and the candidate', /run: rm -rf work \.redline "\$OUT" "\$CANDIDATE"\s*$/.test(own(vSteps[vAt('Remove the checkouts')] ?? '')) && (vSteps[vAt('Remove the checkouts')] ?? '').includes(`CANDIDATE: ${CANDIDATE}\n`));
   check('the header says what the lane never does and that the ticket\'s text is public in the log',

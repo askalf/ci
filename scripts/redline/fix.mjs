@@ -1238,7 +1238,9 @@ export async function runFix(ctx) {
  * lane's own `record` writes, and the bundle or patch already written is removed.
  */
 export function sealResult(ctx, result, bundle, record) {
-  if (!leaksSecret(`${JSON.stringify(result.record)}\n${result.description ?? ''}`, runSecrets(ctx))) return result;
+  // Everything the run writes out from the model's words: the record, the description, and what a
+  // verify run is handed (replay).
+  if (!leaksSecret(`${JSON.stringify(result.record)}\n${result.description ?? ''}\n${JSON.stringify(result.replay ?? null)}`, runSecrets(ctx))) return result;
   for (const f of [bundle, 'diff.patch']) rmSync(join(ctx.out, f), { force: true });
   return { record: record({ outcome: 'refused', turns: result.record.turns,
     notes: renderNotes({ outcome: 'refused', reason: 'The result carried a credential of this run, so nothing from it is kept.' }) }) };
@@ -1354,12 +1356,12 @@ async function answerReview(ctx) {
  *                    (headAttributes) and this process's git on the checkout
  *   bundle           the bundle's file name
  *   replay           a verify run's candidate, in place of the model: { tree, subject, summary,
- *                    tests_run, ranBuild, description, turns }. The tree is written into the
+ *                    ranBuild, description, turns }. The tree is written into the
  *                    checkout as the model's edits were, the test gate decides once with no turn
  *                    to answer it, and the commit is made as a build's is; the tree it commits must
  *                    be the candidate's. No model is called and nothing is installed here.
  * Returns { record, description, replay }: replay, for a fixed result, is what a verify run needs
- * besides the bundle (the summary, tests_run, and whether the model ran the build script). Throws
+ * besides the change (the summary, and whether the model ran the build script). Throws
  * only on a broken model response or a git failure; the CLI turns that into a refused record.
  */
 export async function workCheckout(ctx, job) {
@@ -1773,7 +1775,7 @@ export async function workCheckout(ctx, job) {
       ranBuild = r.ranBuild === true;
       description = typeof r.description === 'string' ? r.description : null;
       bounces = LIMITS.testBounces;
-      const f = await finalize({ outcome: 'fixed', subject: r.subject, summary: r.summary, tests_run: r.tests_run });
+      const f = await finalize({ outcome: 'fixed', subject: r.subject, summary: r.summary });
       if (f.error) return refuse(`the candidate could not be finished: ${f.error}`, { turns: r.turns });
       loop = { turns: r.turns, sub: f.sub };
     } else {
@@ -1836,7 +1838,8 @@ export async function workCheckout(ctx, job) {
     }
     if (ctx.dryRun) {
       writeFileSync(join(out, 'diff.patch'), `${diff}\n`);
-      return { record: job.record({ ...common, outcome: 'fixed', subject: sub.subject, description: described, notes: notes('fixed') }), description };
+      return { record: job.record({ ...common, outcome: 'fixed', subject: sub.subject, description: described, notes: notes('fixed') }), description,
+        replay: { summary: sub.summary, ran_build: ranBuild } };
     }
 
     // One commit as askalf, hooks off, then the message is checked and the bundle written.
@@ -1866,7 +1869,7 @@ export async function workCheckout(ctx, job) {
     git(root, genv, ['bundle', 'create', bundle, `${start}..HEAD`]);
     git(root, genv, ['bundle', 'verify', bundle]);
     return { record: job.record({ ...common, outcome: 'fixed', subject: sub.subject, newHead, commits, description: described, notes: notes('fixed') }), description,
-      replay: { summary: sub.summary, tests_run: sub.tests_run ?? '', ran_build: ranBuild } };
+      replay: { summary: sub.summary, ran_build: ranBuild } };
   } finally {
     // Cleanup never replaces the result: a failure here is a warning.
     try { settle(); } catch (e) { ctx.log?.(`::warning::${e.message}`); }

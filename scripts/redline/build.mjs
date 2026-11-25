@@ -278,20 +278,22 @@ export function saveBuild(dir, record, description = null, replay = null) {
   writeFileSync(join(dir, 'build.json'), `${JSON.stringify(record, null, 2)}\n`);
   writeFileSync(join(dir, 'notes.md'), `${record.notes}\n`);
   if (record.description === true && typeof description === 'string') writeFileSync(join(dir, 'description.md'), `${description}\n`);
-  // What the verify job needs besides the bundle, for a build job's fixed result only.
-  if (replay && record.outcome === 'fixed' && record.new_head) writeFileSync(join(dir, CANDIDATE_REPLAY), `${JSON.stringify(replay, null, 2)}\n`);
+  // What the verify job needs besides the change, for a build job's fixed result only.
+  if (replay && record.outcome === 'fixed') writeFileSync(join(dir, CANDIDATE_REPLAY), `${JSON.stringify(replay, null, 2)}\n`);
 }
 
-/** The file a build job's candidate carries for the verify job: the summary, tests_run and ran_build. */
+/** The file a build job's candidate carries for the verify job: { summary, ran_build }. */
 export const CANDIDATE_REPLAY = 'replay.json';
 
 /**
  * The verify job's reading of the build job's candidate (the redline-build-candidate artifact,
  * unpacked in `dir`), against this run: its build.json must pass buildProblem and name this
- * repository, ticket, base and run, and attempt. Returns { through } for a record that is passed
- * on as it is (anything but a fixed build with a commit), { replay } for a fixed one, whose commit
- * is fetched from its bundle into the checkout and must be one commit on the base, or { problem }.
- * `git(args)` runs git in the checkout. Never reads the model's output as instructions.
+ * repository, ticket, base and run, and the attempt the build job ran in (ctx.buildAttempt, the
+ * build job's own output, which a verify job re-run alone still reads). Returns { through } for a
+ * record that is passed on as it is (anything but a fixed build), { replay } for a fixed one, or
+ * { problem }. A fixed build's tree comes from its bundle, one commit on the base, fetched into the
+ * checkout; a dry run's from its diff, applied to the index alone and put back. `git(args, input)`
+ * runs git in the checkout. Never reads the model's output as instructions.
  */
 export function readCandidate(dir, ctx, git) {
   const file = (name) => (existsSync(join(dir, name)) ? readFileSync(join(dir, name), 'utf8') : null);
@@ -302,24 +304,34 @@ export function readCandidate(dir, ctx, git) {
   const bad = buildProblem(record);
   if (bad) return { problem: `the build job's build.json ${bad}` };
   if (record.repo !== ctx.repo || record.ticket !== ctx.ticket || record.base_head !== ctx.base) return { problem: 'the build job\'s build.json names another repository, ticket or base' };
-  if (!record.run || !ctx.run || record.run.id !== ctx.run.id || record.run.attempt !== ctx.run.attempt) return { problem: 'the build job\'s build.json names another run or attempt' };
+  if (!record.run || !ctx.run || record.run.id !== ctx.run.id || record.run.attempt !== ctx.buildAttempt) return { problem: 'the build job\'s build.json names another run or attempt' };
   const description = file('description.md');
-  if (record.outcome !== 'fixed' || !record.new_head) {
+  if (record.outcome !== 'fixed') {
     return { through: { record, description: description === null ? null : description.replace(/\n$/, ''), diff: file('diff.patch') } };
   }
-  const bundle = join(dir, 'build.bundle');
-  if (!existsSync(bundle)) return { problem: 'the build job\'s fixed build has no build.bundle' };
   let extra;
   try { extra = JSON.parse(file(CANDIDATE_REPLAY) ?? ''); } catch { return { problem: `the build job's fixed build has no readable ${CANDIDATE_REPLAY}` }; }
-  if (typeof extra?.summary !== 'string' || typeof extra?.ran_build !== 'boolean') return { problem: `the build job's ${CANDIDATE_REPLAY} is not { summary, tests_run, ran_build }` };
+  if (typeof extra?.summary !== 'string' || typeof extra?.ran_build !== 'boolean') return { problem: `the build job's ${CANDIDATE_REPLAY} is not { summary, ran_build }` };
   if (record.description === true && description === null) return { problem: 'the build job\'s fixed build says it has a description and carries none' };
-  if (git(['fetch', '-q', bundle, 'HEAD']) === null || git(['rev-parse', 'FETCH_HEAD']) !== record.new_head) return { problem: 'the build job\'s bundle does not hold its new_head' };
-  if (git(['rev-list', '--count', `${ctx.base}..${record.new_head}`]) !== '1' || git(['rev-parse', `${record.new_head}^`]) !== ctx.base) return { problem: 'the build job\'s commit is not one commit on the base' };
-  const tree = git(['rev-parse', `${record.new_head}^{tree}`]);
-  if (!tree) return { problem: 'the build job\'s commit has no tree' };
+  if ((record.new_head === null) !== ctx.dryRun) return { problem: 'the build job\'s build.json is a dry run where this run is not, or the other way round' };
+  let tree;
+  if (record.new_head === null) {
+    if (!existsSync(join(dir, 'diff.patch'))) return { problem: 'the build job\'s dry run has no diff.patch' };
+    const applied = git(['apply', '--cached', '--binary', join(dir, 'diff.patch')]) !== null;
+    tree = applied ? git(['write-tree']) : null;
+    git(['reset', '-q', ctx.base]);
+    if (!tree) return { problem: 'the build job\'s diff.patch does not apply to the base' };
+  } else {
+    const bundle = join(dir, 'build.bundle');
+    if (!existsSync(bundle)) return { problem: 'the build job\'s fixed build has no build.bundle' };
+    if (git(['fetch', '-q', bundle, 'HEAD']) === null || git(['rev-parse', 'FETCH_HEAD']) !== record.new_head) return { problem: 'the build job\'s bundle does not hold its new_head' };
+    if (git(['rev-list', '--count', `${ctx.base}..${record.new_head}`]) !== '1' || git(['rev-parse', `${record.new_head}^`]) !== ctx.base) return { problem: 'the build job\'s commit is not one commit on the base' };
+    tree = git(['rev-parse', `${record.new_head}^{tree}`]);
+    if (!tree) return { problem: 'the build job\'s commit has no tree' };
+  }
   return { replay: {
-    tree, subject: record.title, summary: extra.summary, tests_run: typeof extra.tests_run === 'string' ? extra.tests_run : '',
-    ranBuild: extra.ran_build, description: description === null ? null : description.replace(/\n$/, ''), turns: record.turns,
+    tree, subject: record.title, summary: extra.summary, ranBuild: extra.ran_build,
+    description: description === null ? null : description.replace(/\n$/, ''), turns: record.turns,
   } };
 }
 
@@ -467,13 +479,17 @@ async function main() {
     requireRunAccount: true,
   };
   const lane = {
-    name: 'build', run: runBuild, save: saveBuild, exit: exitCode,
+    name: 'build', run: runBuild, exit: exitCode,
+    // replay.json is the candidate's alone: the verify job's own result carries none.
+    save: (out, record, description, replay) => saveBuild(out, record, description, ctx.replay ? null : replay),
     record: (fields) => buildRecord({ repo: ctx.repo, ticket: ctx.ticket, base: ctx.base, model: ctx.model, run: ctx.run, ...fields }),
   };
   // The verify job: BUILD_CANDIDATE is the build job's candidate. A record that is not a fixed
   // build is passed on as it is; a fixed one is built again from its tree, with no model, in this
   // job's own checkout, and only what passes the gate here is fixed.
   if (env.BUILD_CANDIDATE !== undefined) {
+    // The attempt the build job ran in, which a verify job re-run alone does not change.
+    ctx.buildAttempt = Number(env.BUILD_RUN_ATTEMPT);
     const read = readCandidate(env.BUILD_CANDIDATE, ctx, (args) => {
       const r = spawnSync('git', args, { cwd: ctx.checkout, encoding: 'utf8', env: { PATH: env.PATH ?? '', HOME: ctx.out, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' } });
       return r.status === 0 ? String(r.stdout ?? '').trim() : null;

@@ -84,6 +84,11 @@ jobs:
   build:
     runs-on: [self-hosted, "${{ inputs.runner-label }}"]
     timeout-minutes: 60
+    # The attempt this job ran in and the id of the candidate it uploaded: a re-run of the verify
+    # job alone still reads these, and verifies this job's candidate.
+    outputs:
+      attempt: ${{ github.run_attempt }}
+      candidate: ${{ steps.candidate.outputs.artifact-id }}
     steps:
       # github.job_workflow_sha is not available to expressions, so the caller passes the sha it
       # pins as redline-ref. It must be a full sha, so it cannot name a moving branch or tag, and
@@ -246,6 +251,7 @@ jobs:
       # The candidate goes up whatever the outcome: the verify job passes on a record that is not a
       # fixed build, and verifies one that is.
       - name: Upload the candidate
+        id: candidate
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -407,6 +413,7 @@ jobs:
           GH_READ_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           RUN_ID: ${{ github.run_id }}
+          CANDIDATE_ID: ${{ needs.build.outputs.candidate }}
           CANDIDATE_OUT: ${{ github.workspace }}/candidate-${{ github.run_id }}-${{ github.run_attempt }}
         run: node .redline/scripts/redline/candidate.mjs
 
@@ -419,6 +426,9 @@ jobs:
           BUILD_TITLE: ${{ inputs.title }}
           BUILD_BRIEF: ${{ inputs.brief }}
           BUILD_CANDIDATE: ${{ github.workspace }}/candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          # The attempt the build job ran in: the candidate names it, and a re-run of this job
+          # alone runs in a later one.
+          BUILD_RUN_ATTEMPT: ${{ needs.build.outputs.attempt }}
           CHECKOUT: ${{ github.workspace }}/work
           REDLINE_CI_REPO: ${{ inputs.ci-repo }}
           FIX_ENV_FILE: ${{ inputs.env-file }}
