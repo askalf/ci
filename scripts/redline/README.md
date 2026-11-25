@@ -396,8 +396,10 @@ commit as askalf. What differs:
   uploads `redline-build`, the artifact the ops tick reads. So every `fixed` result is built again
   in a job that never ran the model's commands, and when the tree declares a test script its suite
   must pass there. A tree that declares none has no suite the gate can run: its `fixed` result has
-  `tests: null`, and no tests ran in either job's gate, whatever the model ran while it worked (a
-  standalone `node test.mjs`, say, is not run by the gate).
+  `tests: null`, which says only that the gate ran no suite on the accepted tree, in either job.
+  It says nothing of what ran on an earlier tree in the build job (a change may add a test script,
+  fail it and take it out again) or of what the model ran while it worked (a standalone
+  `node test.mjs`, say, is not run by the gate).
 
 The artifact is `redline-build`, uploaded by the verify job:
 

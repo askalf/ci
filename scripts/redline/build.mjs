@@ -496,7 +496,8 @@ async function main() {
   // The verify job: BUILD_CANDIDATE is the build job's candidate. A record that is not a fixed
   // build is passed on as it is; a fixed one is built again from its tree, with no model, in this
   // job's own checkout, and only what passes the gate here is fixed (a tree that declares no test
-  // script has no suite for the gate to run, and its fixed result says tests: null).
+  // script has no suite for the gate to run, and its fixed result says tests: null: no suite on
+  // the accepted tree, whatever ran on an earlier one).
   if (env.BUILD_CANDIDATE !== undefined) {
     // The attempt the build job ran in, which a verify job re-run alone does not change.
     ctx.buildAttempt = Number(env.BUILD_RUN_ATTEMPT);
