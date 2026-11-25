@@ -90,7 +90,7 @@
 // there is no bundled fallback, and a variable that is unset, a file that cannot be read or an empty
 // file ends the run.
 
-import { readFileSync, writeFileSync, mkdirSync, rmSync, existsSync, lstatSync, realpathSync, statSync, readdirSync, appendFileSync, mkdtempSync, readlinkSync, cpSync, openSync, fstatSync, closeSync, ftruncateSync, writeSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, rmSync, existsSync, lstatSync, realpathSync, statSync, readdirSync, appendFileSync, mkdtempSync, readlinkSync, cpSync, openSync, fstatSync, closeSync, readSync, renameSync, chmodSync } from 'node:fs';
 import { join, resolve, relative, dirname, basename, sep, posix } from 'node:path';
 import { tmpdir, userInfo } from 'node:os';
 import { createHash } from 'node:crypto';
@@ -161,7 +161,7 @@ export const PACKAGE_MANAGERS = ['npm', 'pnpm', 'yarn', 'bun'];
 export const LIMITS = {
   turns: 40, forceFinishAt: 36, timeMs: 45 * 60_000, hardMs: 52 * 60_000, files: 30, diffBytes: 400_000, fileBytes: 1_000_000,
   writeBytes: 400_000, runDefaultS: 600, runMaxS: 900, installS: 600, runOutChars: 16_000,
-  readLines: 400, readChars: 24_000,
+  readLines: 400, readChars: 24_000, readFileBytes: 8_000_000,
   maxTokens: 16_000, modelTimeoutMs: 240_000, textOnlyTurns: 3, testBounces: 1,
   notesChars: 6_000, bodyChars: 8_000, diffChars: 120_000, subjectChars: 72, descriptionChars: 20_000,
 };
@@ -864,23 +864,40 @@ const CONNECTION_REMOVES = [
   /\b(librechat|typingmind)\b/gi,
 ];
 
-/** The text as the model is shown it: dario's content scrub, pattern after pattern, with its path and slug exemptions. */
-export function shownText(text) {
-  let out = String(text ?? '');
+/**
+ * The text as the model is shown it, and where each of its characters is on disk: dario's content
+ * scrub, pattern after pattern over the result of the one before, with its path and slug
+ * exemptions. The scrub only removes, so `map[i]` is the index in `text` of `shown[i]`.
+ */
+export function shownView(text) {
+  let shown = String(text ?? '');
+  let map = Array.from({ length: shown.length }, (_, i) => i);
   for (const re of CONNECTION_REMOVES) {
-    re.lastIndex = 0;
-    out = out.replace(re, (match, ...args) => {
-      const offset = args[args.length - 2];
-      const src = args[args.length - 1];
-      const before = offset > 0 ? src[offset - 1] : '';
-      const after = offset + match.length < src.length ? src[offset + match.length] : '';
-      if (before === '.' || before === '/' || before === '\\' || before === '-' || before === '_') return match;
-      if (after === '/' || after === '\\') return match;
-      return '';
-    });
+    const cut = [];
+    for (const m of shown.matchAll(re)) {
+      const before = m.index > 0 ? shown[m.index - 1] : '';
+      const after = m.index + m[0].length < shown.length ? shown[m.index + m[0].length] : '';
+      if (before === '.' || before === '/' || before === '\\' || before === '-' || before === '_') continue;
+      if (after === '/' || after === '\\') continue;
+      cut.push([m.index, m.index + m[0].length]);
+    }
+    if (!cut.length) continue;
+    let next = '';
+    const nextMap = [];
+    let from = 0;
+    for (const [a, b] of [...cut, [shown.length, shown.length]]) {
+      next += shown.slice(from, a);
+      for (let i = from; i < a; i++) nextMap.push(map[i]);
+      from = b;
+    }
+    shown = next;
+    map = nextMap;
   }
-  return out;
+  return { shown, map };
 }
+
+/** The text as the model is shown it. */
+export const shownText = (text) => shownView(text).shown;
 
 /** True when the model is shown this text with words removed. */
 export const alteredInTransit = (text) => shownText(text) !== String(text ?? '');
@@ -906,18 +923,43 @@ const namedLines = (nums) => `${nums.length > 1 ? 'lines' : 'line'} ${nums.slice
 const isAre = (nums) => (nums.length > 1 ? 'are' : 'is');
 // Room a read or search result keeps for its notes, so the whole result stays under readChars.
 const NOTE_ROOM = 2_000;
+// A lone surrogate: half of a character, which UTF-8 cannot hold.
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+/** s cut to at most n UTF-16 units, never between the two halves of one character. */
+const cutWhole = (s, n) => { const part = s.slice(0, n); return /[\uD800-\uDBFF]$/.test(part) ? part.slice(0, -1) : part; };
+
+/**
+ * Replace the file at abs with bytes, all or nothing: they go to a new file beside it, which takes
+ * `mode` when one is given, and that file is renamed over abs only once every byte is written. A
+ * failure leaves abs as it was and removes the new file.
+ */
+export function replaceFile(abs, bytes, mode = null) {
+  const tmp = join(dirname(abs), `.${basename(abs)}.fix-${process.pid}-${createHash('sha256').update(`${abs}|${Date.now()}|${Math.random()}`).digest('hex').slice(0, 12)}`);
+  try {
+    writeFileSync(tmp, bytes, { flag: 'wx' });
+    if (mode !== null) chmodSync(tmp, mode & 0o7777);
+    renameSync(tmp, abs);
+  } catch (e) {
+    rmSync(tmp, { force: true });
+    throw e;
+  }
+}
 
 /** fix_read: numbered lines, at most LIMITS.readLines, the whole result under LIMITS.readChars, naming the lines shown with words removed. */
 export function fixRead(root, input = {}) {
   let text;
   try {
-    // One descriptor for the check and the read.
+    // One descriptor for the check and the read. The first 8 KB are probed before anything else is
+    // read, and the read is bounded, so a large binary costs 8 KB, not its size.
     const fd = openSync(safePath(root, input.path), 'r');
     try {
-      if (fstatSync(fd).isDirectory()) return 'error: that is a directory; use fix_list';
-      const buf = readFileSync(fd);
-      if (buf.subarray(0, 8192).includes(0)) return 'error: binary file, not readable as text';
-      text = buf.toString('utf8');
+      const st = fstatSync(fd);
+      if (st.isDirectory()) return 'error: that is a directory; use fix_list';
+      const probe = Buffer.alloc(Math.min(8192, st.size));
+      const got = readSync(fd, probe, 0, probe.length, 0);
+      if (probe.subarray(0, got).includes(0)) return 'error: binary file, not readable as text';
+      if (st.size > LIMITS.readFileBytes) return `error: the file is ${st.size} bytes, more than fix_read reads (${LIMITS.readFileBytes}); find the lines with fix_search`;
+      text = readFileSync(fd).toString('utf8');
     } finally { closeSync(fd); }
   } catch (e) {
     return e?.code === 'EISDIR' ? 'error: that is a directory; use fix_list' : `error: ${e.message}`;
@@ -936,7 +978,7 @@ export function fixRead(root, input = {}) {
     if (out.length + row.length > budget) {
       if (!out) {
         // One line longer than a read: its start, and how much of it that is.
-        const part = lines[i - 1].slice(0, budget - 300);
+        const part = cutWhole(lines[i - 1], budget - 300);
         out = `${i}\t${part}\n(line ${i} goes on past what one read shows: its first ${part.length} of ${lines[i - 1].length} characters are above; take fix_edit's old_text from them)\n`;
         if (alteredInTransit(part)) altered.push(i);
         last = i;
@@ -1578,18 +1620,23 @@ async function answerReview(ctx) {
         // The tool arguments are the model's: a missing new_text is an error, never a deletion.
         if (typeof input.old_text !== 'string' || typeof input.new_text !== 'string') return 'error: old_text and new_text must both be strings (new_text may be empty, to delete old_text)';
         if (!input.old_text) return 'error: old_text is empty; copy the lines to change from fix_read';
+        // Half of a character in either would split one in the file, or write one UTF-8 cannot hold.
+        if (LONE_SURROGATE.test(input.old_text) || LONE_SURROGATE.test(input.new_text)) return 'error: old_text or new_text holds half of a character; copy whole characters';
         if (Buffer.byteLength(input.new_text) > LIMITS.writeBytes) return `error: new_text is larger than ${LIMITS.writeBytes} bytes`;
         let fd = null;
         try {
           const t = target(input.path);
           if (t.error) return t.error;
-          // One descriptor for the check, the read and the write.
-          try { fd = openSync(t.abs, 'r+'); } catch (e) {
+          // One descriptor for the check and the read; the write replaces the file whole (replaceFile).
+          try { fd = openSync(t.abs, 'r'); } catch (e) {
             if (e?.code === 'ENOENT') return `error: ${t.rel} does not exist; write a new file with fix_write`;
             throw e;
           }
-          if (fstatSync(fd).size > LIMITS.fileBytes) return `error: ${t.rel} is larger than ${LIMITS.fileBytes} bytes`;
+          const st = fstatSync(fd);
+          if (st.size > LIMITS.fileBytes) return `error: ${t.rel} is larger than ${LIMITS.fileBytes} bytes`;
           const buf = readFileSync(fd);
+          closeSync(fd);
+          fd = null;
           if (buf.includes(0)) return `error: ${t.rel} is a binary file`;
           const text = buf.toString('utf8');
           // Bytes that are not UTF-8 would come back as U+FFFD: such a file is not edited at all.
@@ -1606,18 +1653,23 @@ async function answerReview(ctx) {
           }
           if (n > 1) return `error: old_text occurs ${n} times in ${t.rel}; take more of the lines around the change so it occurs once`;
           // Once on disk is not enough: the model chose old_text from the file as it was shown, so it
-          // must name one place there too, the same one.
-          const seen = occurrences(shownText(text), oldText);
+          // must occur once there too, and that match must be the same characters of the file, all of
+          // them shown, as the match on disk.
+          const view = shownView(text);
+          const seen = occurrences(view.shown, oldText);
           if (seen === 0) return `error: old_text holds text that reaches you with words removed (${namedLines(alteredLines(text))} of ${t.rel} ${isAre(alteredLines(text))} ${ALTERED_NOTE}); take old_text from lines that are not`;
           if (seen > 1) return `error: old_text occurs once in ${t.rel} but ${seen} times in the file as you are shown it, so it does not name one place; take more of the lines around the change`;
           const at = text.indexOf(oldText);
-          // The text round-trips to the bytes read (checked above), so everything outside the match
-          // is written back byte for byte.
+          const d = view.shown.indexOf(oldText);
+          if (view.map[d] !== at || view.map[d + oldText.length - 1] !== at + oldText.length - 1) {
+            return `error: the old_text you were shown is in a different place in ${t.rel} than the one it matches on disk, because words around it are removed on the way to you; take old_text from lines that are not ${ALTERED_NOTE}`;
+          }
+          // The text round-trips to the bytes read (checked above) and the match splits no character,
+          // so everything outside it is written back byte for byte.
           const nextText = text.slice(0, at) + newText + text.slice(at + oldText.length);
           const next = Buffer.from(nextText, 'utf8');
           if (next.length > LIMITS.fileBytes) return `error: the file would be larger than ${LIMITS.fileBytes} bytes`;
-          ftruncateSync(fd, 0);
-          writeSync(fd, next, 0, next.length, 0);
+          replaceFile(t.abs, next, st.mode);
           written.add(t.rel);
           const from = text.slice(0, at).split('\n').length;
           return `edited ${t.rel}: lines ${from}-${from + oldText.split('\n').length - 1} replaced by ${newText.split('\n').length} line(s); the file has ${nextText.split('\n').length} lines`;
@@ -1637,16 +1689,19 @@ async function answerReview(ctx) {
           // A file that exists is read before it is replaced, through one descriptor: one too large
           // to read, or with lines that reach the model with words removed, is never written whole.
           let fd = null;
+          let mode = null;
           try { fd = openSync(t.abs, 'r'); } catch (e) { if (e?.code !== 'ENOENT') throw e; }
           if (fd !== null) {
             try {
-              if (fstatSync(fd).size > LIMITS.fileBytes) return `error: ${t.rel} is larger than ${LIMITS.fileBytes} bytes, too large to check before it is replaced; it is not changed here`;
+              const st = fstatSync(fd);
+              if (st.size > LIMITS.fileBytes) return `error: ${t.rel} is larger than ${LIMITS.fileBytes} bytes, too large to check before it is replaced; it is not changed here`;
               const shown = alteredLines(readFileSync(fd, 'utf8'));
               if (shown.length) return `error: ${namedLines(shown)} of ${t.rel} ${isAre(shown)} ${ALTERED_NOTE}, so writing the file whole would change ${shown.length > 1 ? 'them' : 'it'}; change the file with fix_edit`;
+              mode = st.mode;
             } finally { closeSync(fd); }
           }
           mkdirSync(dirname(t.abs), { recursive: true });
-          writeFileSync(t.abs, content);
+          replaceFile(t.abs, content, mode);
           written.add(t.rel);
           return `wrote ${t.rel} (${content.split('\n').length} lines)`;
         } catch (e) { return `error: ${e.message}`; }

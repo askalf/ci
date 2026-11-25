@@ -2,7 +2,7 @@
 // The model and GitHub are stubbed through ctx.fetch; git is real, on throwaway repositories under
 // the temp directory. Nothing leaves the machine.
 
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, symlinkSync, chmodSync, statSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, symlinkSync, chmodSync, statSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer as createNetServer } from 'node:net';
@@ -17,7 +17,7 @@ import {
   LIMITS, OUTCOMES, AUTHOR, FIX_VERSION, DEFAULT_MODEL, SUBJECT_BANNED, EFFORT_LEVELS, fixEffort, priorRounds, REVIEW_PAGES_MAX,
   HISTORY, FIX_POSTER, appliedFixComments, fixVerdicts, historyFinding, allReviews, repoFixHistory, formatHistory,
   LESSONS, lessonsAccess, lessonQuery, fetchLessons,
-  runIdentity, alteredInTransit, alteredLines, fixRead, fixSearch, UNFINISHED_PREFIX, unfinished, CONNECTION_CUT_CHARS, occurrences, shownText,
+  runIdentity, alteredInTransit, alteredLines, fixRead, fixSearch, UNFINISHED_PREFIX, unfinished, CONNECTION_CUT_CHARS, occurrences, shownText, shownView, replaceFile,
 } from './fix.mjs';
 import { bumpCaller, fixCallerYaml, REVIEW_WORKFLOW, FIX_WORKFLOW, PUBLIC_TEXT_WORKFLOW, POST_WORKFLOW, CALLERS } from './pin.mjs';
 
@@ -421,6 +421,51 @@ console.log('\n  what the model is shown');
   rmSync(dir, { recursive: true, force: true });
   check('occurrences counts overlapping matches', occurrences('aaa', 'aa') === 2 && occurrences('abab', 'ab') === 2 && occurrences('x', '') === 0);
   check('shownText removes as dario does, path and slug names kept', shownText('// LibreChat enabled, see src/librechat.ts') === '//  enabled, see src/librechat.ts');
+  // dario's scrubWithPatterns over CONTENT_FRAMEWORK_PATTERNS, as written there: shownView must agree.
+  const darioScrub = (text) => {
+    let result = text;
+    for (const pattern of [/\b(roo[- ]?cline|roo[- ]?code|big[- ]?agi|claude[- ]?bridge)\b/gi, /\b(librechat|typingmind)\b/gi]) {
+      pattern.lastIndex = 0;
+      result = result.replace(pattern, (match, ...args) => {
+        const offset = args[args.length - 2];
+        const src = args[args.length - 1];
+        const before = offset > 0 ? src[offset - 1] : '';
+        const after = offset + match.length < src.length ? src[offset + match.length] : '';
+        if (before === '.' || before === '/' || before === '\\' || before === '-' || before === '_') return match;
+        if (after === '/' || after === '\\') return match;
+        return '';
+      });
+    }
+    return result;
+  };
+  const samples = ['Roo Code and roo-cline/x, .typingmind LibreChat_TypingMind', 'big agi\nclaude bridge!\r\nLibreChatTypingMind', 'x LibreChat y', '/librechat roocode-librechat', ''];
+  check('shownView shows what dario sends, for every sample', samples.every((t) => shownView(t).shown === darioScrub(t)), samples.find((t) => shownView(t).shown !== darioScrub(t)));
+  check('shownView maps each shown character to its place on disk', JSON.stringify(shownView('x LibreChat y')) === JSON.stringify({ shown: 'x  y', map: [0, 1, 11, 12] })
+    && samples.every((t) => { const v = shownView(t); return v.map.length === v.shown.length && [...v.shown].every((c, i) => t[v.map[i]] === c); }));
+  {
+    const d2 = mkdtempSync(join(tmpdir(), 'redline-fix-shown2-'));
+    const LONE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+    const cutAt = LIMITS.readChars - 2_000 - 300;
+    writeFileSync(join(d2, 'emoji.txt'), `${'q'.repeat(cutAt - 1)}\u{1F600}${'z'.repeat(2_000)}\nend\n`);
+    const er = fixRead(d2, { path: 'emoji.txt' });
+    check('a long line is cut between characters, never inside one', er.startsWith('1\tqqq') && !LONE.test(er) && /goes on past what one read shows/.test(er));
+    writeFileSync(join(d2, 'blob.bin'), Buffer.alloc(LIMITS.readFileBytes + 1_000));
+    check('a large binary is refused from its first 8 KB', fixRead(d2, { path: 'blob.bin' }) === 'error: binary file, not readable as text');
+    writeFileSync(join(d2, 'big.log'), Buffer.alloc(LIMITS.readFileBytes + 1_000, 'a'));
+    check('a text file past readFileBytes is refused with the way to its lines', /^error: the file is \d+ bytes, more than fix_read reads \(\d+\); find the lines with fix_search$/.test(fixRead(d2, { path: 'big.log' })));
+    // replaceFile: all or nothing. A rename onto a directory fails; the directory stays and no
+    // temporary file is left beside it.
+    mkdirSync(join(d2, 'dir'));
+    writeFileSync(join(d2, 'dir', 'keep.txt'), 'k');
+    const failed = await throws(() => replaceFile(join(d2, 'dir'), Buffer.from('x')));
+    check('a replace that cannot land throws and leaves no temporary file', failed !== null && readFileSync(join(d2, 'dir', 'keep.txt'), 'utf8') === 'k' && !readdirSync(d2).some((n) => n.includes('.fix-')), String(failed));
+    writeFileSync(join(d2, 'run.sh'), '#!/bin/sh\necho a\n');
+    if (process.platform !== 'win32') chmodSync(join(d2, 'run.sh'), 0o755);
+    replaceFile(join(d2, 'run.sh'), Buffer.from('#!/bin/sh\necho b\n'), statSync(join(d2, 'run.sh')).mode);
+    check('a replace lands whole, keeps the mode, and leaves no temporary file', readFileSync(join(d2, 'run.sh'), 'utf8') === '#!/bin/sh\necho b\n'
+      && (process.platform === 'win32' || (statSync(join(d2, 'run.sh')).mode & 0o777) === 0o755) && !readdirSync(d2).some((n) => n.includes('.fix-')));
+    rmSync(d2, { recursive: true, force: true });
+  }
   check('unfinished prefixes the reason the dispatcher reads', unfinished(' the budget ran out. ') === `${UNFINISHED_PREFIX} the budget ran out.` && UNFINISHED_PREFIX === 'The fix run could not finish:');
 }
 const use = (name, input, id = `${name}-${Math.random()}`) => ({ content: [{ type: 'tool_use', id, name, input }] });
@@ -801,6 +846,10 @@ if (!gitOk) {
     const BIG = `${Array.from({ length: 10_000 }, (_, i) => `export const v${i} = ${i}; // ${'p'.repeat(24)}`).join('\n')}\n`;
     writeFileSync(join(repo.dir, 'src', 'big.js'), BIG);
     writeFileSync(join(repo.dir, 'src', 'huge.txt'), 'h'.repeat(LIMITS.fileBytes + 10));
+    // Shown, line 1 reads " !" and line 2 "Chat !": "Chat !" occurs once in each view, but on disk
+    // it is the end of line 1, not line 2.
+    writeFileSync(join(repo.dir, 'src', 'place.js'), 'LibreChat !\nChat LibreChat!\n');
+    writeFileSync(join(repo.dir, 'src', 'emoji.js'), 'x\u{1F600}y\n');
     sh(repo.dir, ['add', '-A']);
     sh(repo.dir, ['-c', 'user.name=t', '-c', 'user.email=t@x', 'commit', '-q', '-m', 'add edge files']);
     repo.head = sh(repo.dir, ['rev-parse', 'HEAD']);
@@ -817,6 +866,9 @@ if (!gitOk) {
       tool('fix_edit', { path: 'src/big.js', old_text: 'export const v5000 = 5000;', new_text: 'export const v5000 = 5001;' }),
       tool('fix_write', { path: 'src/huge.txt', content: 'short' }),
       tool('fix_write', { path: 'src/new.js' }),
+      tool('fix_edit', { path: 'src/place.js', old_text: 'Chat !', new_text: 'Chat ?' }),
+      tool('fix_edit', { path: 'src/emoji.js', old_text: 'x\uD83D', new_text: 'x' }),
+      tool('fix_edit', { path: 'src/emoji.js', old_text: 'y', new_text: '\uDE00' }),
       finish(),
     ] });
     const { record: r } = await runFix(w.ctx);
@@ -832,6 +884,11 @@ if (!gitOk) {
     check('a one-line edit in a 540 KB file lands (the payload limit is the replacement\'s)', /edited src\/big\.js: lines 5001-5001 replaced by 1 line\(s\)/.test(res(10)) && at('src/big.js') === BIG.replace('export const v5000 = 5000;', 'export const v5000 = 5001;'), res(10));
     check('fix_write will not replace a file too large to check', /src\/huge\.txt is larger than 1000000 bytes, too large to check before it is replaced/.test(res(11)) && statSync(join(repo.dir, 'src', 'huge.txt')).size === LIMITS.fileBytes + 10, res(11));
     check('fix_write needs its content', /content must be a string/.test(res(12)) && !existsSync(join(repo.dir, 'src', 'new.js')));
+    check('once on disk and once as shown, but not the same place: refused, the file as it was', /the old_text you were shown is in a different place in src\/place\.js/.test(res(13))
+      && readFileSync(join(repo.dir, 'src', 'place.js'), 'utf8') === 'LibreChat !\nChat LibreChat!\n', res(13));
+    check('half of a character in old_text or new_text is refused, the file as it was', /half of a character/.test(res(14)) && /half of a character/.test(res(15))
+      && readFileSync(join(repo.dir, 'src', 'emoji.js'), 'utf8') === 'x\u{1F600}y\n');
+    check('no temporary file is left in the checkout', !readdirSync(join(repo.dir, 'src')).some((n) => n.includes('.fix-')));
     check('the run is the edits that landed', r.outcome === 'fixed' && r.files.slice().sort().join() === 'src/big.js,src/crlf.js,src/del.js', r.files.join());
     rmSync(w.out, { recursive: true, force: true });
     rmSync(repo.dir, { recursive: true, force: true });

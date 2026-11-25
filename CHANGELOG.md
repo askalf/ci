@@ -21,9 +21,12 @@ names the commit's date and the pull request it came from.
   line 550, ten of its lines arrived with words missing, and writing the file back whole would
   have changed text the model never saw, so it searched until the budget ran out and refused.
   `fix_edit` replaces one exact piece of a UTF-8 file. The piece must occur once on disk and once
-  in the file as the model is shown it, overlapping matches counted. A CRLF file keeps its line
-  ends, and every byte outside the match stays as it was. `fix_read` returns at most 400 lines,
-  keeps its whole result under 24,000 characters and says where to read on. `fix_read` and
+  in the file as the model is shown it, overlapping matches counted, and both matches must be
+  the same characters of the file. A CRLF file keeps its line ends, and every byte outside the
+  match stays as it was. Both write tools replace a file all or nothing, through a new file
+  renamed over it. `fix_read` returns at most 400 lines, keeps its whole result under 24,000
+  characters and says where to read on; it probes a file's first 8 KB before reading the rest
+  and reads at most 8 MB. `fix_read` and
   `fix_search` name the lines shown with words removed, and `fix_write` refuses to replace a file
   that has one, or one over 1 MB it cannot check. A run that ends on its budget, or refuses
   only once the budget is spent, now starts its notes with `The fix run could not finish:`, as a

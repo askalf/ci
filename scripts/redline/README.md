@@ -272,9 +272,11 @@ checks that the checkout is exactly the reviewed head, then `fix.mjs`:
   in `.gitattributes`, such as captured payloads and vendored code; the marks are read from that
   commit, so nothing the run does to `.gitattributes` lifts them). `fix_edit` replaces one exact
   piece of a UTF-8 file that exists: the text must occur once on disk and once in the file as the
-  model is shown it, overlapping matches counted; a file whose lines all end CRLF takes the
-  replacement with CRLF; every byte outside the match is written back as it was. `fix_write`
-  writes a whole file, given as a string. The model is reached through dario, which cuts a tool
+  model is shown it, overlapping matches counted, and the two matches must be the same characters
+  of the file; half of a character in either text is refused; a file whose lines all end CRLF
+  takes the replacement with CRLF; every byte outside the match is written back as it was.
+  `fix_write` writes a whole file, given as a string. Both replace a file all or nothing: a new
+  file beside it, with its mode, renamed over it once written. The model is reached through dario, which cuts a tool
   result over 30,000 characters and removes some product names from the text it carries
   (`shownText` follows its scrub), so `fix_read` returns at most 400 lines and its whole result,
   notes included, stays under 24,000 characters, saying where to read on, and `fix_read` and
