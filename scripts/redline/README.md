@@ -385,8 +385,8 @@ commit as askalf. What differs:
   alone reads the same candidate. The candidate must name this repository, ticket, base, run and
   the build job's attempt. A record whose outcome is not `fixed` is passed on as it is, its
   `diff.patch` byte for byte. A `fixed` one is built again with no model: a build's tree from its
-  bundle, which must hold its commit, one commit on the base, and a dry run's from its
-  `diff.patch`, applied to the index alone. Either must be the tree the build job's gate tested,
+  bundle, which must hold its commit, one commit whose only parent is the base, and a dry run's
+  from its `diff.patch`, applied to the index alone. Either must be the tree the build job's gate tested,
   which `replay.json` names, and its description must pass the lane's rule for one. The tree is
   written into the checkout as the model's edits were and the test gate runs once (installing,
   running the build script when the model ran it, as `replay.json` says, and the suite). A build's

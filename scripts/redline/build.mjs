@@ -331,7 +331,9 @@ export function readCandidate(dir, ctx, git) {
     const bundle = join(dir, 'build.bundle');
     if (!existsSync(bundle)) return { problem: 'the build job\'s fixed build has no build.bundle' };
     if (git(['fetch', '-q', bundle, 'HEAD']) === null || git(['rev-parse', 'FETCH_HEAD']) !== record.new_head) return { problem: 'the build job\'s bundle does not hold its new_head' };
-    if (git(['rev-list', '--count', `${ctx.base}..${record.new_head}`]) !== '1' || git(['rev-parse', `${record.new_head}^`]) !== ctx.base) return { problem: 'the build job\'s commit is not one commit on the base' };
+    // One commit whose only parent is the base: a second parent, even one the base already
+    // reaches, is not one commit on it.
+    if (git(['rev-list', '--parents', '-n', '1', record.new_head]) !== `${record.new_head} ${ctx.base}`) return { problem: 'the build job\'s commit is not one commit on the base' };
     tree = git(['rev-parse', `${record.new_head}^{tree}`]);
     if (!tree) return { problem: 'the build job\'s commit has no tree' };
   }
