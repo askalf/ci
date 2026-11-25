@@ -459,26 +459,27 @@ console.log('\n  what the model is shown');
     writeFileSync(join(d2, 'dir', 'keep.txt'), 'k');
     const failed = await throws(() => replaceFile(join(d2, 'dir'), Buffer.from('x')));
     check('a replace that cannot land throws and leaves no temporary file', failed !== null && readFileSync(join(d2, 'dir', 'keep.txt'), 'utf8') === 'k' && !readdirSync(d2).some((n) => n.includes('.fix-')), String(failed));
-    writeFileSync(join(d2, 'run.sh'), '#!/bin/sh\necho a\n');
-    if (process.platform !== 'win32') chmodSync(join(d2, 'run.sh'), 0o755);
-    replaceFile(join(d2, 'run.sh'), Buffer.from('#!/bin/sh\necho b\n'), statSync(join(d2, 'run.sh')).mode);
-    check('a replace lands whole, keeps the mode, and leaves no temporary file', readFileSync(join(d2, 'run.sh'), 'utf8') === '#!/bin/sh\necho b\n'
-      && (process.platform === 'win32' || (statSync(join(d2, 'run.sh')).mode & 0o777) === 0o755) && !readdirSync(d2).some((n) => n.includes('.fix-')));
+    // The callers pass the old file's fstat mode: here the modes are written out.
+    const run = join(d2, 'run.sh');
+    writeFileSync(run, '#!/bin/sh\necho a\n');
+    replaceFile(run, Buffer.from('#!/bin/sh\necho b\n'), 0o100755);
+    check('a replace lands whole, takes the mode, and leaves no temporary file', readFileSync(run, 'utf8') === '#!/bin/sh\necho b\n'
+      && (process.platform === 'win32' || (statSync(run).mode & 0o777) === 0o755) && !readdirSync(d2).some((n) => n.includes('.fix-')));
     if (process.platform !== 'win32') {
-      // A set-user-ID bit the run account left on the old file is not carried to the new one; the
-      // ordinary bits are.
+      // The mode of an old file the run account set user-ID on (0o4755; a CI account may not set
+      // that bit itself, so the mode is given): the new file gets the ordinary bits and not that one.
       const suid = join(d2, 'suid.sh');
       writeFileSync(suid, '#!/bin/sh\n');
-      chmodSync(suid, 0o4755);
-      if ((statSync(suid).mode & 0o4000) === 0) console.log('  skip the set-user-ID check: this filesystem drops the bit');
-      else {
-        replaceFile(suid, Buffer.from('#!/bin/sh\necho x\n'), statSync(suid).mode);
-        check('a replace keeps the ordinary bits and drops set-user-ID', (statSync(suid).mode & 0o7777) === 0o755, (statSync(suid).mode & 0o7777).toString(8));
-      }
+      replaceFile(suid, Buffer.from('#!/bin/sh\necho x\n'), 0o104755);
+      check('a replace keeps the ordinary bits and drops set-user-ID, set-group-ID and sticky', (statSync(suid).mode & 0o7777) === 0o755, (statSync(suid).mode & 0o7777).toString(8));
+      const all = join(d2, 'all.sh');
+      writeFileSync(all, '#!/bin/sh\n');
+      replaceFile(all, Buffer.from('#!/bin/sh\necho y\n'), 0o107775);
+      check('every special bit is dropped at once', (statSync(all).mode & 0o7777) === 0o775, (statSync(all).mode & 0o7777).toString(8));
       // A name near the 255-byte component limit: the new file's own name is short, so it still fits.
       const long = join(d2, 'n'.repeat(250));
       writeFileSync(long, 'a');
-      replaceFile(long, Buffer.from('b'), statSync(long).mode);
+      replaceFile(long, Buffer.from('b'), 0o100644);
       check('a file whose name is 250 bytes is replaced', readFileSync(long, 'utf8') === 'b' && !readdirSync(d2).some((n) => n.startsWith('.fix-')));
     }
     rmSync(d2, { recursive: true, force: true });
