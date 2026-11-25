@@ -278,10 +278,12 @@ checks that the checkout is exactly the reviewed head, then `fix.mjs`:
   `fix_write` writes a whole file, given as a string. Both write in place, so a file keeps its
   owner, group, ordinary permission bits and access list and no copy is made (a write by an
   account that does not own the file can clear its set-user-ID or set-group-ID bit, and that bit
-  is not put back). Every tool opens a file without blocking: `fix_read` reads only a regular
-  file, and the write tools change only a regular file with one name, opened without
-  truncation, so a file with a second name (a hard link), a FIFO, a socket or a device is
-  refused with nothing changed. A failure once a file is truncated, or created, ends the run as one that could not finish, with
+  is not put back). `fix_read`, `fix_edit` and `fix_write` open a file without blocking:
+  `fix_read` reads only a regular file (a hard-linked one included), and the write tools change
+  only a regular file with one name, opened without truncation, so a file with a second name (a
+  hard link), a FIFO, a socket or a device is refused with nothing changed. (`fix_search` is
+  `redline_search`, which opens files as it finds them; a FIFO there holds the search until its
+  10-second limit stops it.) A failure once a file is truncated, or created, ends the run as one that could not finish, with
   nothing committed, and the dispatcher tries the head once more on a fresh checkout. The model is reached through dario, which cuts a tool
   result over 30,000 characters and removes some product names from the text it carries
   (`shownText` follows its scrub), so `fix_read` returns at most 400 lines and its whole result,
