@@ -7,7 +7,9 @@
 # the outcome: 0 for fixed, 1 for anything else.
 # Nothing here pushes, opens a pull request or comments, and no token that could is on the runner:
 # the ops tick verifies the artifact, pushes the commit as a new branch and opens the pull request
-# with the token it already holds. Nothing under .github/ is written, whatever the ticket asks.
+# with the token it already holds. Nothing under .github/ is in the commit, whatever the ticket
+# asks: the build's write tool writes nothing there, and a change a command makes there in the
+# checkout is left out of the commit and put back before the tests run.
 # The title and the brief are a ticket's text. They are in the build step's environment, which the
 # run's log prints, so on a public repository they are public.
 # The model is reached through FIX_ENV_FILE, which only the exec account that runs this job can
@@ -91,8 +93,9 @@ jobs:
             exit 1
           fi
 
-      # The ticket id is a ULID and the base a full sha, before anything is fetched. The title and
-      # the brief are read by build.mjs alone, which refuses a run whose text is missing or too long.
+      # The ticket id is a ULID (its first character 0 to 7, as a 128-bit value's must be) and the
+      # base a full sha, before anything is fetched. The title and the brief are read by build.mjs
+      # alone, which refuses a run whose text is missing or too long.
       - name: Check the ticket and the base
         env:
           TICKET: ${{ inputs.ticket }}
@@ -100,8 +103,8 @@ jobs:
           # The C locale: a range in a pattern is the ASCII range, so lower case never passes for upper.
           LC_ALL: C
         run: |
-          if ! [[ "$TICKET" =~ ^[0-9A-HJKMNP-TV-Z]{26}$ ]]; then
-            echo "::error::ticket must be a ticket id, 26 characters of Crockford base32 in upper case"
+          if ! [[ "$TICKET" =~ ^[0-7][0-9A-HJKMNP-TV-Z]{25}$ ]]; then
+            echo "::error::ticket must be a ticket id, a ULID: 26 characters of Crockford base32 in upper case, the first 0 to 7"
             exit 1
           fi
           if ! [[ "$BASE" =~ ^[0-9a-f]{40}$ ]]; then
@@ -136,6 +139,37 @@ jobs:
             console.log(status
               ? `::error::redline-ref ${ref} is not a commit on ${repo} main (${status})`
               : `::error::could not compare redline-ref ${ref} with ${repo} main`);
+            process.exit(1);
+          '
+
+      # The base is a commit of this repository's default branch: the default branch is ahead of it
+      # or at it. A sha the checkout would reach on another branch (unmerged code) fails here, before
+      # anything is fetched. A failed read is retried, then fails the job: it is never taken as a pass.
+      - name: Check the base is on the default branch
+        env:
+          BASE: ${{ inputs.base }}
+          REPO: ${{ github.repository }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GH_READ_TOKEN: ${{ github.token }}
+        run: |
+          node --input-type=module -e '
+            const { BASE: base, REPO: repo, DEFAULT_BRANCH: branch } = process.env;
+            if (!/^[A-Za-z0-9._/-]+$/.test(branch ?? "") || /^[./]|[.]{2}|\/$/.test(branch)) { console.log(`::error::the default branch name could not be read: ${JSON.stringify(branch)}`); process.exit(1); }
+            const url = `https://api.github.com/repos/${repo}/compare/${base}...${branch}`;
+            const headers = { authorization: `Bearer ${process.env.GH_READ_TOKEN}`, accept: "application/vnd.github+json" };
+            let status = "";
+            for (let attempt = 1; attempt <= 3 && !status; attempt++) {
+              try {
+                const res = await fetch(url, { headers });
+                if (res.ok) status = String((await res.json()).status ?? "");
+                else console.log(`attempt ${attempt}: HTTP ${res.status}`);
+              } catch (e) { console.log(`attempt ${attempt}: ${e.message}`); }
+              if (!status && attempt < 3) await new Promise((r) => setTimeout(r, attempt * 5000));
+            }
+            if (status === "ahead" || status === "identical") { console.log(`base ${base} is on ${branch}`); process.exit(0); }
+            console.log(status
+              ? `::error::base ${base} is not a commit on ${branch} (${status})`
+              : `::error::could not compare base ${base} with ${branch}`);
             process.exit(1);
           '
 
@@ -198,7 +232,9 @@ jobs:
           # never in a public repository. The script reads it from this file, under the name the
           # fix lane's prompt has there, and has no bundled fallback.
           FIX_PROMPT_FILE: ${{ inputs.prompt-file }}
-          FIX_OUT: ${{ github.workspace }}/build-out
+          # Named for this run and attempt: a directory another run left behind is never the one
+          # written or uploaded here.
+          FIX_OUT: ${{ github.workspace }}/build-out-${{ github.run_id }}-${{ github.run_attempt }}
           DRY_RUN: ${{ inputs.dry_run && '1' || '0' }}
         run: node .redline/scripts/redline/build.mjs
 
@@ -208,11 +244,13 @@ jobs:
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: redline-build
-          path: build-out
+          path: build-out-${{ github.run_id }}-${{ github.run_attempt }}
           if-no-files-found: ignore
           retention-days: 7
           overwrite: true
 
       - name: Remove the checkouts
         if: always()
-        run: rm -rf work .redline build-out
+        env:
+          OUT: build-out-${{ github.run_id }}-${{ github.run_attempt }}
+        run: rm -rf work .redline "$OUT"

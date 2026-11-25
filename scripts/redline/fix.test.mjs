@@ -1451,6 +1451,33 @@ if (!gitOk) {
       rmSync(repo.dir, { recursive: true, force: true });
     }
     {
+      // The suite passes only on an edit the commit will not carry: a command changes a fixture the
+      // repository marks redline-protected, and the code that reads it. The gate puts the fixture
+      // back before it runs the suite, so the tests run on the tree the commit holds, and fail there.
+      const testBody = "import { readFileSync } from 'node:fs';\nprocess.exit(JSON.parse(readFileSync('data/payload.json', 'utf8')).captured === false ? 0 : 1);\n";
+      const repo = makeRepo({ pkg: { name: 'r', private: true, scripts: { test: 'node test.mjs' } }, testBody });
+      mkdirSync(join(repo.dir, 'data'));
+      writeFileSync(join(repo.dir, 'data', 'payload.json'), '{"captured":true}\n');
+      writeFileSync(join(repo.dir, '.gitattributes'), `data/payload.json ${PROTECTED_ATTR}\n`);
+      sh(repo.dir, ['add', '-A']);
+      sh(repo.dir, ['-c', 'user.name=t', '-c', 'user.email=t@x', 'commit', '-q', '-m', 'chore: captured payload']);
+      repo.head = sh(repo.dir, ['rev-parse', 'HEAD']);
+      const edit = "import { writeFileSync } from 'node:fs';\nwriteFileSync('data/payload.json', '{\"captured\":false}\\n');\n";
+      const w = world(repo, { turns: [
+        tool('fix_write', { path: 'edit.mjs', content: edit }), tool('fix_run', { command: 'node edit.mjs' }),
+        tool('fix_write', { path: 'src/b.js', content: FIXED_B }), tool('fix_run', { command: 'npm test' }), finish(), finish(),
+      ] });
+      const { record: r } = await runFix(w.ctx);
+      const modelSaw = (i) => JSON.stringify(w.calls.model[i]?.messages.at(-1) ?? '');
+      check('the model\'s own run passed on the edited fixture', /exit 0/.test(modelSaw(4)), modelSaw(4).slice(0, 300));
+      check('the gate put the fixture back and ran the suite on the tree the commit holds: it fails there, and the model is told what was put back',
+        r.outcome === 'tests_failed' && r.tests?.exit_code === 1 && /test script fails/.test(modelSaw(5)) && /put back as the start commit has them before the run: data\/payload\.json/.test(modelSaw(5)), `${r.outcome} ${modelSaw(5).slice(0, 400)}`);
+      check('the fixture in the checkout is the start commit\'s again, and the notes name it as left out',
+        readFileSync(join(repo.dir, 'data', 'payload.json'), 'utf8') === '{"captured":true}\n' && new RegExp(`data/payload.json.*${PROTECTED_ATTR}`).test(r.notes) && fixProblem(r) === null, r.notes);
+      rmSync(w.out, { recursive: true, force: true });
+      rmSync(repo.dir, { recursive: true, force: true });
+    }
+    {
       // The root package's own postinstall stands in for a dependency's: --ignore-scripts skips both.
       const postinstall = 'node -e "require(\'fs\').writeFileSync(\'ran.txt\', \'x\')"';
       const repo = makeRepo({ pkg: { name: 'r', private: true, scripts: { test: 'node test.mjs', postinstall } } });

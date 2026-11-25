@@ -27,10 +27,15 @@
 //     brief quotes them line by line, names them as the task and says nothing in them changes its
 //     rules. What holds whatever the model then does is in the code: the write rules, the
 //     allowlist and the checks on the commit never read the ticket.
-//   - Nothing under .github/ is written. The fix lane may edit a workflow the pull request itself
+//   - Nothing under .github/ is in the commit. fix_write writes nothing there, and a change a
+//     command makes there in the checkout is left out of the commit, as the test gate leaves it
+//     out of the tree it tests. The fix lane may commit a workflow the pull request itself
 //     changes, since that change already runs with the pull request's permissions on the next
 //     push. A build has no pull request yet, so a workflow change here would be the lane's own,
 //     made from a ticket's text.
+//   - The commands run as the run account and never as this one: on a runner (the CLI) a build
+//     whose env file names no FIX_RUN_AS is refused before anything is installed or run
+//     (NO_RUN_ACCOUNT). The fix lane may run without one, with a warning.
 //   - fix_describe writes the new pull request's description and is required: a change that comes
 //     without one is sent back once, and after that its summary stands in.
 //   - The commit subject keeps the model's own prefix (`ops:`, `docs:`) and gets no `fix:`. It is
@@ -58,8 +63,11 @@ import {
 } from './fix.mjs';
 
 export const BUILD_VERSION = 1;
-/** A ticket id: a ULID, 26 characters of Crockford base32 in upper case. */
-export const TICKET = /^[0-9A-HJKMNP-TV-Z]{26}$/;
+/**
+ * A ticket id: a ULID, 26 characters of Crockford base32 in upper case. The first carries only the
+ * top three of its 128 bits, so it is 0 to 7: 26 characters starting higher do not fit a ULID.
+ */
+export const TICKET = /^[0-7][0-9A-HJKMNP-TV-Z]{25}$/;
 const SHA = /^[0-9a-f]{40}$/;
 /** The longest title and brief a ticket may bring, in characters. */
 export const INPUT_LIMITS = { titleChars: 140, briefChars: 6_000 };
@@ -89,7 +97,7 @@ export function ticketText({ title, brief }) {
  */
 export function inputProblem({ ticket, base, title, brief }) {
   if (!ticket) return 'BUILD_TICKET is not set';
-  if (!TICKET.test(String(ticket))) return 'BUILD_TICKET is not a ticket id: 26 characters of Crockford base32, upper case';
+  if (!TICKET.test(String(ticket))) return 'BUILD_TICKET is not a ticket id: a ULID, 26 characters of Crockford base32 in upper case, the first 0 to 7';
   if (!base) return 'BUILD_BASE is not set';
   if (!SHA.test(String(base))) return 'BUILD_BASE is not a full 40-character commit sha';
   const t = ticketText({ title, brief });
@@ -174,10 +182,12 @@ function protectedInTree(git, attrs, base) {
  * build's subject is a pull request title in a repository whose own commits name models, prompts
  * and the review itself, as the subjects the brief shows do, so here the credit is refused and the
  * words are not: `bump the model pins` and `serve claude-opus from the pool` are titles, `written
- * by Claude` is a credit. A model id (a name followed by a hyphen or more letters) is never the
- * credited party.
+ * by Claude` and `generated with GPT-4` are credits. A trailer is one with its colon, so
+ * `document the Reviewed-by trailer` is a title and `Reviewed-by: Claude` is not. Everything the
+ * public-text check (public-text.mjs) refuses in a title is refused here, a session link among it;
+ * build.test.mjs holds the two together.
  */
-export const BUILD_SUBJECT_BANNED = /co-authored|signed-off|reviewed-by|acked-by|tested-by|\b(?:generated|written|made|authored|created|drafted) (?:by|with) (?:an? )?(?:AI|LLM|model|assistant|claude(?: code)?|chatgpt|gpt|copilot|codex|gemini)(?![\w-])/i;
+export const BUILD_SUBJECT_BANNED = /\b(?:co-authored|signed-off|reviewed|acked|tested)-by\s*:|\b(?:generated|written|made|authored|created|drafted) (?:by|with) \[?(?:an? )?(?:AI|LLM|model|assistant|claude(?: code)?|anthropic|openai|chatgpt|gpt|copilot|codex|gemini)\b|\bclaude\.ai\/code\/session_|\bclaude-session\s*:/i;
 
 /**
  * The commit subject, which is also the pull request's title: the model's line with the cleaning
@@ -305,7 +315,9 @@ const DESCRIBE_FIRST = 'The change has no pull request description yet. Call fix
 /**
  * Carry out one ticket on one base commit. ctx: { repo, ticket, base, title, brief, checkout, out,
  * darioUrl, darioKey, model, system, fetch, sleep, now, log, dryRun, env }, with the run account,
- * the proxy, the guards, effort and lessons as runFix takes them, and repoPrivate. Returns
+ * the proxy, the guards, effort and lessons as runFix takes them, and repoPrivate. With
+ * requireRunAccount, as the CLI sets it, a build with no run account is refused once its inputs are
+ * read, before the checkout is touched. Returns
  * { record, description }: the build.json record and the pull request description; the bundle or
  * diff is written under ctx.out. Throws only on a broken model response or a git failure; the CLI
  * turns that into a refused record.
@@ -319,7 +331,7 @@ async function buildTicket(ctx, record) {
   // The run's start: the lessons read counts against the budget, as the install does.
   const started = ctx.now();
   mkdirSync(ctx.out, { recursive: true });
-  const why = inputProblem(ctx);
+  const why = inputProblem(ctx) ?? (ctx.requireRunAccount && !ctx.runAs ? NO_RUN_ACCOUNT : null);
   if (why) return { record: record({ outcome: 'refused', notes: renderNotes({ outcome: 'refused', reason: why }) }) };
   const { title, brief } = ticketText(ctx);
 
@@ -340,7 +352,7 @@ async function buildTicket(ctx, record) {
     start: ctx.base, started, record, words: WORDS,
     // A build has no earlier round: FIX_EFFORT applies as it is set.
     effort: fixEffort(ctx.effort, 0),
-    // Nothing under .github/ is written, whatever the ticket asks.
+    // Nothing under .github/ is in the commit, whatever the ticket asks.
     githubChanges: null,
     tools: TOOLS, subject: buildSubject, bundle: 'build.bundle',
     // fix_describe writes the new pull request's description. There is no current one to start
@@ -361,6 +373,14 @@ async function buildTicket(ctx, record) {
 
 // ---------- CLI ----------
 
+/**
+ * Why the CLI refuses a build with no run account. A ticket's text directs the commands, and
+ * without FIX_RUN_AS they would run as this account, which reads the env file and can use the key
+ * socket: refused before anything is installed or run. An account that is this one or root is
+ * refused once the work starts, as in the fix lane.
+ */
+export const NO_RUN_ACCOUNT = 'a build runs commands a ticket asked for, so it needs a run account of its own: FIX_RUN_AS in the env file names none, and without one they would run as the account that reads the env file';
+
 async function main() {
   const env = process.env;
   const host = hostSetup(env, 'build');
@@ -373,6 +393,8 @@ async function main() {
     // dario and the lessons service, and nothing else: this lane reads nothing from GitHub.
     fetch: host.fetchTo([]),
     ...host.ctx,
+    // The CLI is how a build runs on a runner: there, no run account is a refusal (NO_RUN_ACCOUNT).
+    requireRunAccount: true,
   };
   await runToExit(ctx, {
     name: 'build', run: runBuild, save: saveBuild, exit: exitCode,

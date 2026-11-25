@@ -275,7 +275,9 @@ checks that the checkout is exactly the reviewed head, then `fix.mjs`:
   `fix_describe` replace the PR description for a finding on it (whole text, no attribution, no
   em dashes, never when the brief showed only part of the current one);
 - runs the test script on the files as they finally are, however they were changed (a test run
-  goes stale when a file changes after it, by `fix_write` or by a `node <file>`); a failing suite is bounced to the
+  goes stale when a file changes after it, by `fix_write` or by a `node <file>`), and on the tree
+  the commit holds: a change the commit will leave out (below) is put back as the start commit
+  has it before the gate runs the suite, and the bounce names what was put back. A failing suite is bounced to the
   model once, then reported. The bounce, `fix.json` (`tests.failing`) and the notes name the failed
   tests the output reports (TAP `not ok`, jest/vitest `FAIL`); the gate is the exit code alone;
 - commits everything changed except `.github/**` the PR does not change (and any `.github/**`
@@ -341,16 +343,24 @@ commit as askalf. What differs:
   subjects of the base's last 15 commits, whose style the commit subject follows, the files the
   base marks `redline-protected`, lessons when the env file has the lessons settings (matched on
   the title and the brief), and the fix brief's own lines on the toolchain.
-- Nothing under `.github/` is written, whatever the ticket asks: `fix_write` refuses every path
-  there, and what a command changes there is left out of the commit. The fix lane may edit a
-  workflow its pull request already changes; a build has no pull request yet.
+- Nothing under `.github/` is in the commit, whatever the ticket asks: `fix_write` refuses every
+  path there, and a change a command makes there in the checkout is left out of the commit. The
+  fix lane may commit a workflow its pull request already changes; a build has no pull request yet.
+- On a runner a build needs a run account: an env file with no `FIX_RUN_AS` is refused before the
+  checkout is touched, since a ticket's text directs the commands and they would otherwise run as
+  the account that reads the env file. The fix lane may run without one, with a warning.
+- The base must be a commit of the calling repository's default branch: the workflow compares the
+  two through GitHub's API before anything is fetched, so a sha only another branch holds fails.
 - `fix_describe` writes the new pull request's description and is required: a `finish_fix` on a
   change without one is sent back once, and after that the summary stands in.
 - The commit subject keeps the model's own prefix (`ops:`, `docs:`) and gets no `fix:`. It is also
   the pull request's title. The rest of the cleaning is the fix lane's, and a line with nothing
-  usable left becomes `apply the requested change`. What is refused in it is a credit to a tool or a
-  person (`BUILD_SUBJECT_BANNED`), not the words a repository's own commits use: a fix's subject may
-  name no model at all, but a title here such as `bump the model pins` is an ordinary one.
+  usable left becomes `apply the requested change`. What is refused in it is a credit
+  (`BUILD_SUBJECT_BANNED`): a trailer with its colon (`Reviewed-by:`), a model or a tool credited
+  as the maker (`written by GPT-4`), a session link. The words a repository's own commits use are
+  not refused: a fix's subject may name no model at all, but a title here such as `bump the model
+  pins`, or one that speaks of the `Reviewed-by` trailer, is an ordinary one. Every title the
+  public-text check refuses for a credit is refused here too, and the tests hold the two together.
 - `build.mjs` reads nothing from GitHub and is handed no GitHub token: the checkout is its input.
 
 The artifact is `redline-build`:
@@ -368,7 +378,9 @@ The artifact is `redline-build`:
 The job exits 0 for `fixed` and 1 for any other outcome. A run whose `BUILD_` inputs are missing or
 malformed, whose checkout is not at the base or is not clean, or whose run account fails a check of
 the host setup below, is `refused`, and its notes say which. What the lane never does: it pushes
-nothing, opens no pull request, comments nowhere and writes nothing under `.github/`. Verifying the
+nothing, opens no pull request and comments nowhere, and its commit carries nothing under
+`.github/`. The output directory is named for the run and its attempt, so a run never uploads
+what another left behind. Verifying the
 artifact, pushing the commit as a new branch and opening the pull request are the ops tick's, with
 its own token, as pushing a fix is. The title and the brief are in the build step's environment,
 which the run's log prints, so on a public repository they are public.

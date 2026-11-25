@@ -1562,6 +1562,23 @@ export async function workCheckout(ctx, job) {
     let bounces = 0;
     let tests = null;
     let askedToDescribe = false;
+    // Edits the commit will not carry (staged().skipped: a protected file, .github/ where nothing
+    // there is written, a .gitattributes, an install's own change, a file over the size limit) are
+    // put back as the start commit has them, by this process's git, before the test gate runs: the
+    // suite then runs on the tree the bundle holds, and a pass never leans on a change that is
+    // dropped. What was put back is kept for the notes, which name every file left out.
+    const undone = new Map();
+    const undoSkipped = () => {
+      const { skipped } = staged();
+      for (const { path, why } of skipped) {
+        const tracked = git(root, genv, ['cat-file', '-e', `${start}:${path}`], { allowFail: true }) !== null;
+        if (tracked) git(root, genv, ['--literal-pathspecs', 'checkout', start, '--', path]);
+        else git(root, genv, ['--literal-pathspecs', 'clean', '-f', '-q', '--', path]);
+        undone.set(path, why);
+      }
+      git(root, genv, ['reset', '-q', start]);
+      return skipped.map((x) => x.path);
+    };
     const finalize = async (input) => {
       const checked = checkFinish(input, job.subject);
       if (checked.error) return checked;
@@ -1572,6 +1589,7 @@ export async function workCheckout(ctx, job) {
         return { error: job.describe.ask };
       }
       if (testArgv && staged().keep.length) {
+        const putBack = undoSkipped();
         // The suite runs on the files as they are now, by the model or, failing that, here.
         const now = stamp();
         let t = [...runs].reverse().find((r) => r.isTest && r.stamp === now);
@@ -1586,7 +1604,7 @@ export async function workCheckout(ctx, job) {
           bounces++;
           const failed = failingTests(t.out);
           const named = failed.length ? `\nFailed: ${failed.join(', ')}` : '';
-          return { error: `The test script fails at your change (\`${t.command}\` exited ${t.exit}${t.timedOut ? ', timed out' : ''}):${named}\n${capOutput(t.out, 6_000)}\n\nFix it and run the tests again, then call finish_fix.` };
+          return { error: `The test script fails at your change (\`${t.command}\` exited ${t.exit}${t.timedOut ? ', timed out' : ''}):${named}\n${capOutput(t.out, 6_000)}${putBack.length ? `\n\nThese edits are not in the commit, so they were put back as the start commit has them before the run: ${putBack.join(', ')}.` : ''}\n\nFix it and run the tests again, then call finish_fix.` };
         }
       }
       return { sub: checked.sub };
@@ -1616,13 +1634,15 @@ export async function workCheckout(ctx, job) {
     if (sub.outcome === 'refused') return refuse(sub.reason, { turns, tests: testsRecord });
 
     const st = staged();
+    // The notes name every file left out, those the test gate put back among them.
+    const skipped = [...st.skipped, ...[...undone].filter(([path]) => !st.skipped.some((x) => x.path === path)).map(([path, why]) => ({ path, why }))];
     // A change that needs a description and never got one is described by what stands in for it.
     if (job.describe.required && description === null && st.keep.length) description = job.describe.fallback(sub);
     const described = description !== null;
     if (!st.keep.length) {
       // With no file changed a description is a result only where it replaces an existing one.
       const kept = described && job.describe.replaces === true;
-      return { record: job.record({ outcome: 'no_change', turns, tests: testsRecord, description: kept, notes: renderNotes({ outcome: 'no_change', summary: sub.summary, skipped: st.skipped, tests: testsRecord, described: kept }) }), description: kept ? description : null };
+      return { record: job.record({ outcome: 'no_change', turns, tests: testsRecord, description: kept, notes: renderNotes({ outcome: 'no_change', summary: sub.summary, skipped, tests: testsRecord, described: kept }) }), description: kept ? description : null };
     }
     if (st.keep.length > LIMITS.files) return refuse(`the ${words.work} changes ${st.keep.length} files; the limit is ${LIMITS.files}`, { turns, tests: testsRecord });
     // Literal pathspecs: a file a command named `*` must not stage everything.
@@ -1638,7 +1658,7 @@ export async function workCheckout(ctx, job) {
     const blobIssue = stagedProblem(root, genv, st.keep, runSecrets(ctx));
     if (blobIssue) return refuse(blobIssue, { turns });
     const common = { turns, tests: testsRecord, files: st.keep };
-    const notes = (outcome) => renderNotes({ outcome, summary: sub.summary, files: st.keep, skipped: st.skipped, tests: testsRecord, described: described && job.describe.replaces === true && outcome === 'fixed' });
+    const notes = (outcome) => renderNotes({ outcome, summary: sub.summary, files: st.keep, skipped, tests: testsRecord, described: described && job.describe.replaces === true && outcome === 'fixed' });
 
     if (testsRecord && testsRecord.exit_code !== 0) {
       writeFileSync(join(out, 'diff.patch'), `${diff}\n`);

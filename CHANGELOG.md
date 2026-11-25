@@ -53,12 +53,19 @@ names the commit's date and the pull request it came from.
   lines and anything outside those blocks are read as before, so attribution or a secret there
   still blocks. A block of that shape is left out whoever wrote it. `local.mjs pack --pr` carries
   the author's account type, so a local review reads the description as CI does.
+- The fix lane's test gate runs the suite on the tree the commit holds. A change the commit leaves
+  out (a `redline-protected` file, `.github/` the pull request does not change, a `.gitattributes`,
+  what the install dirtied, a file over the size limit) was still on disk when the suite ran, so a
+  command could edit a protected fixture and the code that reads it, and the tests passed on a tree
+  the commit did not hold. Before the gate runs the suite, such a change is now put back as the
+  start commit has it, and the bounce and the notes name it.
 - A build lane turns a ticket into a change. `redline-build-run.yml` and `scripts/redline/build.mjs`
   start from a ticket's id, title and brief and a commit of the default branch, and leave one commit
   on top of that commit, as the fix lane leaves one on a pull request's head. The work in the
   checkout is the fix lane's own, split out of `fix.mjs` as `workCheckout` so both lanes run it: the
   run account, the allowlist, the test gate, the limits, the secret checks and the commit as askalf.
-  The fix lane's behaviour is unchanged. A build writes nothing under `.github/`, must describe the
+  Its commit carries nothing under `.github/`, it refuses to run on a runner without a run account
+  of its own (`FIX_RUN_AS`), and its base must be a commit of the caller's default branch. It must describe the
   pull request its commit becomes (`fix_describe`, asked for once, then the summary stands in),
   keeps the model's own subject prefix, and uploads the `redline-build` artifact: `build.json`,
   `notes.md`, `description.md` and `build.bundle`. It pushes nothing and opens no pull request. The
