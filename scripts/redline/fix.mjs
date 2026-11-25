@@ -1353,8 +1353,14 @@ async function answerReview(ctx) {
  *                    toolchain, the writable .github files, the start commit's .gitattributes
  *                    (headAttributes) and this process's git on the checkout
  *   bundle           the bundle's file name
- * Returns { record, description }. Throws only on a broken model response or a git failure; the
- * CLI turns that into a refused record.
+ *   replay           a verify run's candidate, in place of the model: { tree, subject, summary,
+ *                    tests_run, ranBuild, description, turns }. The tree is written into the
+ *                    checkout as the model's edits were, the test gate decides once with no turn
+ *                    to answer it, and the commit is made as a build's is; the tree it commits must
+ *                    be the candidate's. No model is called and nothing is installed here.
+ * Returns { record, description, replay }: replay, for a fixed result, is what a verify run needs
+ * besides the bundle (the summary, tests_run, and whether the model ran the build script). Throws
+ * only on a broken model response or a git failure; the CLI turns that into a refused record.
  */
 export async function workCheckout(ctx, job) {
   const { checkout: root, out } = ctx;
@@ -1489,6 +1495,10 @@ export async function workCheckout(ctx, job) {
       plan.install = v.exit === 0 ? berryInstall(v.out) : null;
       if (!plan.install) installNote = `nothing installed: \`yarn --version\` gave no yarn 2+ version (exit ${v.exit}), so no install could skip dependencies' builds`;
     }
+    if (job.replay) {
+      plan.install = null;
+      installNote = 'a verify run installs in the test gate\'s checkout alone';
+    }
     if (plan.install) {
       const r = exec(plan.install, LIMITS.installS, plan.installEnv);
       installNote = `\`${plan.install.join(' ')}\` exited ${r.exit}${r.exit ? ` (tail: ${r.out.slice(-600).replace(/\s+/g, ' ')})` : ''}`
@@ -1527,21 +1537,47 @@ export async function workCheckout(ctx, job) {
     // tree's root and its package.json. The gate runs what the change declares, a first test script
     // or a new package manager among it; the allowlist the model works with stays the start's.
     // `broken`, saying why, when a package.json is there and cannot be read: the gate cannot say
-    // what to run. A package.json that is a link is read through it, as the checkout and npm read
-    // it, to a file in the same tree; a link out of the tree is refused.
-    const manifestOf = (tree) => {
-      let path = 'package.json';
-      for (let hop = 0; hop < 8; hop++) {
-        const [meta = ''] = (git(root, genv, ['ls-tree', '-z', tree, '--', path]) ?? '').split('\t');
+    // what to run. A package.json that is a link, or that sits behind one, is read through it as
+    // the checkout and npm read it, to a file in the same tree (blobAt); a link out of the tree is
+    // refused.
+    // A path in the tree as the checkout would open it: every component, a directory's as well as
+    // the file's, is followed when it is a link, to a path that stays inside the tree, at most
+    // eight links in all. Returns { sha } of the blob it reaches, or { broken } saying why not.
+    const blobAt = (tree, wanted) => {
+      let parts = wanted.split('/').filter(Boolean);
+      let at = tree;
+      let done = [];
+      for (let links = 0; parts.length;) {
+        const [name, ...rest] = parts;
+        if (name === '.') { parts = rest; continue; }
+        if (name === '..') {
+          if (!done.length) return { broken: `the change's package.json leads outside the checkout` };
+          done = done.slice(0, -1);
+          at = done.length ? (git(root, genv, ['rev-parse', `${tree}:${done.join('/')}`]) ?? '') : tree;
+          parts = rest;
+          continue;
+        }
+        const [meta = ''] = (git(root, genv, ['ls-tree', '-z', at, '--', name]) ?? '').split('\t');
         const [mode, type, sha] = meta.split(' ');
-        if (!sha) return { broken: `the change's package.json links to ${path}, which is not in it` };
-        if (mode !== '120000') return type === 'blob' ? { text: git(root, genv, ['cat-file', 'blob', sha]) ?? '' } : { broken: `the change's package.json is not a file (${path})` };
-        const target = git(root, genv, ['cat-file', 'blob', sha]) ?? '';
-        const next = posix.normalize(posix.join(posix.dirname(path), target));
-        if (posix.isAbsolute(target) || next === '..' || next.startsWith('../')) return { broken: `the change's package.json links to ${target.slice(0, 120)}, outside the checkout` };
-        path = next;
+        if (!sha) return { broken: `the change's package.json leads to ${[...done, name].join('/')}, which is not in it` };
+        if (mode === '120000') {
+          if (++links > 8) return { broken: 'the change\'s package.json goes through more than eight links' };
+          const target = git(root, genv, ['cat-file', 'blob', sha]) ?? '';
+          if (posix.isAbsolute(target)) return { broken: `the change's package.json links to ${target.slice(0, 120)}, outside the checkout` };
+          parts = [...target.split('/').filter(Boolean), ...rest];
+          continue;
+        }
+        if (!rest.length) return type === 'blob' ? { sha } : { broken: `the change's package.json is not a file (${[...done, name].join('/')})` };
+        if (type !== 'tree') return { broken: `the change's package.json leads through ${[...done, name].join('/')}, which is not a directory` };
+        at = sha;
+        done = [...done, name];
+        parts = rest;
       }
-      return { broken: 'the change\'s package.json goes through more than eight links' };
+      return { broken: 'the change\'s package.json names no file' };
+    };
+    const manifestOf = (tree) => {
+      const found = blobAt(tree, 'package.json');
+      return 'broken' in found ? found : { text: git(root, genv, ['cat-file', 'blob', found.sha]) ?? '' };
     };
     const planOf = (tree) => {
       const names = (git(root, genv, ['ls-tree', '-z', '--name-only', tree]) ?? '').split('\0').filter(Boolean);
@@ -1591,7 +1627,9 @@ export async function workCheckout(ctx, job) {
         const who = { GIT_AUTHOR_NAME: AUTHOR.name, GIT_AUTHOR_EMAIL: AUTHOR.email, GIT_COMMITTER_NAME: AUTHOR.name, GIT_COMMITTER_EMAIL: AUTHOR.email };
         git(dir, genvGate, ['update-ref', '--no-deref', 'HEAD', git(dir, { ...genvGate, ...who }, ['commit-tree', tree, '-p', start, '-m', subject])]);
         const gitTrust = join(trust, 'gitconfig');
-        writeFileSync(gitTrust, `[safe]\n\tdirectory = ${dir}\n`, { mode: 0o644 });
+        writeFileSync(gitTrust, `[safe]\n\tdirectory = ${dir}\n`);
+        // The modes set outright: a file's creation mode passes through this account's umask.
+        chmodSync(gitTrust, 0o644);
         chmodSync(trust, 0o755);
         if (runAs) {
           grant(dir, gateHome);
@@ -1722,19 +1760,35 @@ export async function workCheckout(ctx, job) {
       return { sub: checked.sub };
     };
 
-    const brief = job.brief({ plan, installNote, githubFiles: github ? [...github].sort() : [], attrs, git: (args) => git(root, genv, args) });
     let loop;
     let calls = 0;
-    try {
-      loop = await runLoop({
-        call: (messages, toolChoice) => (calls++, callModelWith(ctx, { system: ctx.system, messages, tools: job.tools, toolChoice, maxTokens: LIMITS.maxTokens, timeoutMs: LIMITS.modelTimeoutMs, deadline, effort: job.effort })),
-        tool: async (name, input) => tool(name, input), finalize, now: ctx.now, started, log: ctx.log, canForce: !rejectsForcedToolChoice(ctx.model),
-        ask: words.ask, work: words.work,
-      }, brief);
-    } catch (e) {
-      // Past hardMs no model call starts: nothing is reported as fixed without the model finishing.
-      if (e instanceof OutOfTime) return refuse(`The time budget was spent before the ${words.work} finished (${e.message}).`, { turns: calls });
-      throw e;
+    if (job.replay) {
+      // A verify run: the candidate's tree in this checkout as the model's edits were (the index
+      // and HEAD stay at the start commit), every path it changes counted as written, and the
+      // gate run once. A failing gate is the result: there is no model to answer it.
+      const r = job.replay;
+      git(root, genv, ['read-tree', '-m', '-u', start, r.tree]);
+      git(root, genv, ['reset', '-q', start]);
+      for (const p of changedPaths(root, genv)) written.add(p);
+      ranBuild = r.ranBuild === true;
+      description = typeof r.description === 'string' ? r.description : null;
+      bounces = LIMITS.testBounces;
+      const f = await finalize({ outcome: 'fixed', subject: r.subject, summary: r.summary, tests_run: r.tests_run });
+      if (f.error) return refuse(`the candidate could not be finished: ${f.error}`, { turns: r.turns });
+      loop = { turns: r.turns, sub: f.sub };
+    } else {
+      const brief = job.brief({ plan, installNote, githubFiles: github ? [...github].sort() : [], attrs, git: (args) => git(root, genv, args) });
+      try {
+        loop = await runLoop({
+          call: (messages, toolChoice) => (calls++, callModelWith(ctx, { system: ctx.system, messages, tools: job.tools, toolChoice, maxTokens: LIMITS.maxTokens, timeoutMs: LIMITS.modelTimeoutMs, deadline, effort: job.effort })),
+          tool: async (name, input) => tool(name, input), finalize, now: ctx.now, started, log: ctx.log, canForce: !rejectsForcedToolChoice(ctx.model),
+          ask: words.ask, work: words.work,
+        }, brief);
+      } catch (e) {
+        // Past hardMs no model call starts: nothing is reported as fixed without the model finishing.
+        if (e instanceof OutOfTime) return refuse(`The time budget was spent before the ${words.work} finished (${e.message}).`, { turns: calls });
+        throw e;
+      }
     }
     const turns = loop.turns;
     const testsRecord = tests ? {
@@ -1762,6 +1816,7 @@ export async function workCheckout(ctx, job) {
     // The commit is the tree the gate tested: nothing runs between the gate and here, so a tree
     // that differs is a fault, never a change to carry untested.
     if (tests && git(root, genv, ['write-tree']) !== tests.tree) throw new Error('the change is not the tree its tests ran on');
+    if (job.replay && git(root, genv, ['write-tree']) !== job.replay.tree) throw new Error('the change this verify run would commit is not the candidate\'s tree');
     const diff = git(root, genv, ['diff', '--cached', '--binary', start]) ?? '';
     const diffBytes = Buffer.byteLength(diff);
     if (diffBytes > LIMITS.diffBytes) return refuse(`the diff is ${diffBytes} bytes; the limit is ${LIMITS.diffBytes}`, { turns, tests: testsRecord });
@@ -1810,7 +1865,8 @@ export async function workCheckout(ctx, job) {
     const bundle = join(out, job.bundle);
     git(root, genv, ['bundle', 'create', bundle, `${start}..HEAD`]);
     git(root, genv, ['bundle', 'verify', bundle]);
-    return { record: job.record({ ...common, outcome: 'fixed', subject: sub.subject, newHead, commits, description: described, notes: notes('fixed') }), description };
+    return { record: job.record({ ...common, outcome: 'fixed', subject: sub.subject, newHead, commits, description: described, notes: notes('fixed') }), description,
+      replay: { summary: sub.summary, tests_run: sub.tests_run ?? '', ran_build: ranBuild } };
   } finally {
     // Cleanup never replaces the result: a failure here is a warning.
     try { settle(); } catch (e) { ctx.log?.(`::warning::${e.message}`); }
@@ -1889,11 +1945,12 @@ export async function runToExit(ctx, lane) {
   lane.save(ctx.out, refused(`The ${lane.name} run ended before it finished: the job timed out or was cancelled.`));
   let record;
   let description = null;
-  try { ({ record, description = null } = await lane.run(ctx)); } catch (e) {
+  let replay = null;
+  try { ({ record, description = null, replay = null } = await lane.run(ctx)); } catch (e) {
     console.error(`::error::the ${lane.name} run could not finish: ${maskSecrets(e.message, hidden)}`);
     record = refused(`The ${lane.name} run could not finish: ${maskSecrets(e.message, hidden)}`);
   }
-  lane.save(ctx.out, record, description);
+  lane.save(ctx.out, record, description, replay);
   const line = `Redline ${lane.name}: ${record.outcome}${record.new_head ? ` at ${record.new_head}` : ''}${record.files.length ? ` (${record.files.length} file${record.files.length === 1 ? '' : 's'})` : ''}`;
   console.log(line);
   if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, `${line}\n\n${record.notes}\n`);

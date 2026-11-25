@@ -288,8 +288,8 @@ checks that the checkout is exactly the reviewed head, then `fix.mjs`:
   ends. A path outside the checkouts and HOMEs, which a command and the suite can each name, is not
   covered: the exec rows' sandbox gives the job its own temporary directories and allows no
   namespace, so there is no private filesystem to give the suite, and nothing is removed for it.
-  The pull request's own CI runs the suite where none of that exists. What the suite writes is
-  removed with that checkout: the commit must be the tree that was tested. A change the commit will leave out
+  The pull request's own CI runs the suite where none of that exists, and the build lane runs its
+  gate again in a job of its own (below). What the suite writes is removed with that checkout: the commit must be the tree that was tested. A change the commit will leave out
   (below) is also put back as the start commit has it in the model's checkout, and the bounce
   names what was put back. A failing gate is bounced to the model once, then reported. The bounce, `fix.json` (`tests.failing`) and the notes name the failed
   tests the output reports (TAP `not ok`, jest/vitest `FAIL`); the gate is the exit code alone;
@@ -375,8 +375,21 @@ commit as askalf. What differs:
   pins`, or one that speaks of the `Reviewed-by` trailer, is an ordinary one. Every title the
   public-text check refuses for a credit is refused here too, and the tests hold the two together.
 - `build.mjs` reads nothing from GitHub and is handed no GitHub token: the checkout is its input.
+- The result is verified by a second job, `verify`, on a runner job of its own. The build job's
+  gate runs in the job where the model's commands ran, and a file a command left at a fixed path in
+  that job's temporary directories could make it pass. The build job uploads what it made as the
+  `redline-build-candidate` artifact. The verify job runs the same checks of the ref and the base,
+  fetches the candidate with the job's token (`candidate.mjs`, the one step that holds it), checks
+  out the base, and runs `build.mjs` with `BUILD_CANDIDATE`: the candidate must name this
+  repository, ticket, base, run and attempt, and a fixed one's bundle must hold its commit, one
+  commit on the base. A record that is not a fixed build with a commit is passed on as it is. A
+  fixed one is built again with no model: its tree is written into the checkout as the model's
+  edits were, the test gate runs once (installing, running the build script when the model ran it,
+  as `replay.json` says, and the suite), and the commit is made again; the tree it commits must be
+  the candidate's. Only the verify job uploads `redline-build`, the artifact the ops tick reads, so
+  a build is fixed only when its tests pass in a job that never ran the model's commands.
 
-The artifact is `redline-build`:
+The artifact is `redline-build`, uploaded by the verify job:
 
 - `build.json`: `version` (1), `kind` (`build`), `repo`, `ticket`, `base_head`, `new_head`,
   `outcome` (`fixed`, `no_change`, `tests_failed` or `refused`), `title` (the commit subject; empty
@@ -388,7 +401,9 @@ The artifact is `redline-build`:
   authored and committed as askalf, a subject and no body;
 - `diff.patch`, for a dry run or `tests_failed`.
 
-The job exits 0 for `fixed` and 1 for any other outcome. A run whose `BUILD_` inputs are missing or
+The candidate the build job uploads (`redline-build-candidate`) holds the same files, and for a
+fixed build `replay.json` as well: the summary, `tests_run`, and whether the model ran the build
+script. Each job exits 0 for `fixed` and 1 for any other outcome. A run whose `BUILD_` inputs are missing or
 malformed, whose checkout is not at the base or is not clean, or whose run account fails a check of
 the host setup below, is `refused`, and its notes say which. What the lane never does: it pushes
 nothing, opens no pull request and comments nowhere, and its commit carries nothing under

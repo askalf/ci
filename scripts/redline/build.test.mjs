@@ -12,8 +12,9 @@ import { fileURLToPath } from 'node:url';
 import { creditHits } from './public-text.mjs';
 import {
   TOOLS, TICKET, INPUT_LIMITS, SHOWN, BUILD_VERSION, BUILD_SUBJECT_BANNED, ticketText, inputProblem, ticketQuery, taskBrief, buildSubject, summaryAsDescription,
-  buildRecord, buildProblem, saveBuild, exitCode, runBuild, NO_RUN_ACCOUNT, descriptionCreditProblem,
+  buildRecord, buildProblem, saveBuild, exitCode, runBuild, NO_RUN_ACCOUNT, descriptionCreditProblem, readCandidate, CANDIDATE_REPLAY,
 } from './build.mjs';
+import { fetchCandidate, CANDIDATE_ARTIFACT, CANDIDATE_FILES } from './candidate.mjs';
 import {
   TOOLS as FIX_TOOLS, AUTHOR, LIMITS, OUTCOMES, LESSONS, PROTECTED_ATTR, DEFAULT_MODEL, safeWritePath, stageable, commitSubject, descriptionProblem,
   hasAttributionTrailer, toolchainLines, lessonsAccess,
@@ -289,6 +290,27 @@ function makeRepo({ pkg = null, testExit = 0, extra = () => {} } = {}) {
   extra(dir);
   return { dir, head: commit(dir, 'test: a suite for the pager') };
 }
+// A zip of stored entries, as an artifact zip holds them, for the candidate fetch.
+function storedZip(entries) {
+  const locals = [];
+  const centrals = [];
+  let offset = 0;
+  for (const [name, text] of Object.entries(entries)) {
+    const data = Buffer.from(text);
+    const n = Buffer.from(name);
+    const local = Buffer.alloc(30);
+    local.writeUInt32LE(0x04034b50, 0); local.writeUInt32LE(data.length, 18); local.writeUInt32LE(data.length, 22); local.writeUInt16LE(n.length, 26);
+    const central = Buffer.alloc(46);
+    central.writeUInt32LE(0x02014b50, 0); central.writeUInt32LE(data.length, 20); central.writeUInt32LE(data.length, 24); central.writeUInt16LE(n.length, 28); central.writeUInt32LE(offset, 42);
+    locals.push(local, n, data);
+    centrals.push(central, n);
+    offset += 30 + n.length + data.length;
+  }
+  const dir = Buffer.concat(centrals);
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0); end.writeUInt16LE(Object.keys(entries).length, 8); end.writeUInt16LE(Object.keys(entries).length, 10); end.writeUInt32LE(dir.length, 12); end.writeUInt32LE(offset, 16);
+  return Buffer.concat([...locals, dir, end]);
+}
 const LESSONS_URL = 'https://lessons.example/v1/lessons';
 const TITLE = 'Reset the cursor on an empty page';
 const BRIEF = 'The pager keeps its cursor when a page comes back empty.\nReset it to zero in `src/pager.js`.';
@@ -380,6 +402,95 @@ if (!gitOk) {
     check('a title that begins with a word the fix lane refuses is built: the commit\'s message is that title alone, and the bundle is written',
       r.outcome === 'fixed' && r.title === 'Claude support for offline builds' && message === 'Claude support for offline builds\n\n' && existsSync(join(w.out, 'build.bundle')) && buildProblem(r) === null, `${r.outcome} ${r.notes}`);
     done(w, repo);
+  }
+
+  console.log('\n  verify: the candidate alone, built again in a checkout of its own');
+  {
+    const repo = makeRepo();
+    const w = world(repo, { turns: [write, describe, finish()] });
+    w.ctx.run = { id: 7, attempt: 1 };
+    const built = await runBuild(w.ctx);
+    saveBuild(w.out, built.record, built.description, built.replay);
+    const replayFile = JSON.parse(readFileSync(join(w.out, CANDIDATE_REPLAY), 'utf8'));
+    check('a fixed build\'s candidate carries replay.json: the summary, tests_run and whether the build script ran', replayFile.summary.startsWith('Resets the cursor') && replayFile.ran_build === false && typeof replayFile.tests_run === 'string');
+    const fresh = () => {
+      const dir = mkdtempSync(join(tmpdir(), 'redline-build-verify-'));
+      sh(dir, ['init', '-q']);
+      sh(dir, ['fetch', '-q', repo.dir, repo.head]);
+      sh(dir, ['-c', 'advice.detachedHead=false', 'checkout', '-q', repo.head]);
+      return { dir, git: (args) => { const r = spawnSync('git', args, { cwd: dir, encoding: 'utf8' }); return r.status === 0 ? r.stdout.trim() : null; } };
+    };
+    const want = { repo: 'askalf/r', ticket: ULID, base: repo.head, run: { id: 7, attempt: 1 } };
+    const c = fresh();
+    const read = readCandidate(w.out, want, c.git);
+    check('the candidate is read for this repository, ticket, base, run and attempt, its commit fetched from its bundle', 'replay' in read && read.replay.tree === sh(repo.dir, ['rev-parse', `${built.record.new_head}^{tree}`])
+      && read.replay.subject === built.record.title && read.replay.description === DESCRIPTION, JSON.stringify(read).slice(0, 200));
+    let asked = 0;
+    const out2 = join(c.dir, '..', `redline-build-out-${Math.random().toString(36).slice(2)}`);
+    const v = await runBuild({ ...w.ctx, checkout: c.dir, out: out2, replay: read.replay, fetch: async () => { asked++; throw new Error('no model in a verify run'); } });
+    check('the verify run builds the same tree again on the base, one commit by askalf, with no model call', v.record.outcome === 'fixed' && asked === 0 && buildProblem(v.record) === null
+      && sh(repo.dir, ['rev-parse', `${built.record.new_head}^{tree}`]) === spawnSync('git', ['rev-parse', `${v.record.new_head}^{tree}`], { cwd: c.dir, encoding: 'utf8' }).stdout.trim()
+      && v.record.title === built.record.title && v.description === DESCRIPTION && v.record.turns === built.record.turns && v.record.commits.length === 1, `${v.record.outcome} ${v.record.notes}`);
+    rmSync(out2, { recursive: true, force: true });
+    rmSync(c.dir, { recursive: true, force: true });
+    // What is not this run's, or not one commit on the base, is not verified.
+    for (const [name, patch] of [['another ticket', { ticket: '01JD8QW3V5N7R9T1X2Y4Z6A8BD' }], ['another base', { base: OTHER }], ['another attempt', { run: { id: 7, attempt: 2 } }], ['another run', { run: { id: 8, attempt: 1 } }]]) {
+      const d = fresh();
+      const r = readCandidate(w.out, { ...want, ...patch }, d.git);
+      check(`a candidate for ${name} is not verified`, 'problem' in r && /names another/.test(r.problem), JSON.stringify(r));
+      rmSync(d.dir, { recursive: true, force: true });
+    }
+    const forged = mkdtempSync(join(tmpdir(), 'redline-build-forged-'));
+    for (const f of readdirSync(w.out)) copyFileSync(join(w.out, f), join(forged, f));
+    writeFileSync(join(forged, 'build.json'), JSON.stringify({ ...built.record, new_head: OTHER, commits: [{ sha: OTHER, subject: built.record.title }] }));
+    const d = fresh();
+    const r = readCandidate(forged, want, d.git);
+    check('a candidate whose bundle does not hold its new_head is not verified', 'problem' in r && /does not hold its new_head/.test(r.problem), JSON.stringify(r));
+    rmSync(d.dir, { recursive: true, force: true });
+    rmSync(join(forged, CANDIDATE_REPLAY));
+    writeFileSync(join(forged, 'build.json'), JSON.stringify(built.record));
+    const d2 = fresh();
+    check('nor one with no replay.json', /no readable replay\.json/.test(readCandidate(forged, want, d2.git).problem ?? ''));
+    rmSync(d2.dir, { recursive: true, force: true });
+    rmSync(forged, { recursive: true, force: true });
+    const failed = { ...buildRecord({ repo: 'askalf/r', ticket: ULID, base: repo.head, model: 'm', run: { id: 7, attempt: 1 }, outcome: 'tests_failed', notes: 'The tests failed.' }) };
+    const through = mkdtempSync(join(tmpdir(), 'redline-build-through-'));
+    saveBuild(through, failed);
+    writeFileSync(join(through, 'diff.patch'), 'diff --git a/x b/x\n');
+    const t = readCandidate(through, want, () => { throw new Error('git is not asked for a record passed on'); });
+    check('a record that is not a fixed build is passed on as it is, with its diff', 'through' in t && JSON.stringify(t.through.record) === JSON.stringify(failed) && t.through.diff === 'diff --git a/x b/x\n');
+    check('no build.json at all is a problem, said as such', /left no build\.json/.test(readCandidate(join(through, 'none'), want, () => null).problem ?? ''));
+    rmSync(through, { recursive: true, force: true });
+    done(w, repo);
+  }
+  {
+    // The candidate's fetch: one list of this run's artifacts, its zip through the redirect to
+    // storage, fetched without the token, and only the files build.mjs reads.
+    const entries = { 'build.json': '{}', 'notes.md': 'n', 'build.bundle': 'b', 'stray.sh': 'x' };
+    const zip = storedZip(entries);
+    const asked = [];
+    const stub = async (url, init = {}) => {
+      asked.push({ url: String(url), auth: init.headers?.authorization ?? null });
+      if (String(url).includes('/runs/7/artifacts')) return { status: 200, json: async () => ({ artifacts: [
+        { id: 1, name: CANDIDATE_ARTIFACT, expired: false, size_in_bytes: 10, workflow_run: { id: 8 } },
+        { id: 2, name: CANDIDATE_ARTIFACT, expired: false, size_in_bytes: 10, workflow_run: { id: 7 } },
+      ] }) };
+      if (String(url).endsWith('/artifacts/2/zip')) return { status: 302, headers: { get: (h) => (h === 'location' ? 'https://storage.example/zip' : null) } };
+      if (String(url) === 'https://storage.example/zip') return { status: 200, headers: { get: () => null }, arrayBuffer: async () => zip.buffer.slice(zip.byteOffset, zip.byteOffset + zip.length) };
+      return { status: 404, json: async () => ({}) };
+    };
+    const dir = join(mkdtempSync(join(tmpdir(), 'redline-build-cand-')), 'c');
+    const got = await fetchCandidate({ repo: 'askalf/r', runId: 7, token: 'ghs_test', dir, fetch: stub });
+    check('the candidate of this run alone is fetched, and only the files build.mjs reads are written', JSON.stringify(got.files) === '["build.json","notes.md","build.bundle"]'
+      && readdirSync(dir).sort().join() === 'build.bundle,build.json,notes.md' && CANDIDATE_FILES.includes('replay.json') && !asked.some((a) => a.url.endsWith('/artifacts/1/zip')));
+    check('the token goes to GitHub and never to the storage the zip is fetched from', asked.filter((a) => a.url.startsWith('https://api.github.com/')).every((a) => a.auth === 'Bearer ghs_test')
+      && asked.find((a) => a.url === 'https://storage.example/zip')?.auth === null);
+    const none = await fetchCandidate({ repo: 'askalf/r', runId: 9, token: 't', dir: join(dir, '..', 'n'), fetch: async () => ({ status: 200, json: async () => ({ artifacts: [] }) }) });
+    check('a run with no candidate is none, not a failure', 'none' in none);
+    let threw = '';
+    try { await fetchCandidate({ repo: 'askalf/r', runId: 7, token: 't', dir: join(dir, '..', 'x'), fetch: async () => ({ status: 500, json: async () => ({}) }) }); } catch (e) { threw = e.message; }
+    check('a list that fails throws, so the step retries and then fails', /could not be listed \(HTTP 500\)/.test(threw));
+    rmSync(join(dir, '..'), { recursive: true, force: true });
   }
 
   console.log('\n  runBuild: fix_describe is required');
@@ -704,23 +815,25 @@ if (!gitOk) {
       done(w, repo);
     }
     if (process.platform !== 'win32') {
-      // A root package.json that is a link to a manifest in the tree is read through it, as npm and
-      // the checkout read it: an edit elsewhere is tested as usual.
+      // A root package.json that is a link to a manifest in the tree, through a directory that is
+      // itself a link, is read through both, as npm and the checkout read it: an edit elsewhere is
+      // tested as usual.
       const repo = makeRepo({ extra: (dir) => {
-        mkdirSync(join(dir, 'manifest'));
-        writeFileSync(join(dir, 'manifest', 'package.json'), `${JSON.stringify({ name: 'r', private: true, scripts: { test: 'node test.mjs' } }, null, 2)}\n`);
-        symlinkSync('manifest/package.json', join(dir, 'package.json'));
+        mkdirSync(join(dir, 'release'));
+        writeFileSync(join(dir, 'release', 'package.json'), `${JSON.stringify({ name: 'r', private: true, scripts: { test: 'node test.mjs' } }, null, 2)}\n`);
+        symlinkSync('release', join(dir, 'current'));
+        symlinkSync('current/package.json', join(dir, 'package.json'));
       } });
       const w = world(repo, { turns: [write, describe, finish()] });
       const { record: r } = await runBuild(w.ctx);
-      check('a package.json that links to a manifest in the tree is read through the link, and the suite runs', r.outcome === 'fixed' && r.tests?.command === 'npm test' && r.tests.exit_code === 0, `${r.outcome} ${r.notes}`);
+      check('a package.json that links, through a linked directory, to a manifest in the tree is read through both, and the suite runs', r.outcome === 'fixed' && r.tests?.command === 'npm test' && r.tests.exit_code === 0, `${r.outcome} ${r.notes}`);
       done(w, repo);
       // A change that points it out of the tree is refused, never read.
       const repo2 = withTests();
       const relink = "import { rmSync, symlinkSync } from 'node:fs';\nrmSync('package.json');\nsymlinkSync('../outside.json', 'package.json');\n";
       const w2 = world(repo2, { turns: [write, tool('fix_write', { path: 'relink.mjs', content: relink }), tool('fix_run', { command: 'node relink.mjs' }), describe, finish(), finish()] });
       const { record: r2 } = await runBuild(w2.ctx);
-      check('a change whose package.json links out of the tree cannot pass', r2.outcome === 'tests_failed' && /package\.json links to \.\.\/outside\.json, outside the checkout/.test(result(w2, 5)), `${r2.outcome} ${result(w2, 5).slice(0, 200)}`);
+      check('a change whose package.json links out of the tree cannot pass', r2.outcome === 'tests_failed' && /package\.json leads outside the checkout/.test(result(w2, 5)), `${r2.outcome} ${result(w2, 5).slice(0, 200)}`);
       done(w2, repo2);
     }
     {
@@ -790,6 +903,33 @@ if (!gitOk) {
       const { record: r } = await runBuild(w.ctx);
       check('an install that fails in the clean checkout fails the gate, and the record names the install, not the tests',
         r.outcome === 'tests_failed' && /^npm ci /.test(r.tests?.command ?? '') && r.tests.exit_code !== 0 && /The install fails at your change, in a clean checkout of it \(`npm ci /.test(result(w, 4)), `${r.outcome} ${JSON.stringify(r.tests)}`);
+      done(w, repo);
+    }
+    {
+      // The fresh job's verify: the build job's gate passed on a file a command left at a fixed path
+      // in the job's temporary directory, which the bundle does not carry. A fresh job has no such
+      // file (removed here, as a job of its own would not have it), and its verify fails the build.
+      const fixed = join(tmpdir(), `redline-build-fixed-${process.pid}`);
+      const flag = join(fixed, 'flag');
+      const repo = makeRepo({ pkg: { name: 'r', private: true, scripts: { test: 'node test.mjs' } }, extra: (dir) => writeFileSync(join(dir, 'test.mjs'), `import { existsSync } from 'node:fs';\nprocess.exit(existsSync(${JSON.stringify(flag)}) ? 0 : 1);\n`) });
+      const make = `import { mkdirSync, writeFileSync } from 'node:fs';\nmkdirSync(${JSON.stringify(fixed)}, { recursive: true });\nwriteFileSync(${JSON.stringify(flag)}, 'x');\n`;
+      const w = world(repo, { turns: [write, tool('fix_write', { path: 'make-flag.mjs', content: make }), tool('fix_run', { command: 'node make-flag.mjs' }), describe, finish()] });
+      w.ctx.run = { id: 7, attempt: 1 };
+      const built = await runBuild(w.ctx);
+      check('in the build job, which shares its temporary directory with its commands, the gate passes on the file', built.record.outcome === 'fixed' && built.record.tests?.exit_code === 0, built.record.notes);
+      saveBuild(w.out, built.record, built.description, built.replay);
+      rmSync(fixed, { recursive: true, force: true });
+      const clone = mkdtempSync(join(tmpdir(), 'redline-build-verify-'));
+      sh(clone, ['init', '-q']);
+      sh(clone, ['fetch', '-q', repo.dir, repo.head]);
+      sh(clone, ['-c', 'advice.detachedHead=false', 'checkout', '-q', repo.head]);
+      const gitIn = (args) => { const r = spawnSync('git', args, { cwd: clone, encoding: 'utf8' }); return r.status === 0 ? r.stdout.trim() : null; };
+      const read = readCandidate(w.out, { repo: 'askalf/r', ticket: ULID, base: repo.head, run: { id: 7, attempt: 1 } }, gitIn);
+      const out2 = join(clone, '..', `redline-build-out-${Math.random().toString(36).slice(2)}`);
+      const v = 'replay' in read ? await runBuild({ ...w.ctx, checkout: clone, out: out2, replay: read.replay, fetch: async () => { throw new Error('no model in a verify run'); } }) : null;
+      check('in the verify job, with the candidate alone, the file is not there and the build is tests_failed', v?.record.outcome === 'tests_failed' && v.record.tests?.exit_code === 1 && buildProblem(v.record) === null, JSON.stringify(read).slice(0, 200));
+      rmSync(clone, { recursive: true, force: true });
+      rmSync(out2, { recursive: true, force: true });
       done(w, repo);
     }
     if (process.platform !== 'win32') {
@@ -979,8 +1119,8 @@ console.log('\n  CLI');
     const status = await new Promise((ok) => child.on('close', ok));
     await new Promise((ok) => server.close(ok));
     const rec = existsSync(join(outDir, 'build.json')) ? read() : {};
-    check('a build through the CLI exits 0 and writes build.json, notes.md, description.md and build.bundle',
-      status === 0 && rec.outcome === 'fixed' && buildProblem(rec) === null && readdirSync(outDir).sort().join() === 'build.bundle,build.json,description.md,notes.md', `${status} ${printed}`);
+    check('a build through the CLI exits 0 and writes build.json, notes.md, description.md, build.bundle and, for the verify job, replay.json',
+      status === 0 && rec.outcome === 'fixed' && buildProblem(rec) === null && readdirSync(outDir).sort().join() === 'build.bundle,build.json,description.md,notes.md,replay.json', `${status} ${printed}`);
     check('the record is the contract: the ticket, the base, one commit, its subject as the title, the run',
       rec.ticket === ULID && rec.base_head === repo.head && rec.commits?.length === 1 && rec.title === 'ops: reset the cursor on an empty page' && rec.model === 'm' && rec.description === true && JSON.stringify(rec.run) === '{"id":45405973359,"attempt":2}');
     const text = (f) => (existsSync(join(outDir, f)) ? readFileSync(join(outDir, f), 'utf8') : null);
@@ -1023,7 +1163,12 @@ console.log('\n  the reusable workflow');
   check('prompt-file defaults to the fix workflow\'s path with this lane\'s file name', def(wf, 'prompt-file') === def(fixWf, 'prompt-file').replace('fix-prompt.md', 'build-prompt.md') && def(wf, 'prompt-file') !== def(fixWf, 'prompt-file'));
   check('the input descriptions say the title and the brief show in the run\'s log', /\n      title:\n        description: .*shows in the run's log\.\n/.test(wf) && /\n      brief:\n        description: .*shows in the run's log\.\n/.test(wf));
   const stepsOf = (text) => text.slice(text.indexOf('\n    steps:\n')).split(/\n      - /).slice(1);
-  const steps = stepsOf(wf);
+  // The two jobs: build, which makes the candidate, and verify, which takes it alone.
+  const buildJob = wf.slice(wf.indexOf('\n  build:\n'), wf.indexOf('\n  verify:\n'));
+  const verifyJob = wf.slice(wf.indexOf('\n  verify:\n'));
+  check('the workflow has two jobs, build and then verify', [...wf.slice(wf.indexOf('\njobs:\n')).matchAll(/^ {2}([\w-]+):$/gm)].map((m) => m[1]).join() === 'build,verify' && wf.indexOf('\n  build:\n') < wf.indexOf('\n  verify:\n'));
+  const steps = stepsOf(buildJob);
+  const vSteps = stepsOf(verifyJob);
   const fixSteps = stepsOf(fixWf);
   const at = (name, list = steps) => list.findIndex((s) => s.startsWith(`name: ${name}\n`));
   const guardAt = at('Check the review ref is a full commit sha');
@@ -1035,7 +1180,7 @@ console.log('\n  the reusable workflow');
   const headAt = at('Check the checkout is at the base');
   const nodeAt = steps.findIndex((s) => s.startsWith('uses: actions/setup-node@'));
   const buildAt = at('Build');
-  const uploadAt = at('Upload the build');
+  const uploadAt = at('Upload the candidate');
   const cleanAt = at('Remove the checkouts');
   check('the sha guard is the first step, the input guard the second, the on-main check third, the base\'s branch fourth: all before anything is fetched',
     guardAt === 0 && inputsAt === 1 && mainAt === 2 && onDefaultAt === 3 && steps.slice(0, 4).every((s) => !/\n\s+uses: /.test(`\n${s}`)));
@@ -1055,8 +1200,8 @@ console.log('\n  the reusable workflow');
     && steps[fetchAt].includes('ref: ${{ inputs.redline-ref }}') && steps[fetchAt].includes('repository: ${{ inputs.ci-repo }}\n') && steps[fetchAt].includes('sparse-checkout: scripts/redline') && !/ref: main\b/.test(wf));
   check('the base is checked out at the base input, into work/, deep enough for the subjects the brief shows',
     steps[baseAt].includes('ref: ${{ inputs.base }}') && steps[baseAt].includes('path: work\n') && Number(/fetch-depth: (\d+)\n/.exec(steps[baseAt])?.[1]) >= SHOWN.subjects);
-  check('both checkouts keep no credentials', (wf.match(/persist-credentials: false/g) ?? []).length === 2);
-  check('no input is interpolated into a run step: everything goes through env', steps.every((s) => !s.includes('run:') || !/\$\{\{/.test(s.slice(s.indexOf('run:')))));
+  check('every checkout, two in each job, keeps no credentials', (buildJob.match(/persist-credentials: false/g) ?? []).length === 2 && (verifyJob.match(/persist-credentials: false/g) ?? []).length === 2);
+  check('no input is interpolated into a run step: everything goes through env', [...steps, ...vSteps].every((s) => !s.includes('run:') || !/\$\{\{/.test(s.slice(s.indexOf('run:')))));
   const shell = (i) => /run: \|\n((?: {10}.*\n?)+)/.exec(steps[i] ?? '')?.[1].replace(/^ {10}/gm, '') ?? 'exit 0';
   if (!bashOk) {
     console.log('  skip the guards\' shell: no bash here');
@@ -1081,9 +1226,12 @@ console.log('\n  the reusable workflow');
   }
   check('it runs on the caller\'s exec runner label', /runs-on: \[self-hosted, "\$\{\{ inputs\.runner-label \}\}"\]/.test(wf));
   const permBlock = /\npermissions:\n((?: {2}.*\n)+)/.exec(wf)?.[1] ?? '';
-  check('the job token reads contents and nothing else', permBlock === '  contents: read\n' && (wf.match(/^\s*permissions:/gm) ?? []).length === 1);
+  check('the build job\'s token reads contents and nothing else', permBlock === '  contents: read\n' && !/\n    permissions:/.test(buildJob));
+  check('the verify job\'s token also reads the run\'s artifacts, to fetch the candidate, and nothing else',
+    /\n    permissions:\n      contents: read\n      actions: read\n    steps:\n/.test(verifyJob) && (wf.match(/^\s*permissions:/gm) ?? []).length === 2);
   const pins = (text) => [...text.matchAll(/uses: ([^\s]+)/g)].map((m) => m[1]);
-  check('every action is pinned by sha, and each pin is one the fix workflow has', pins(wf).every((p) => /@[0-9a-f]{40}$/.test(p)) && pins(wf).length === 4 && pins(wf).join() === pins(fixWf).join());
+  check('every action is pinned by sha, and each job pins what the fix workflow pins', pins(wf).every((p) => /@[0-9a-f]{40}$/.test(p))
+    && pins(buildJob).join() === pins(fixWf).join() && pins(verifyJob).join() === pins(fixWf).join());
   const build = steps[buildAt] ?? '';
   // The output directory is named for the run and its attempt, the same in the build, the upload and the cleanup.
   const OUT = 'build-out-${{ github.run_id }}-${{ github.run_attempt }}';
@@ -1093,7 +1241,7 @@ console.log('\n  the reusable workflow');
   check('it reads the fix lane\'s env file and its own prompt file under the fix lane\'s variable names',
     build.includes('FIX_ENV_FILE: ${{ inputs.env-file }}\n') && build.includes('FIX_PROMPT_FILE: ${{ inputs.prompt-file }}\n') && !/\/etc\/askalf/.test(wf.replace(/^        default: .*$/gm, '')));
   check('the repository\'s visibility comes from GitHub\'s own event, not from an input', build.includes('REPO_PRIVATE: ${{ github.event.repository.private }}\n'));
-  check('no token and no secret reaches the build step: the job token is read by the two compare checks alone', !/secrets\./.test(wf) && !/github\.token|GH_READ_TOKEN|GITHUB_TOKEN/.test(build) && (wf.match(/github\.token/g) ?? []).length === 2
+  check('no token and no secret reaches the build step: the job token is read by the two compare checks alone', !/secrets\./.test(wf) && !/github\.token|GH_READ_TOKEN|GITHUB_TOKEN/.test(build) && (buildJob.match(/github\.token/g) ?? []).length === 2
     && steps[mainAt].includes('GH_READ_TOKEN: ${{ github.token }}') && steps[onDefaultAt].includes('GH_READ_TOKEN: ${{ github.token }}'));
   const onDefault = steps[onDefaultAt] ?? '';
   check('the base is compared with the repository\'s own default branch, through env, and only ahead or identical passes',
@@ -1116,14 +1264,42 @@ console.log('\n  the reusable workflow');
     check('a default branch name that could not be read fails the step, and nothing is asked', none.status === 1 && none.stdout.includes('::error::the default branch name could not be read') && !none.stdout.includes('URL '));
   }
   const upload = steps[uploadAt] ?? '';
-  check('the upload runs whatever the outcome, as redline-build from this run\'s own output, short-lived, overwriting',
-    upload.includes('if: always()\n') && upload.includes('name: redline-build\n') && upload.includes(`path: ${OUT}\n`) && /retention-days: [1-7]\n/.test(upload) && upload.includes('overwrite: true'));
-  check('the upload step is the fix workflow\'s but for the two names and the run\'s own output', own(upload).replace('Upload the build', 'Upload the fix').replace('name: redline-build', 'name: redline-fix').replace(`path: ${OUT}`, 'path: fix-out') === own(fixSteps[at('Upload the fix', fixSteps)]));
-  check('the cleanup removes the checkout, the script and this run\'s output', /run: rm -rf work \.redline "\$OUT"\s*$/.test(steps[cleanAt] ?? '') && (steps[cleanAt] ?? '').includes(`OUT: ${OUT}\n`) && (steps[cleanAt] ?? '').includes('if: always()'));
-  check('the job has the fix job\'s timeout, past the lane\'s hard deadline with five minutes to spare',
-    /timeout-minutes: (\d+)/.exec(wf)?.[1] === /timeout-minutes: (\d+)/.exec(fixWf)?.[1] && Number(/timeout-minutes: (\d+)/.exec(wf)?.[1]) * 60_000 >= LIMITS.hardMs + 5 * 60_000);
+  check('the build job uploads whatever the outcome, as redline-build-candidate from this run\'s own output, short-lived, overwriting',
+    upload.includes('if: always()\n') && upload.includes('name: redline-build-candidate\n') && upload.includes(`path: ${OUT}\n`) && /retention-days: [1-7]\n/.test(upload) && upload.includes('overwrite: true'));
+  check('the upload step is the fix workflow\'s but for the two names and the run\'s own output', own(upload).replace('Upload the candidate', 'Upload the fix').replace('name: redline-build-candidate', 'name: redline-fix').replace(`path: ${OUT}`, 'path: fix-out').replace(/^ {6}# .*\n/gm, '') === own(fixSteps[at('Upload the fix', fixSteps)]).replace(/^ {6}# .*\n/gm, ''));
+  check('the cleanup removes the checkout, the script and this run\'s output', /run: rm -rf work \.redline "\$OUT"\s*$/.test(own(steps[cleanAt] ?? '')) && (steps[cleanAt] ?? '').includes(`OUT: ${OUT}\n`) && (steps[cleanAt] ?? '').includes('if: always()'));
+  const timeout = (text) => Number(/timeout-minutes: (\d+)/.exec(text)?.[1]);
+  check('each job has the fix job\'s timeout, past the lane\'s hard deadline with five minutes to spare',
+    timeout(buildJob) === timeout(fixWf) && timeout(verifyJob) === timeout(fixWf) && timeout(buildJob) * 60_000 >= LIMITS.hardMs + 5 * 60_000);
+  // The verify job: the same checks, its own checkout of the base, the candidate fetched by the
+  // token alone, build.mjs with BUILD_CANDIDATE, and the redline-build artifact the ops tick reads.
+  const vAt = (name) => at(name, vSteps);
+  check('the verify job needs the build job and runs whatever it ended with, but not when the run was cancelled',
+    /\n  verify:\n    needs: build\n    if: \$\{\{ !cancelled\(\) \}\}\n    runs-on: \[self-hosted, "\$\{\{ inputs\.runner-label \}\}"\]\n/.test(verifyJob));
+  check('its first steps are the build job\'s four checks and its script fetch, line for line',
+    ['Check the review ref is a full commit sha', 'Check the ticket and the base', 'Check the review ref is on main of ci-repo', 'Check the base is on the default branch', 'Fetch the build script from ci-repo']
+      .every((name, i) => vAt(name) === i && own(vSteps[i]) === own(steps[at(name)])));
+  check('then its own checkout of the base, its check, node, the candidate fetch, the verify, the upload and the cleanup, in that order',
+    vAt('Check out the base to verify on') === 5 && vAt('Check the checkout is at the base') === 6 && vSteps[7]?.startsWith('uses: actions/setup-node@') && vAt('Fetch the candidate') === 8
+    && vAt('Verify') === 9 && vAt('Upload the build') === 10 && vAt('Remove the checkouts') === 11 && vSteps.length === 12);
+  check('its checkout of the base is the build job\'s', own(vSteps[5]).replace('Check out the base to verify on', 'Check out the base to build on') === own(steps[baseAt]).replace(/^ {6}# .*\n/gm, ''));
+  const CANDIDATE = 'candidate-${{ github.run_id }}-${{ github.run_attempt }}';
+  const fetchCand = vSteps[vAt('Fetch the candidate')] ?? '';
+  check('the candidate is fetched by candidate.mjs with the job token, into this run\'s own directory',
+    fetchCand.includes('run: node .redline/scripts/redline/candidate.mjs') && fetchCand.includes('GH_READ_TOKEN: ${{ github.token }}\n') && fetchCand.includes('RUN_ID: ${{ github.run_id }}\n')
+    && fetchCand.includes(`CANDIDATE_OUT: \${{ github.workspace }}/${CANDIDATE}\n`));
+  const verifyStep = vSteps[vAt('Verify')] ?? '';
+  const envOf = (step) => [...step.matchAll(/^ {10}([A-Z_]+): (.*)$/gm)].map((m) => `${m[1]}=${m[2]}`);
+  check('the verify step runs build.mjs with the build step\'s env and the candidate, and holds no token',
+    verifyStep.includes('run: node .redline/scripts/redline/build.mjs') && JSON.stringify(envOf(verifyStep).filter((e) => !e.startsWith('BUILD_CANDIDATE='))) === JSON.stringify(envOf(build))
+    && verifyStep.includes(`BUILD_CANDIDATE: \${{ github.workspace }}/${CANDIDATE}\n`) && !/github\.token|GH_READ_TOKEN|secrets\./.test(verifyStep) && (verifyJob.match(/github\.token/g) ?? []).length === 3);
+  const vUpload = vSteps[vAt('Upload the build')] ?? '';
+  check('the verify job uploads redline-build, the artifact the ops tick reads, whatever the outcome, as the build job uploads its candidate',
+    own(vUpload).replace(/^ {6}# .*\n/gm, '') === own(upload).replace('Upload the candidate', 'Upload the build').replace('name: redline-build-candidate', 'name: redline-build').replace(/^ {6}# .*\n/gm, '')
+    && (wf.match(/name: redline-build\n/g) ?? []).length === 1);
+  check('its cleanup removes the checkout, the script, this run\'s output and the candidate', /run: rm -rf work \.redline "\$OUT" "\$CANDIDATE"\s*$/.test(own(vSteps[vAt('Remove the checkouts')] ?? '')) && (vSteps[vAt('Remove the checkouts')] ?? '').includes(`CANDIDATE: ${CANDIDATE}\n`));
   check('the header says what the lane never does and that the ticket\'s text is public in the log',
-    /Nothing here pushes, opens a pull request or comments/.test(wf) && /Nothing under \.github\/ is in the commit/.test(wf) && /left out of the commit/.test(wf) && /on a public repository they are public/.test(wf));
+    /A second job, verify, on a\n# runner job of its own that shares no scratch state with the first, takes the candidate alone/.test(wf) && /Nothing here pushes, opens a pull request or comments/.test(wf) && /Nothing under \.github\/ is in the commit/.test(wf) && /left out of the commit/.test(wf) && /on a public repository they are public/.test(wf));
   check('the env file comment names the account boundary', /readable by the exec account only/i.test(wf) && /never by an account that runs untrusted code/i.test(wf));
   check('no em or en dash', !/[\u2013\u2014]/.test(wf));
 }

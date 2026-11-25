@@ -97,7 +97,13 @@ names the commit's date and the pull request it came from.
   text that passes the public-text check's credit rule (`creditHits`) either way,
   keeps the model's own subject prefix, and uploads the `redline-build` artifact: `build.json`,
   `notes.md`, `description.md` and `build.bundle`. It pushes nothing and opens no pull request. The
-  ticket's title and brief show in the run's log, so on a public repository they are public. Its
+  ticket's title and brief show in the run's log, so on a public repository they are public. A
+  second job, `verify`, on a runner job of its own, takes the build job's candidate
+  (`redline-build-candidate`, fetched by `candidate.mjs` with the job's token) and nothing else:
+  it builds a fixed candidate again on a fresh checkout of the base with no model, runs the test
+  gate there, and alone uploads `redline-build`, so a build is fixed only when its tests pass in a
+  job that never ran the model's commands; a record that is not a fixed build is passed on as it
+  is. The fix lane's gate still runs in the job that edited, as before. Its
   tools are pinned as `build-tools.json`. No repository calls the workflow yet: a caller pins a
   commit that is already on `main`, so it comes in a later change.
 - A review before the push can be given Redline's earlier verdicts on the branch.

@@ -53,8 +53,9 @@
 // refused, with a record that says which. REPO_PRIVATE says the repository is private, so the
 // lessons read may return lessons drawn on private repositories.
 
-import { writeFileSync, mkdirSync } from 'node:fs';
+import { writeFileSync, mkdirSync, readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 import {
   TOOLS as FIX_TOOLS, LIMITS, OUTCOMES, LESSONS, PROTECTED_ATTR, DESCRIPTION_ATTRIBUTION,
@@ -272,11 +273,54 @@ export function buildProblem(v) {
 }
 
 /** Write build.json and notes.md into dir, creating it, and description.md when the record carries one. */
-export function saveBuild(dir, record, description = null) {
+export function saveBuild(dir, record, description = null, replay = null) {
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, 'build.json'), `${JSON.stringify(record, null, 2)}\n`);
   writeFileSync(join(dir, 'notes.md'), `${record.notes}\n`);
   if (record.description === true && typeof description === 'string') writeFileSync(join(dir, 'description.md'), `${description}\n`);
+  // What the verify job needs besides the bundle, for a build job's fixed result only.
+  if (replay && record.outcome === 'fixed' && record.new_head) writeFileSync(join(dir, CANDIDATE_REPLAY), `${JSON.stringify(replay, null, 2)}\n`);
+}
+
+/** The file a build job's candidate carries for the verify job: the summary, tests_run and ran_build. */
+export const CANDIDATE_REPLAY = 'replay.json';
+
+/**
+ * The verify job's reading of the build job's candidate (the redline-build-candidate artifact,
+ * unpacked in `dir`), against this run: its build.json must pass buildProblem and name this
+ * repository, ticket, base and run, and attempt. Returns { through } for a record that is passed
+ * on as it is (anything but a fixed build with a commit), { replay } for a fixed one, whose commit
+ * is fetched from its bundle into the checkout and must be one commit on the base, or { problem }.
+ * `git(args)` runs git in the checkout. Never reads the model's output as instructions.
+ */
+export function readCandidate(dir, ctx, git) {
+  const file = (name) => (existsSync(join(dir, name)) ? readFileSync(join(dir, name), 'utf8') : null);
+  const raw = file('build.json');
+  if (raw === null) return { problem: 'the build job left no build.json, so there is nothing to verify' };
+  let record;
+  try { record = JSON.parse(raw); } catch { return { problem: 'the build job\'s build.json does not parse' }; }
+  const bad = buildProblem(record);
+  if (bad) return { problem: `the build job's build.json ${bad}` };
+  if (record.repo !== ctx.repo || record.ticket !== ctx.ticket || record.base_head !== ctx.base) return { problem: 'the build job\'s build.json names another repository, ticket or base' };
+  if (!record.run || !ctx.run || record.run.id !== ctx.run.id || record.run.attempt !== ctx.run.attempt) return { problem: 'the build job\'s build.json names another run or attempt' };
+  const description = file('description.md');
+  if (record.outcome !== 'fixed' || !record.new_head) {
+    return { through: { record, description: description === null ? null : description.replace(/\n$/, ''), diff: file('diff.patch') } };
+  }
+  const bundle = join(dir, 'build.bundle');
+  if (!existsSync(bundle)) return { problem: 'the build job\'s fixed build has no build.bundle' };
+  let extra;
+  try { extra = JSON.parse(file(CANDIDATE_REPLAY) ?? ''); } catch { return { problem: `the build job's fixed build has no readable ${CANDIDATE_REPLAY}` }; }
+  if (typeof extra?.summary !== 'string' || typeof extra?.ran_build !== 'boolean') return { problem: `the build job's ${CANDIDATE_REPLAY} is not { summary, tests_run, ran_build }` };
+  if (record.description === true && description === null) return { problem: 'the build job\'s fixed build says it has a description and carries none' };
+  if (git(['fetch', '-q', bundle, 'HEAD']) === null || git(['rev-parse', 'FETCH_HEAD']) !== record.new_head) return { problem: 'the build job\'s bundle does not hold its new_head' };
+  if (git(['rev-list', '--count', `${ctx.base}..${record.new_head}`]) !== '1' || git(['rev-parse', `${record.new_head}^`]) !== ctx.base) return { problem: 'the build job\'s commit is not one commit on the base' };
+  const tree = git(['rev-parse', `${record.new_head}^{tree}`]);
+  if (!tree) return { problem: 'the build job\'s commit has no tree' };
+  return { replay: {
+    tree, subject: record.title, summary: extra.summary, tests_run: typeof extra.tests_run === 'string' ? extra.tests_run : '',
+    ranBuild: extra.ran_build, description: description === null ? null : description.replace(/\n$/, ''), turns: record.turns,
+  } };
 }
 
 /** The job's exit status for a record: 0 for fixed, 1 for anything else. */
@@ -352,7 +396,8 @@ async function buildTicket(ctx, record) {
   // the env file, or with FIX_LESSONS=off; a failed read leaves the brief as it was. A repository
   // not known to be private asks for public lessons only.
   let lessons = [];
-  if (ctx.lessons) {
+  // A verify run calls no model, so it reads no lessons.
+  if (ctx.lessons && !ctx.replay) {
     try {
       lessons = await fetchLessons(ctx, ticketQuery(title, brief), ctx.repoPrivate !== true);
       ctx.log?.(`  lessons: ${lessons.length} from earlier fixes`);
@@ -370,6 +415,7 @@ async function buildTicket(ctx, record) {
     // The subject's own rule, on the commit: a title the rule lets through (`Claude support for
     // offline builds`) is never refused once committed.
     tools: TOOLS, subject: buildSubject, refusedMessage: (message) => BUILD_SUBJECT_BANNED.test(message), bundle: 'build.bundle',
+    replay: ctx.replay ?? null,
     // fix_describe writes the new pull request's description. There is no current one to start
     // from, so the rules are the text's own: not empty, no attribution, no dashes, its ceiling,
     // and no credit the public-text check refuses.
@@ -420,10 +466,33 @@ async function main() {
     // The CLI is how a build runs on a runner: there, no run account is a refusal (NO_RUN_ACCOUNT).
     requireRunAccount: true,
   };
-  await runToExit(ctx, {
+  const lane = {
     name: 'build', run: runBuild, save: saveBuild, exit: exitCode,
     record: (fields) => buildRecord({ repo: ctx.repo, ticket: ctx.ticket, base: ctx.base, model: ctx.model, run: ctx.run, ...fields }),
-  });
+  };
+  // The verify job: BUILD_CANDIDATE is the build job's candidate. A record that is not a fixed
+  // build is passed on as it is; a fixed one is built again from its tree, with no model, in this
+  // job's own checkout, and only what passes the gate here is fixed.
+  if (env.BUILD_CANDIDATE !== undefined) {
+    const read = readCandidate(env.BUILD_CANDIDATE, ctx, (args) => {
+      const r = spawnSync('git', args, { cwd: ctx.checkout, encoding: 'utf8', env: { PATH: env.PATH ?? '', HOME: ctx.out, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' } });
+      return r.status === 0 ? String(r.stdout ?? '').trim() : null;
+    });
+    if ('through' in read) {
+      saveBuild(ctx.out, read.through.record, read.through.description);
+      if (read.through.diff !== null) writeFileSync(join(ctx.out, 'diff.patch'), read.through.diff);
+      console.log(`Redline build: ${read.through.record.outcome}, passed on from the build job`);
+      process.exit(exitCode(read.through.record));
+    }
+    if ('problem' in read) {
+      const record = lane.record({ outcome: 'refused', notes: renderNotes({ outcome: 'refused', reason: `Not verified: ${read.problem}.` }) });
+      saveBuild(ctx.out, record);
+      console.log(`Redline build: refused, ${read.problem}`);
+      process.exit(exitCode(record));
+    }
+    ctx.replay = read.replay;
+  }
+  await runToExit(ctx, lane);
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {

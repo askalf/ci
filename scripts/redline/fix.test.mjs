@@ -1415,14 +1415,17 @@ if (!gitOk) {
           sh(repo.dir, ['-c', 'user.name=t', '-c', 'user.email=t@x', 'commit', '-q', '-m', 'test: a suite git lists']);
           repo.head = sh(repo.dir, ['rev-parse', 'HEAD']);
           const w = world(repo, { turns: [tool('fix_write', { path: 'src/b.js', content: FIXED_B }), tool('fix_write', { path: 'tests/added.mjs', content: added }), finish(), finish()] });
+          // Under the umask a locked-down runner service has, so no file this account makes is
+          // readable by the run account unless its mode is set outright.
+          const umask = process.umask(0o077);
           let r;
-          try { ({ record: r } = await runFix({ ...w.ctx, runAs: realRunAs, guardFiles: [secret] })); } catch (e) { r = { outcome: 'refused', notes: e.message }; }
+          try { ({ record: r } = await runFix({ ...w.ctx, runAs: realRunAs, guardFiles: [secret] })); } catch (e) { r = { outcome: 'refused', notes: e.message }; } finally { process.umask(umask); }
           rmSync(w.out, { recursive: true, force: true });
           rmSync(repo.dir, { recursive: true, force: true });
           return r;
         };
         const good = await gitSuite('process.exit(0);\n');
-        check('as the run account, git lists the gate\'s tests and a passing change passes', good.outcome === 'fixed' && good.tests?.exit_code === 0, `${good.outcome} ${JSON.stringify(good.tests)}`);
+        check('as the run account, under a 0077 umask, git lists the gate\'s tests and a passing change passes', good.outcome === 'fixed' && good.tests?.exit_code === 0, `${good.outcome} ${JSON.stringify(good.tests)}`);
         const bad = await gitSuite('process.exit(1);\n');
         check('and a change that adds a failing test git lists fails the gate', bad.outcome === 'tests_failed' && bad.tests?.exit_code === 1, `${bad.outcome} ${JSON.stringify(bad.tests)}`);
       }
