@@ -2159,8 +2159,8 @@ console.log('\n  earlier verdicts from the runs, and the round cap');
     check('a re-read still lifts it', rr.outcome === 'posted' && kr.model.length === 1);
   }
   {
-    // Where the runs are found: every finished dispatch on the default branch since the PR opened,
-    // page by page, however many other PRs' runs came after them.
+    // Where the runs are found: the finished dispatches on the default branch since the PR opened,
+    // page by page, up to LIMITS.runPages pages, past other PRs' newer runs.
     const W = LIMITS.earlierRuns;
     const hd = (id) => id.toString(16).padStart(40, '0');
     const when = (i) => new Date(Date.UTC(2026, 10, 8, 1, 0, i)).toISOString();
@@ -2174,9 +2174,17 @@ console.log('\n  earlier verdicts from the runs, and the round cap');
       const runs = [...others, ...rows.map((x) => run(x.id, { display_title: title(x.head, x.more), created_at: x.at }))];
       const artifacts = Object.fromEntries(rows.map((x) => [x.id, [{ id: 100000 + x.id, name: VERDICT_ARTIFACT, expired: false }]]));
       const zips = Object.fromEntries(rows.map((x) => [100000 + x.id, makeZip('verdict.json', JSON.stringify(vr(x.head)))]));
-      const w = world({ runs, artifacts, zips, turns: [submit(APPROVE)], ...over });
-      const f = w.ctx.fetch; w.calls.artifactLists = 0;
-      w.ctx.fetch = (url, init) => { if (/\/actions\/runs\/\d+\/artifacts$/.test(new URL(url).pathname)) w.calls.artifactLists++; return f(url, init); };
+      const { failPage, ...rest } = over;
+      const w = world({ runs, artifacts, zips, turns: [submit(APPROVE)], ...rest });
+      const f = w.ctx.fetch; w.calls.artifactLists = 0; w.calls.readRuns = [];
+      w.ctx.fetch = (url, init) => {
+        const u = new URL(url);
+        const read = /\/actions\/runs\/(\d+)\/artifacts$/.exec(u.pathname);
+        if (read) { w.calls.artifactLists++; w.calls.readRuns.push(Number(read[1])); }
+        const page = Number(u.searchParams.get('page'));
+        if (u.pathname.endsWith('/actions/workflows/redline.yml/runs') && over.failPage && page >= over.failPage) return Promise.resolve({ ok: false, status: 502, headers: new Headers(), json: async () => ({ message: 'bad gateway' }), text: async () => 'bad gateway' });
+        return f(url, init);
+      };
       return w;
     };
     const other = (i) => run(500000 + i, { display_title: `Redline review askalf/r#8 @ ${hd(900000 + i)}`, created_at: when(100000 + i) });
@@ -2212,10 +2220,12 @@ console.log('\n  earlier verdicts from the runs, and the round cap');
     }
     {
       // A full first page of this PR's runs: the newest LIMITS.earlierRuns are read, and no second page is listed.
-      const { ctx, calls } = worldOf(mine(100 + W));
+      const rows = mine(100 + W);
+      const { ctx, calls } = worldOf(rows);
       const r = await runReview({ ...ctx, roundCap: W + 2 });
       check('the newest LIMITS.earlierRuns of the PR\'s runs are read, no more: rounds past them are not counted',
-        r.outcome === 'posted' && calls.model.length === 1 && calls.artifactLists === W);
+        r.outcome === 'posted' && calls.model.length === 1 && calls.artifactLists === W
+        && calls.readRuns.join() === rows.slice(0, W).map((x) => x.id).join());
       check('and the list stops at the page that found them', calls.lists.length === 1);
     }
     {
@@ -2229,6 +2239,25 @@ console.log('\n  earlier verdicts from the runs, and the round cap');
       const { ctx: c2, calls: k2 } = worldOf(mine(4), others(LIMITS.runPages * 100 - 4));
       const r2 = await runReview(c2);
       check('the PR\'s runs on the last page are read', r2.outcome === 'capped' && r2.rounds === 4 && k2.lists.length === LIMITS.runPages);
+    }
+    {
+      // A page that cannot be listed: the runs found on the pages before it are still read.
+      const lines = [];
+      const { ctx, calls } = worldOf(mine(4), others(96), { failPage: 2 });
+      ctx.log = (l) => lines.push(l);
+      const r = await runReview(ctx);
+      check('a later page that cannot be listed ends the listing, logged, and the runs found before it are still counted: capped',
+        r.outcome === 'capped' && r.rounds === 4 && calls.model.length === 0 && calls.artifactLists === 4
+        && lines.some((l) => l.includes('page 2 of runs not listed') && l.includes('the 4 run(s) of this PR found before it are read')));
+    }
+    {
+      // The list moves between two pages: the run last on page 1 is first on page 2 too. Counted
+      // once, it leaves room for the run the window would otherwise drop.
+      const rows = mine(W);
+      const { ctx, calls } = worldOf([rows[0], ...rows], others(99));
+      const r = await runReview({ ...ctx, roundCap: W });
+      check('a run listed on two pages is counted once: W distinct runs read against a cap of W, capped',
+        r.outcome === 'capped' && r.rounds === W && calls.model.length === 0 && calls.artifactLists === W && new Set(calls.readRuns).size === W);
     }
     {
       let fetched = 0;
@@ -2277,7 +2306,7 @@ console.log('\n  earlier verdicts from the runs, and the round cap');
     const logged = [];
     noRoute.log = (l) => logged.push(l);
     const nr = await runReview(noRoute);
-    check('a runs listing that cannot be read at all is logged once and the review goes on', nr.outcome === 'posted' && noRouteCalls.model.length === 1 && logged.filter((l) => /earlier verdicts from the runs not all read/.test(l)).length === 1);
+    check('a runs listing that cannot be read at all is logged once and the review goes on', nr.outcome === 'posted' && noRouteCalls.model.length === 1 && logged.filter((l) => /earlier verdicts: page 1 of runs not listed .*; the 0 run\(s\) of this PR found before it are read/.test(l)).length === 1);
     const bad = world({ runs: [run(3), run(2), run(1)], artifacts: artsOf([1, 2, 3]), zips: { ...zipsOf([1]), 102: makeZip('verdict.json', JSON.stringify({ ...vr(sha(2)), pr: 8 })), 103: makeZip('other.json', '{}') }, turns: [submit(APPROVE)] });
     const b = await runReview(bad.ctx);
     const text = bad.calls.model[0].messages[0].content;

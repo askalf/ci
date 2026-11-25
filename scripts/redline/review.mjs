@@ -735,11 +735,14 @@ export async function ghBytes(ctx, path, maxBytes = LIMITS.artifactBytes) {
  * made since the PR opened, listed newest first a page of 100 at a time, until a page is not full,
  * LIMITS.earlierRuns of this PR's runs are found, or LIMITS.runPages pages are read. The PR's runs
  * are among many: every PR's dispatches share the one list, so a single page of it can be newer
- * than all of them. A round is a head, and a head can have more than one run (a re-read, a second
- * dispatch), so a window of N runs can hold fewer than N rounds.
+ * than all of them, and runs older than the pages read are not found. A run is counted once: the
+ * list can move between two pages (a dispatch finishing puts a run in front), and a run it shifts
+ * onto the next page is listed twice. A page that cannot be listed ends the listing, logged, and
+ * the runs found before it are still read. A round is a head, and a head can have more than one
+ * run (a re-read, a second dispatch), so a window of N runs can hold fewer than N rounds.
  *
- * An artifact that is missing, expired, malformed, or for another PR or head is passed over; a
- * read that fails leaves the rest unread and is logged, never a failed review.
+ * An artifact that is missing, expired, malformed, or for another PR or head is passed over; an
+ * artifact read that fails leaves the rest unread and is logged, never a failed review.
  */
 export async function earlierVerdicts(ctx, { pr }) {
   const { repo, pr: n } = ctx;
@@ -751,10 +754,21 @@ export async function earlierVerdicts(ctx, { pr }) {
     const q = new URLSearchParams({ event: 'workflow_dispatch', status: 'completed', branch: defaultBranch, per_page: '100' });
     if (pr?.created_at) q.set('created', `>=${pr.created_at}`);
     const runs = [];
+    const listedIds = new Set();
     for (let page = 1; page <= LIMITS.runPages && runs.length < LIMITS.earlierRuns; page++) {
-      const listed = await gh(ctx, `/repos/${repo}/actions/workflows/redline.yml/runs?${q}&page=${page}`);
+      let listed;
+      try {
+        listed = await gh(ctx, `/repos/${repo}/actions/workflows/redline.yml/runs?${q}&page=${page}`);
+      } catch (e) {
+        ctx.log?.(`earlier verdicts: page ${page} of runs not listed (${e.message}); the ${runs.length} run(s) of this PR found before it are read`);
+        break;
+      }
       const rows = Array.isArray(listed?.workflow_runs) ? listed.workflow_runs : [];
-      runs.push(...reviewRunsOf(rows, { repo, pr: n, defaultBranch }));
+      for (const run of reviewRunsOf(rows, { repo, pr: n, defaultBranch })) {
+        if (listedIds.has(run.id)) continue;
+        listedIds.add(run.id);
+        runs.push(run);
+      }
       if (rows.length < 100) break;
       if (page === LIMITS.runPages && runs.length < LIMITS.earlierRuns) ctx.log?.(`earlier verdicts: listed ${LIMITS.runPages} full pages of runs, as many as are read; this PR's runs older than those, if any, are not read`);
     }
