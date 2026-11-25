@@ -276,15 +276,20 @@ checks that the checkout is exactly the reviewed head, then `fix.mjs`:
   of the file; half of a character in either text is refused; a file whose lines all end CRLF
   takes the replacement with CRLF; every byte outside the match is written back as it was.
   `fix_write` writes a whole file, given as a string. Both write in place, so a file keeps its
-  owner, group, mode and access list and no copy is made; a write or close that fails once the
-  file is open ends the run as one that could not finish, with nothing committed, and the
-  dispatcher tries the head once more on a fresh checkout. The model is reached through dario, which cuts a tool
+  owner, group, ordinary permission bits and access list and no copy is made (a write by an
+  account that does not own the file can clear its set-user-ID or set-group-ID bit, and that bit
+  is not put back). A target is opened without truncation and without blocking, and is changed
+  only when it is a regular file with one name: a file with a second name (a hard link), a FIFO,
+  a socket or a device is refused with nothing changed, and `fix_read` refuses the same. A write
+  or close that fails once the file is truncated ends the run as one that could not finish, with
+  nothing committed, and the dispatcher tries the head once more on a fresh checkout. The model is reached through dario, which cuts a tool
   result over 30,000 characters and removes some product names from the text it carries
   (`shownText` follows its scrub), so `fix_read` returns at most 400 lines and its whole result,
   notes included, stays under 24,000 characters, saying where to read on, and `fix_read` and
   `fix_search` name the lines they show with words removed. `fix_write` never replaces a file
-  with such a line, or one over 1 MB it cannot check, and `fix_edit` cannot match one, so text
-  the model never saw is never written back. And
+  with such a line, or one over 1 MB it cannot check, and `fix_edit` refuses an `old_text` that
+  takes in a removed word (a piece of such a line the scrub left whole can still be edited), so
+  text the model never saw is never written back. And
   `fix_run` an allowlist only: the package.json `test`, `lint`, `typecheck`
   and `build` scripts and `node <file>`, without a shell, in a scrubbed environment, and
   `fix_describe` replace the PR description for a finding on it (whole text, no attribution, no

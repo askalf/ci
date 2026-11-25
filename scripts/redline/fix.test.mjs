@@ -2,7 +2,7 @@
 // The model and GitHub are stubbed through ctx.fetch; git is real, on throwaway repositories under
 // the temp directory. Nothing leaves the machine.
 
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, symlinkSync, chmodSync, statSync, readdirSync, fstatSync, closeSync, openSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, symlinkSync, chmodSync, statSync, readdirSync, fstatSync, closeSync, openSync, linkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer as createNetServer } from 'node:net';
@@ -17,7 +17,7 @@ import {
   LIMITS, OUTCOMES, AUTHOR, FIX_VERSION, DEFAULT_MODEL, SUBJECT_BANNED, EFFORT_LEVELS, fixEffort, priorRounds, REVIEW_PAGES_MAX,
   HISTORY, FIX_POSTER, appliedFixComments, fixVerdicts, historyFinding, allReviews, repoFixHistory, formatHistory,
   LESSONS, lessonsAccess, lessonQuery, fetchLessons,
-  runIdentity, alteredInTransit, alteredLines, fixRead, fixSearch, UNFINISHED_PREFIX, unfinished, CONNECTION_CUT_CHARS, occurrences, shownText, shownView, writeWhole, WRITE_IO, WriteFailed,
+  runIdentity, alteredInTransit, alteredLines, fixRead, fixSearch, UNFINISHED_PREFIX, unfinished, CONNECTION_CUT_CHARS, occurrences, shownText, shownView, writeWhole, WRITE_IO, WriteFailed, openRegular,
 } from './fix.mjs';
 import { bumpCaller, fixCallerYaml, REVIEW_WORKFLOW, FIX_WORKFLOW, PUBLIC_TEXT_WORKFLOW, POST_WORKFLOW, CALLERS } from './pin.mjs';
 
@@ -475,6 +475,27 @@ console.log('\n  what the model is shown');
     closes = 0;
     const cErr = await throws(() => writeWhole(run, 'run.sh', Buffer.from('y'), counted({ closeSync: (fd) => { closes++; closeSync(fd); throw Object.assign(new Error('EIO: i/o error, close'), { code: 'EIO' }); } })));
     check('a close that fails is WriteFailed too, and is not retried', cErr instanceof WriteFailed && /\(EIO\)/.test(cErr.message) && closes === 1, `${cErr} closes=${closes}`);
+    // Two names for one file: refused with nothing changed, not WriteFailed.
+    const one = join(d2, 'one.txt');
+    const two = join(d2, 'two.txt');
+    writeFileSync(one, 'shared');
+    linkSync(one, two);
+    const linked = await throws(() => writeWhole(one, 'one.txt', Buffer.from('changed')));
+    check('a file with two names is refused, both unchanged', linked?.code === 'EMLINK' && !(linked instanceof WriteFailed) && /has 2 names \(hard links\)/.test(linked.message)
+      && readFileSync(one, 'utf8') === 'shared' && readFileSync(two, 'utf8') === 'shared', String(linked));
+    const created = join(d2, 'created.txt');
+    writeWhole(created, 'created.txt', Buffer.from('new'));
+    check('an absent file is created', readFileSync(created, 'utf8') === 'new');
+    // A FIFO with no writer would block a plain open forever; it is refused at once.
+    if (process.platform !== 'win32' && spawnSync('mkfifo', [join(d2, 'pipe')]).status === 0) {
+      check('fix_read refuses a FIFO without blocking', fixRead(d2, { path: 'pipe' }) === 'error: pipe is not a regular file');
+      const fifoOpen = await throws(() => openRegular(join(d2, 'pipe'), 'pipe'));
+      check('openRegular refuses a FIFO', fifoOpen?.code === 'ENOTREG');
+      const fifoWrite = await throws(() => writeWhole(join(d2, 'pipe'), 'pipe', Buffer.from('x')));
+      check('writeWhole refuses a FIFO without blocking, nothing written', fifoWrite?.code === 'ENOTREG' && !(fifoWrite instanceof WriteFailed), String(fifoWrite));
+    } else {
+      console.log('  skip the FIFO checks: no mkfifo here');
+    }
     rmSync(d2, { recursive: true, force: true });
   }
   check('unfinished prefixes the reason the dispatcher reads', unfinished(' the budget ran out. ') === `${UNFINISHED_PREFIX} the budget ran out.` && UNFINISHED_PREFIX === 'The fix run could not finish:');
@@ -926,6 +947,30 @@ if (!gitOk) {
     check('old_text copied from the altered line does not match, and the error says why', /old_text is not in src\/names\.js.*line 1 of this file is shown with words removed/.test(res(3)), res(3));
     check('an edit beside it lands, and the altered line is whole in the commit', r.outcome === 'fixed'
       && sh(repo.dir, ['show', `${r.new_head}:src/names.js`]) === '// works with LibreChat and TypingMind\nexport const n = 2;');
+    rmSync(w.out, { recursive: true, force: true });
+    rmSync(repo.dir, { recursive: true, force: true });
+  }
+
+  console.log('\n  runFix: a target with two names');
+  {
+    const repo = makeRepo();
+    writeFileSync(join(repo.dir, 'src', 'a.txt'), 'same\n');
+    writeFileSync(join(repo.dir, 'src', 'b.txt'), 'same\n');
+    sh(repo.dir, ['add', '-A']);
+    sh(repo.dir, ['-c', 'user.name=t', '-c', 'user.email=t@x', 'commit', '-q', '-m', 'add a and b']);
+    repo.head = sh(repo.dir, ['rev-parse', 'HEAD']);
+    // As a command in the checkout could leave them: b is now another name for a.
+    rmSync(join(repo.dir, 'src', 'b.txt'));
+    linkSync(join(repo.dir, 'src', 'a.txt'), join(repo.dir, 'src', 'b.txt'));
+    const w = world(repo, { turns: [
+      tool('fix_edit', { path: 'src/a.txt', old_text: 'same', new_text: 'changed' }),
+      tool('fix_write', { path: 'src/b.txt', content: 'changed\n' }),
+      finish(),
+    ] });
+    const { record: r } = await runFix(w.ctx);
+    const res = (i) => JSON.stringify(w.calls.model[i].messages.at(-1));
+    check('fix_edit and fix_write refuse a file with two names, and neither name changes', /src\/a\.txt has 2 names \(hard links\)/.test(res(1)) && /src\/b\.txt has 2 names \(hard links\)/.test(res(2))
+      && readFileSync(join(repo.dir, 'src', 'a.txt'), 'utf8') === 'same\n' && readFileSync(join(repo.dir, 'src', 'b.txt'), 'utf8') === 'same\n' && r.outcome === 'no_change', `${res(1)} ${res(2)} ${r.outcome}`);
     rmSync(w.out, { recursive: true, force: true });
     rmSync(repo.dir, { recursive: true, force: true });
   }

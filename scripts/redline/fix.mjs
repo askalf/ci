@@ -90,7 +90,7 @@
 // there is no bundled fallback, and a variable that is unset, a file that cannot be read or an empty
 // file ends the run.
 
-import { readFileSync, writeFileSync, mkdirSync, rmSync, existsSync, lstatSync, realpathSync, statSync, readdirSync, appendFileSync, mkdtempSync, readlinkSync, cpSync, openSync, fstatSync, closeSync, readSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, rmSync, existsSync, lstatSync, realpathSync, statSync, readdirSync, appendFileSync, mkdtempSync, readlinkSync, cpSync, openSync, fstatSync, closeSync, readSync, ftruncateSync, constants as fsConstants } from 'node:fs';
 import { join, resolve, relative, dirname, basename, sep, posix } from 'node:path';
 import { tmpdir, userInfo } from 'node:os';
 import { createHash } from 'node:crypto';
@@ -931,26 +931,62 @@ const cutWhole = (s, n) => { const part = s.slice(0, n); return /[\uD800-\uDBFF]
 /** Thrown once a write has begun and failed: the file may be part written, so the run ends with nothing committed. */
 export class WriteFailed extends Error {}
 
+// A FIFO opened with no writer, or for writing with no reader, blocks a plain open; O_NONBLOCK makes
+// the open return so the descriptor can be checked. (Windows has no FIFOs and no such flag.)
+const NONBLOCK = fsConstants.O_NONBLOCK ?? 0;
+
 /**
- * Write bytes to the file at abs in place, creating it when it is absent. It stays the same file, so
- * an existing one keeps its owner, group, mode and access list, as fix_write always kept them; no
- * copy is made, so no copy can be left in the checkout or be readable by anyone. A file that cannot
- * be opened is an ordinary tool error the model can act on. Once it is open, and so truncated, a
- * write or close that fails leaves the file in a state nobody chose: that is WriteFailed, which the
- * tools do not catch, so the run ends there as one that could not finish, no bundle is made, and the
- * dispatcher tries the head once more on a fresh checkout. `io` is the filesystem, for the tests.
+ * Open the file at abs for reading, without blocking, and only when it is a regular file: the
+ * descriptor, or a throw (code EISDIR for a directory, ENOTREG for a FIFO, socket or device) with
+ * nothing left open. `rel` names it in the message.
  */
-export const WRITE_IO = { openSync, writeFileSync, closeSync };
+export function openRegular(abs, rel) {
+  const fd = openSync(abs, fsConstants.O_RDONLY | NONBLOCK);
+  let st;
+  try { st = fstatSync(fd); } catch (e) { closeSync(fd); throw e; }
+  if (st.isFile()) return fd;
+  closeSync(fd);
+  throw Object.assign(new Error(st.isDirectory() ? `${rel} is a directory` : `${rel} is not a regular file`), { code: st.isDirectory() ? 'EISDIR' : 'ENOTREG' });
+}
+
+/**
+ * Write bytes to the file at abs in place: the same file, so an existing one keeps its owner, group,
+ * ordinary permission bits and access list, as fix_write always kept them. (A write by an account
+ * that does not own the file can clear its set-user-ID or set-group-ID bit; that is the kernel's
+ * rule, and the bits are not put back.) No copy is made, so none can be left in the checkout.
+ *
+ * An existing file is opened without truncation and without blocking, and is changed only when the
+ * descriptor shows a regular file with one name: another name for the same file (a hard link a
+ * command made) would change with it, unchecked and uncounted, so such a file, a FIFO, a socket or a
+ * device is an ordinary tool error with nothing changed. An absent one is created exclusively. Once
+ * the file is truncated, a write or close that fails leaves it in a state nobody chose: that is
+ * WriteFailed, which the tools do not catch, so the run ends as one that could not finish, no bundle
+ * is made, and the dispatcher tries the head once more on a fresh checkout. `io` is for the tests.
+ */
+export const WRITE_IO = { openSync, fstatSync, ftruncateSync, writeFileSync, closeSync };
 export function writeWhole(abs, rel, bytes, io = WRITE_IO) {
-  const fd = io.openSync(abs, 'w');
-  let open = true;
+  let fd;
   try {
+    fd = io.openSync(abs, fsConstants.O_RDWR | NONBLOCK);
+  } catch (e) {
+    if (e?.code !== 'ENOENT') throw e;
+    fd = io.openSync(abs, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | NONBLOCK, 0o666);
+  }
+  let open = true;
+  let changing = false;
+  try {
+    const st = io.fstatSync(fd);
+    if (!st.isFile()) throw Object.assign(new Error(`${rel} is not a regular file; it is not changed here`), { code: 'ENOTREG' });
+    if (st.nlink !== 1) throw Object.assign(new Error(`${rel} has ${st.nlink} names (hard links), so writing it would change the others too; it is not changed here`), { code: 'EMLINK' });
+    changing = true;
+    io.ftruncateSync(fd, 0);
     io.writeFileSync(fd, bytes);
     // Closed once: a close that fails has released the descriptor all the same.
     open = false;
     io.closeSync(fd);
   } catch (e) {
     if (open) { try { io.closeSync(fd); } catch { /* released either way */ } }
+    if (!changing) throw e;
     throw new WriteFailed(`writing ${rel} failed partway (${e?.code ?? e?.message ?? e}), so the file may be damaged`);
   }
 }
@@ -961,10 +997,9 @@ export function fixRead(root, input = {}) {
   try {
     // One descriptor for the check and the read. The first 8 KB are probed before anything else is
     // read, and the read is bounded, so a large binary costs 8 KB, not its size.
-    const fd = openSync(safePath(root, input.path), 'r');
+    const fd = openRegular(safePath(root, input.path), String(input.path ?? '.'));
     try {
       const st = fstatSync(fd);
-      if (st.isDirectory()) return 'error: that is a directory; use fix_list';
       const probe = Buffer.alloc(Math.min(8192, st.size));
       const got = readSync(fd, probe, 0, probe.length, 0);
       if (probe.subarray(0, got).includes(0)) return 'error: binary file, not readable as text';
@@ -1639,7 +1674,7 @@ async function answerReview(ctx) {
           const t = target(input.path);
           if (t.error) return t.error;
           // One descriptor for the check and the read; the write goes in place (writeWhole).
-          try { fd = openSync(t.abs, 'r'); } catch (e) {
+          try { fd = openRegular(t.abs, t.rel); } catch (e) {
             if (e?.code === 'ENOENT') return `error: ${t.rel} does not exist; write a new file with fix_write`;
             throw e;
           }
@@ -1701,7 +1736,7 @@ async function answerReview(ctx) {
           // A file that exists is read before it is replaced, through one descriptor: one too large
           // to read, or with lines that reach the model with words removed, is never written whole.
           let fd = null;
-          try { fd = openSync(t.abs, 'r'); } catch (e) { if (e?.code !== 'ENOENT') throw e; }
+          try { fd = openRegular(t.abs, t.rel); } catch (e) { if (e?.code !== 'ENOENT') throw e; }
           if (fd !== null) {
             try {
               if (fstatSync(fd).size > LIMITS.fileBytes) return `error: ${t.rel} is larger than ${LIMITS.fileBytes} bytes, too large to check before it is replaced; it is not changed here`;
