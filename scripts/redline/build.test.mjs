@@ -432,6 +432,7 @@ if (!gitOk) {
     check('the verify run builds the same tree again on the base, one commit by askalf, with no model call', v.record.outcome === 'fixed' && asked === 0 && buildProblem(v.record) === null
       && sh(repo.dir, ['rev-parse', `${built.record.new_head}^{tree}`]) === spawnSync('git', ['rev-parse', `${v.record.new_head}^{tree}`], { cwd: c.dir, encoding: 'utf8' }).stdout.trim()
       && v.record.title === built.record.title && v.description === DESCRIPTION && v.record.turns === built.record.turns && v.record.commits.length === 1, `${v.record.outcome} ${v.record.notes}`);
+    check('a tree that declares no test script is fixed in the verify job with tests: null, which says no suite ran there', !existsSync(join(repo.dir, 'package.json')) && v.record.tests === null && built.record.tests === null);
     rmSync(out2, { recursive: true, force: true });
     rmSync(c.dir, { recursive: true, force: true });
     // What is not this run's, or not one commit on the base, is not verified.

@@ -104,9 +104,10 @@ names the commit's date and the pull request it came from.
   one) and nothing else: it builds a fixed candidate, a dry run's too, again on a fresh checkout
   of the base with no model, from the tree the build job's gate tested (a dry run's diff is kept
   as git wrote it, byte for byte), runs the test gate there, and alone uploads `redline-build`,
-  from an output directory of its own, so a build is fixed only when its tests pass in a
-  job that never ran the model's commands; a record that is not a fixed build is passed on as it
-  is. The fix lane's gate still runs in the job that edited, as before. Its
+  from an output directory of its own. So every fixed result is built again in a job that never
+  ran the model's commands, and when the tree declares a test script its suite must pass there; a
+  tree that declares none gives a fixed result with `tests: null`, which ran no suite in either
+  job. A record that is not a fixed build is passed on as it is. The fix lane's gate still runs in the job that edited, as before. Its
   tools are pinned as `build-tools.json`. No repository calls the workflow yet: a caller pins a
   commit that is already on `main`, so it comes in a later change.
 - A review before the push can be given Redline's earlier verdicts on the branch.

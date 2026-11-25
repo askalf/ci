@@ -393,8 +393,11 @@ commit as askalf. What differs:
   commit is made again, and the tree it commits must be the candidate's; a dry run makes none, and
   its result carries the same diff and this job's own tests. The verify job writes and uploads its
   own output directory (`verify-out-<run id>-<attempt>`), never the build job's, and only it
-  uploads `redline-build`, the artifact the ops tick reads, so a build is fixed only when its tests
-  pass in a job that never ran the model's commands.
+  uploads `redline-build`, the artifact the ops tick reads. So every `fixed` result is built again
+  in a job that never ran the model's commands, and when the tree declares a test script its suite
+  must pass there. A tree that declares none has no suite the gate can run: its `fixed` result has
+  `tests: null`, and no tests ran in either job's gate, whatever the model ran while it worked (a
+  standalone `node test.mjs`, say, is not run by the gate).
 
 The artifact is `redline-build`, uploaded by the verify job:
 
