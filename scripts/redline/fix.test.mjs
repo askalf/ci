@@ -2,7 +2,7 @@
 // The model and GitHub are stubbed through ctx.fetch; git is real, on throwaway repositories under
 // the temp directory. Nothing leaves the machine.
 
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, symlinkSync, chmodSync, statSync, readdirSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, symlinkSync, chmodSync, statSync, readdirSync, fstatSync, closeSync, openSync, linkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { createServer as createNetServer } from 'node:net';
@@ -17,7 +17,7 @@ import {
   LIMITS, OUTCOMES, AUTHOR, FIX_VERSION, DEFAULT_MODEL, SUBJECT_BANNED, EFFORT_LEVELS, fixEffort, priorRounds, REVIEW_PAGES_MAX,
   HISTORY, FIX_POSTER, appliedFixComments, fixVerdicts, historyFinding, allReviews, repoFixHistory, formatHistory,
   LESSONS, lessonsAccess, lessonQuery, fetchLessons,
-  runIdentity,
+  runIdentity, alteredInTransit, alteredLines, fixRead, fixSearch, UNFINISHED_PREFIX, unfinished, CONNECTION_CUT_CHARS, occurrences, shownText, shownView, writeWhole, WRITE_IO, WriteFailed, openRegular,
 } from './fix.mjs';
 import { bumpCaller, fixCallerYaml, REVIEW_WORKFLOW, FIX_WORKFLOW, PUBLIC_TEXT_WORKFLOW, POST_WORKFLOW, CALLERS } from './pin.mjs';
 
@@ -344,7 +344,7 @@ console.log('\n  fix.json');
 
 console.log('\n  finish_fix and the loop');
 {
-  check('the tool set is the contract', TOOLS.map((t) => t.name).join() === 'fix_list,fix_read,fix_search,fix_write,fix_run,fix_describe,finish_fix');
+  check('the tool set is the contract', TOOLS.map((t) => t.name).join() === 'fix_list,fix_read,fix_search,fix_edit,fix_write,fix_run,fix_describe,finish_fix');
   // dario remaps a client tool with a common name (read_file, write_file, run, search, list_files, ...)
   // onto Claude Code's own and sends the rest as mcp__client__<name>. Every name must be one no client
   // uses, so the whole set goes out one way.
@@ -364,6 +364,149 @@ console.log('\n  finish_fix and the loop');
   askForFinish(arr);
   check('and as a text block after tool results', arr[0].content.length === 2 && arr[0].content[1].text === FINISH_REQUIRED);
 }
+console.log('\n  what the model is shown');
+{
+  check('a product name dario removes from prose is altered in transit', alteredInTransit('Works with LibreChat and TypingMind.') && alteredInTransit('also Roo Code, roo-cline and claude-bridge'));
+  check('the regex literal in dario that lists them is altered too (dario#1936 line 621)', alteredInTransit('  /\\b(librechat|typingmind)\\b/gi,'));
+  check('a name in a path or a slug stays, as dario leaves it', !alteredInTransit('src/librechat.ts') && !alteredInTransit('see ./typingmind/ and x_librechat') && !alteredInTransit('librechat/README.md'));
+  check('the words dario leaves in content stay (continue, gateway, cursor)', !alteredInTransit('continue; // gateway cursor openai') && !alteredInTransit(''));
+  check('alteredLines numbers the altered lines from 1', alteredLines('a\nLibreChat here\nb\n/x/librechat\nTypingMind') .join() === '2,5');
+  check(`a read stays under the cut the connection makes (${CONNECTION_CUT_CHARS})`, LIMITS.readChars < CONNECTION_CUT_CHARS - 1_000 && LIMITS.readLines === 400);
+
+  const dir = mkdtempSync(join(tmpdir(), 'redline-fix-shown-'));
+  writeFileSync(join(dir, 'big.txt'), Array.from({ length: 1000 }, (_, i) => `line ${i + 1} ${'x'.repeat(90)}`).join('\n'));
+  let r = fixRead(dir, { path: 'big.txt' });
+  const rows = r.split('\n').filter((l) => /^\d+\t/.test(l));
+  check('a default read is at most 400 lines and under readChars, and says where to read on',
+    rows.length <= 400 && rows[0].startsWith('1\t') && r.length <= LIMITS.readChars && new RegExp(`read on with start_line ${rows.length + 1}\\)`).test(r) && r.endsWith('(file has 1000 lines)'), r.slice(-200));
+  writeFileSync(join(dir, 'short.txt'), Array.from({ length: 401 }, (_, i) => `s${i + 1}`).join('\n'));
+  r = fixRead(dir, { path: 'short.txt' });
+  check('401 short lines: 400 shown, and the read says to go on at 401', r.split('\n').filter((l) => /^\d+\t/.test(l)).length === 400 && /\(shown to line 400 of 401: read on with start_line 401\)/.test(r), r.slice(-120));
+  r = fixRead(dir, { path: 'short.txt', start_line: 1, end_line: 900 });
+  check('an end_line past the 400-line cap says to go on too', /read on with start_line 401\)/.test(r));
+  r = fixRead(dir, { path: 'short.txt', start_line: 401 });
+  check('the last line, then nothing to read on', r === '401\ts401\n(file has 401 lines)', r);
+  writeFileSync(join(dir, 'huge-line.txt'), `${'q'.repeat(130_000)}\nafter\n`);
+  r = fixRead(dir, { path: 'huge-line.txt' });
+  check('a first line longer than redline_read\'s own cap still shows its start and how to go on', r.length <= LIMITS.readChars && r.startsWith('1\tqqq')
+    && /its first \d+ of 130000 characters are above/.test(r) && /read on with start_line 2\)/.test(r), r.slice(-300));
+  mkdirSync(join(dir, 'sub'));
+  check('a directory is fix_list\'s', fixRead(dir, { path: 'sub' }) === 'error: that is a directory; use fix_list');
+  r = fixRead(dir, { path: 'big.txt', start_line: 990, end_line: 2000 });
+  check('a read past the end stops at the last line', r.split('\n').filter((l) => /^\d+\t/.test(l)).length === 11 && !/read on/.test(r));
+  r = fixRead(dir, { path: 'big.txt', start_line: 10, end_line: 12 });
+  check('a read of a range is that range', r === `10\tline 10 ${'x'.repeat(90)}\n11\tline 11 ${'x'.repeat(90)}\n12\tline 12 ${'x'.repeat(90)}\n(file has 1000 lines)`, r);
+  writeFileSync(join(dir, 'names.js'), '// works with LibreChat\nconst p = "src/librechat.ts";\nexport const n = 1;\n');
+  r = fixRead(dir, { path: 'names.js' });
+  check('a read names the lines shown with words removed, and only those', /\(line 1: shown with words removed on the way to you, and whole on disk\. Never put such a line in fix_edit's old_text/.test(r) && !/line 2/.test(r), r);
+  writeFileSync(join(dir, 'long.txt'), `${'z'.repeat(50_000)}\nsecond\n`);
+  r = fixRead(dir, { path: 'long.txt' });
+  check('a line longer than a read shows its start and says so', r.length <= LIMITS.readChars && /\(line 1 goes on past what one read shows/.test(r) && /read on with start_line 2\)/.test(r));
+  check('a read error passes through', /^error:/.test(fixRead(dir, { path: '../x' })) && /^error:/.test(fixRead(dir, { path: 'none.txt' })));
+  r = fixSearch(dir, { pattern: 'LibreChat|export', path: 'names.js' });
+  check('a search names the matches shown with words removed, by path', /names\.js:1: /.test(r) && /\(shown with words removed on the way to you, and whole on disk: names\.js line 1\)$/.test(r), r);
+  check('a search with no match says so', fixSearch(dir, { pattern: 'nothing-matches-this' }) === '(no matches)');
+  writeFileSync(join(dir, 'wide.txt'), Array.from({ length: 80 }, () => 'y'.repeat(400)).join('\n'));
+  r = fixSearch(dir, { pattern: 'y{10}', path: 'wide.txt' });
+  check('a search result stays under readChars and says how many matches it left out', r.length <= LIMITS.readChars && /\(\d+ more matches not shown: the output cap; narrow the pattern or the path\)$/.test(r), r.slice(-200));
+  // 80 matches the model is shown with words removed, in files with long paths: the note is
+  // grouped by path and bounded, so the whole result, note included, stays under readChars.
+  const deep = join(dir, 'a'.repeat(60), 'b'.repeat(60));
+  mkdirSync(deep, { recursive: true });
+  for (let f = 0; f < 8; f++) writeFileSync(join(deep, `${'c'.repeat(40)}${f}.txt`), Array.from({ length: 10 }, (_, i) => `LibreChat ${i}`).join('\n'));
+  r = fixSearch(dir, { pattern: 'LibreChat', path: 'a'.repeat(60) });
+  const note = r.split('\n').at(-1);
+  check('80 altered matches under long paths: grouped by path, bounded, the whole result under readChars', r.length <= LIMITS.readChars
+    && note.startsWith('(shown with words removed') && note.length < 2_000 && /lines 1, 2, 3, 4, 5, 6, 7, 8, 9, 10/.test(note) && (note.match(/c{40}0\.txt/g) ?? []).length === 1, note.slice(0, 300));
+  rmSync(dir, { recursive: true, force: true });
+  check('occurrences counts overlapping matches', occurrences('aaa', 'aa') === 2 && occurrences('abab', 'ab') === 2 && occurrences('x', '') === 0);
+  check('shownText removes as dario does, path and slug names kept', shownText('// LibreChat enabled, see src/librechat.ts') === '//  enabled, see src/librechat.ts');
+  // dario's scrubWithPatterns over CONTENT_FRAMEWORK_PATTERNS, as written there: shownView must agree.
+  const darioScrub = (text) => {
+    let result = text;
+    for (const pattern of [/\b(roo[- ]?cline|roo[- ]?code|big[- ]?agi|claude[- ]?bridge)\b/gi, /\b(librechat|typingmind)\b/gi]) {
+      pattern.lastIndex = 0;
+      result = result.replace(pattern, (match, ...args) => {
+        const offset = args[args.length - 2];
+        const src = args[args.length - 1];
+        const before = offset > 0 ? src[offset - 1] : '';
+        const after = offset + match.length < src.length ? src[offset + match.length] : '';
+        if (before === '.' || before === '/' || before === '\\' || before === '-' || before === '_') return match;
+        if (after === '/' || after === '\\') return match;
+        return '';
+      });
+    }
+    return result;
+  };
+  const samples = ['Roo Code and roo-cline/x, .typingmind LibreChat_TypingMind', 'big agi\nclaude bridge!\r\nLibreChatTypingMind', 'x LibreChat y', '/librechat roocode-librechat', ''];
+  check('shownView shows what dario sends, for every sample', samples.every((t) => shownView(t).shown === darioScrub(t)), samples.find((t) => shownView(t).shown !== darioScrub(t)));
+  check('shownView maps each shown character to its place on disk', JSON.stringify(shownView('x LibreChat y')) === JSON.stringify({ shown: 'x  y', map: [0, 1, 11, 12] })
+    && samples.every((t) => { const v = shownView(t); return v.map.length === v.shown.length && [...v.shown].every((c, i) => t[v.map[i]] === c); }));
+  {
+    const d2 = mkdtempSync(join(tmpdir(), 'redline-fix-shown2-'));
+    const LONE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+    const cutAt = LIMITS.readChars - 2_000 - 300;
+    writeFileSync(join(d2, 'emoji.txt'), `${'q'.repeat(cutAt - 1)}\u{1F600}${'z'.repeat(2_000)}\nend\n`);
+    const er = fixRead(d2, { path: 'emoji.txt' });
+    check('a long line is cut between characters, never inside one', er.startsWith('1\tqqq') && !LONE.test(er) && /goes on past what one read shows/.test(er));
+    writeFileSync(join(d2, 'blob.bin'), Buffer.alloc(LIMITS.readFileBytes + 1_000));
+    check('a large binary is refused from its first 8 KB', fixRead(d2, { path: 'blob.bin' }) === 'error: binary file, not readable as text');
+    writeFileSync(join(d2, 'big.log'), Buffer.alloc(LIMITS.readFileBytes + 1_000, 'a'));
+    check('a text file past readFileBytes is refused, and the error says the lane does not change it', /^error: the file is \d+ bytes, more than fix_read reads \(\d+\), and the fix lane does not change a file this large$/.test(fixRead(d2, { path: 'big.log' })));
+    // writeWhole: in place, the same file, so its mode stays; a file that cannot be opened is an
+    // ordinary error; a write or close that fails once the file is open is WriteFailed, closed once.
+    const run = join(d2, 'run.sh');
+    writeFileSync(run, '#!/bin/sh\necho a\n');
+    if (process.platform !== 'win32') chmodSync(run, 0o640);
+    // Through a descriptor, so no check by path comes before a use of the path.
+    const fstatOf = (p) => { const fd = openSync(p, 'r'); try { return fstatSync(fd); } finally { closeSync(fd); } };
+    const before = fstatOf(run);
+    writeWhole(run, 'run.sh', Buffer.from('#!/bin/sh\necho b\n'));
+    const after = fstatOf(run);
+    check('a write lands in the same file and keeps its mode', readFileSync(run, 'utf8') === '#!/bin/sh\necho b\n' && after.ino === before.ino
+      && (process.platform === 'win32' || (after.mode & 0o7777) === 0o640) && !readdirSync(d2).some((n) => n.startsWith('.fix-')), `${before.ino} ${after.ino} ${(after.mode & 0o7777).toString(8)}`);
+    mkdirSync(join(d2, 'dir'));
+    const notOpen = await throws(() => writeWhole(join(d2, 'dir'), 'dir', Buffer.from('x')));
+    check('a file that cannot be opened is an ordinary error, not WriteFailed', notOpen !== null && !(notOpen instanceof WriteFailed), String(notOpen));
+    let closes = 0;
+    const counted = (extra) => ({ ...WRITE_IO, closeSync: (fd) => { closes++; closeSync(fd); }, ...extra });
+    const wErr = await throws(() => writeWhole(run, 'run.sh', Buffer.from('x'), counted({ writeFileSync: () => { throw Object.assign(new Error('ENOSPC: no space left on device, write'), { code: 'ENOSPC' }); } })));
+    check('a write that fails is WriteFailed, names the file and the code, and closes once', wErr instanceof WriteFailed && wErr.message === 'writing run.sh failed partway (ENOSPC), so the file may be damaged' && closes === 1, `${wErr} closes=${closes}`);
+    closes = 0;
+    const cErr = await throws(() => writeWhole(run, 'run.sh', Buffer.from('y'), counted({ closeSync: (fd) => { closes++; closeSync(fd); throw Object.assign(new Error('EIO: i/o error, close'), { code: 'EIO' }); } })));
+    check('a close that fails is WriteFailed too, and is not retried', cErr instanceof WriteFailed && /\(EIO\)/.test(cErr.message) && closes === 1, `${cErr} closes=${closes}`);
+    // Two names for one file: refused with nothing changed, not WriteFailed.
+    const one = join(d2, 'one.txt');
+    const two = join(d2, 'two.txt');
+    writeFileSync(one, 'shared');
+    linkSync(one, two);
+    const linked = await throws(() => writeWhole(one, 'one.txt', Buffer.from('changed')));
+    check('a file with two names is refused, both unchanged', linked?.code === 'EMLINK' && !(linked instanceof WriteFailed) && /has 2 names \(hard links\)/.test(linked.message)
+      && readFileSync(one, 'utf8') === 'shared' && readFileSync(two, 'utf8') === 'shared', String(linked));
+    const created = join(d2, 'created.txt');
+    writeWhole(created, 'created.txt', Buffer.from('new'));
+    check('an absent file is created', readFileSync(created, 'utf8') === 'new');
+    // A failure right after the exclusive open created the file is WriteFailed: the new file is a
+    // change already. The same failure on an existing file, before it is truncated, is not.
+    const fstatFails = { ...WRITE_IO, fstatSync: () => { throw Object.assign(new Error('EIO: i/o error, fstat'), { code: 'EIO' }); } };
+    const afterCreate = await throws(() => writeWhole(join(d2, 'made.txt'), 'made.txt', Buffer.from('x'), fstatFails));
+    check('a failure after the file was created is WriteFailed', afterCreate instanceof WriteFailed && /writing made\.txt failed partway \(EIO\)/.test(afterCreate.message), String(afterCreate));
+    const beforeTruncate = await throws(() => writeWhole(created, 'created.txt', Buffer.from('y'), fstatFails));
+    check('the same failure on an existing file before truncation is an ordinary error, the file unchanged', beforeTruncate?.code === 'EIO' && !(beforeTruncate instanceof WriteFailed) && readFileSync(created, 'utf8') === 'new', String(beforeTruncate));
+    // A FIFO with no writer would block a plain open forever; it is refused at once.
+    if (process.platform !== 'win32' && spawnSync('mkfifo', [join(d2, 'pipe')]).status === 0) {
+      check('fix_read refuses a FIFO without blocking', fixRead(d2, { path: 'pipe' }) === 'error: pipe is not a regular file');
+      const fifoOpen = await throws(() => openRegular(join(d2, 'pipe'), 'pipe'));
+      check('openRegular refuses a FIFO', fifoOpen?.code === 'ENOTREG');
+      const fifoWrite = await throws(() => writeWhole(join(d2, 'pipe'), 'pipe', Buffer.from('x')));
+      check('writeWhole refuses a FIFO without blocking, nothing written', fifoWrite?.code === 'ENOTREG' && !(fifoWrite instanceof WriteFailed), String(fifoWrite));
+    } else {
+      console.log('  skip the FIFO checks: no mkfifo here');
+    }
+    rmSync(d2, { recursive: true, force: true });
+  }
+  check('unfinished prefixes the reason the dispatcher reads', unfinished(' the budget ran out. ') === `${UNFINISHED_PREFIX} the budget ran out.` && UNFINISHED_PREFIX === 'The fix run could not finish:');
+}
 const use = (name, input, id = `${name}-${Math.random()}`) => ({ content: [{ type: 'tool_use', id, name, input }] });
 function loopWorld(turns, { canForce = true } = {}) {
   const calls = [];
@@ -380,12 +523,15 @@ function loopWorld(turns, { canForce = true } = {}) {
 {
   const w = loopWorld([use('fix_read', { path: 'a' }), use('finish_fix', { summary: 's', subject: 'x' })]);
   const r = await runLoop(w.ctx, 'brief');
-  check('a tool call runs and its result goes back; finish_fix ends the loop', r.sub?.summary === 's' && r.turns === 2 && w.tools[0][0] === 'fix_read' && JSON.stringify(w.calls[1].messages.at(-1)).includes('ran fix_read'));
+  check('a tool call runs and its result goes back; finish_fix ends the loop', r.sub?.summary === 's' && r.turns === 2 && r.forced === false && w.tools[0][0] === 'fix_read' && JSON.stringify(w.calls[1].messages.at(-1)).includes('ran fix_read'));
   check('the brief is the first user turn, ending with the instruction', w.calls[0].messages[0].content.endsWith('finish with finish_fix.'));
 }
 {
   const w = loopWorld([use('fix_list', {})]);
   const r = await runLoop(w.ctx, 'brief');
+  const forced = loopWorld([(m, tc) => (tc?.name === 'finish_fix' ? use('finish_fix', { outcome: 'refused', reason: 'r', summary: 's' }) : use('fix_list', {}))]);
+  const rf = await runLoop(forced.ctx, 'brief');
+  check('a finish under the spent budget says so (forced), one before it does not', rf.forced === true && rf.sub.outcome === 'refused' && rf.turns === LIMITS.forceFinishAt);
   check(`a model that never finishes is refused after ${LIMITS.turns} turns, not thrown`, /within 40 turns/.test(r.refused) && r.turns === LIMITS.turns && w.calls.length === LIMITS.turns);
   check(`tools are refused from turn ${LIMITS.forceFinishAt} on, with a forced tool_choice`, w.calls[LIMITS.forceFinishAt - 1].toolChoice?.name === 'finish_fix' && JSON.stringify(w.calls[LIMITS.forceFinishAt].messages.at(-1)).includes('budget is spent') && w.tools.length === LIMITS.forceFinishAt - 1);
 }
@@ -666,7 +812,7 @@ if (!gitOk) {
     check('the record and the brief of every call name the same run and attempt', JSON.stringify(r.run) === '{"id":45405973359,"attempt":2}'
       && w.calls.model.length === 4 && w.calls.model.every((c) => String(c.messages[0].content).split('\n')[3] === 'Fix run 45405973359, attempt 2'));
     check('the notes are the summary, files and tests, clean', r.notes.startsWith('Reads the token from the config') && r.notes.includes('Files: `src/b.js`') && !/[\u2013\u2014]/.test(r.notes));
-    check('the model got the brief with the findings and the tools, the key in a header', w.calls.model[0].messages[0].content.includes('[1] blocking `src/b.js:1`') && w.calls.model[0].tools.length === 7 && w.calls.model[0].key === 'k');
+    check('the model got the brief with the findings and the tools, the key in a header', w.calls.model[0].messages[0].content.includes('[1] blocking `src/b.js:1`') && w.calls.model[0].tools.length === 8 && w.calls.model[0].key === 'k');
     check('the read went back to the model, the write and run reported', JSON.stringify(w.calls.model[1].messages.at(-1)).includes('export const token') && JSON.stringify(w.calls.model[2].messages.at(-1)).includes('wrote src/b.js') && JSON.stringify(w.calls.model[3].messages.at(-1)).includes('exit 0'));
     const bundle = join(w.out, 'fix.bundle');
     check('fix.bundle exists and verifies against the repo', existsSync(bundle) && spawnSync('git', ['bundle', 'verify', bundle], { cwd: repo.dir, encoding: 'utf8' }).status === 0);
@@ -684,6 +830,201 @@ if (!gitOk) {
     check('another repository at the base can fetch the bundle', fetched.status === 0 && sh(clone, ['rev-parse', 'FETCH_HEAD']) === r.new_head);
     check('the fetched tree has the fix', spawnSync('git', ['show', `${r.new_head}:src/b.js`], { cwd: clone, encoding: 'utf8' }).stdout === FIXED_B);
     rmSync(clone, { recursive: true, force: true });
+    rmSync(w.out, { recursive: true, force: true });
+    rmSync(repo.dir, { recursive: true, force: true });
+  }
+
+  console.log('\n  runFix: fix_edit');
+  {
+    const repo = makeRepo();
+    const w = world(repo, { turns: [
+      tool('fix_edit', { path: 'src/b.js', old_text: 'const', new_text: 'let' }),
+      tool('fix_edit', { path: 'src/b.js', old_text: 'process.env.Y', new_text: 'x' }),
+      tool('fix_edit', { path: 'src/none.js', old_text: 'a', new_text: 'b' }),
+      tool('fix_edit', { path: '.github/workflows/ci.yml', old_text: 'a', new_text: 'b' }),
+      tool('fix_edit', { path: 'src/b.js', old_text: '', new_text: 'b' }),
+      tool('fix_edit', { path: 'src/b.js', old_text: 'export const token = process.env.X;', new_text: 'import { read } from "./config.js";\nexport const token = read();' }),
+      finish(),
+    ] });
+    const { record: r } = await runFix(w.ctx);
+    const res = (i) => JSON.stringify(w.calls.model[i].messages.at(-1));
+    check('old_text that occurs twice is refused with the count', /old_text occurs 2 times in src\/b\.js/.test(res(1)), res(1));
+    check('old_text that is not in the file is refused', /old_text is not in src\/b\.js/.test(res(2)));
+    check('a file that does not exist is fix_write\'s', /src\/none\.js does not exist; write a new file with fix_write/.test(res(3)));
+    check('the write rules hold: nothing under .github/ the PR does not change', /error: /.test(res(4)) && !existsSync(join(repo.dir, '.github')));
+    check('empty old_text is refused', /old_text is empty/.test(res(5)));
+    check('an edit replaces the one piece and says which lines', /edited src\/b\.js: lines 1-1 replaced by 2 line\(s\); the file has 4 lines/.test(res(6)), res(6));
+    check('the edit is the fix, committed', r.outcome === 'fixed' && r.files.join() === 'src/b.js' && sh(repo.dir, ['show', `${r.new_head}:src/b.js`]) === FIXED_B.trimEnd());
+    rmSync(w.out, { recursive: true, force: true });
+    rmSync(repo.dir, { recursive: true, force: true });
+  }
+  {
+    // CRLF on disk, LF from the model: the lines match the way the file joins them.
+    const repo = makeRepo();
+    writeFileSync(join(repo.dir, 'src', 'w.js'), 'const a = 1;\r\nconst b = 2;\r\n');
+    sh(repo.dir, ['add', '-A']);
+    sh(repo.dir, ['-c', 'user.name=t', '-c', 'user.email=t@x', 'commit', '-q', '-m', 'add w']);
+    repo.head = sh(repo.dir, ['rev-parse', 'HEAD']);
+    const w = world(repo, { turns: [tool('fix_edit', { path: 'src/w.js', old_text: 'const a = 1;\nconst b = 2;', new_text: 'const a = 1;\nconst b = 3;' }), finish()] });
+    const { record: r } = await runFix(w.ctx);
+    check('a CRLF file is edited with its own line ends', r.outcome === 'fixed' && spawnSync('git', ['show', `${r.new_head}:src/w.js`], { cwd: repo.dir, encoding: 'utf8' }).stdout === 'const a = 1;\r\nconst b = 3;\r\n');
+    rmSync(w.out, { recursive: true, force: true });
+    rmSync(repo.dir, { recursive: true, force: true });
+  }
+  {
+    // The edges of an edit: bytes that are not UTF-8, overlapping matches, a match that is unique on
+    // disk but not as shown, CRLF replacements, a missing argument, a large file, and fix_write on a
+    // file too large to check.
+    const repo = makeRepo();
+    const LATIN1 = Buffer.concat([Buffer.from('// caf'), Buffer.from([0xe9]), Buffer.from('\nconst a = 1;\n')]);
+    writeFileSync(join(repo.dir, 'src', 'latin1.js'), LATIN1);
+    writeFileSync(join(repo.dir, 'src', 'aaa.txt'), 'aaa\n');
+    writeFileSync(join(repo.dir, 'src', 'shown.js'), '// LibreChat enabled\n//  enabled\nconst k = 1;\n');
+    writeFileSync(join(repo.dir, 'src', 'crlf.js'), 'const a = 1;\r\nconst b = 2;\r\n');
+    writeFileSync(join(repo.dir, 'src', 'del.js'), 'keep();\ndrop();\n');
+    const BIG = `${Array.from({ length: 10_000 }, (_, i) => `export const v${i} = ${i}; // ${'p'.repeat(24)}`).join('\n')}\n`;
+    writeFileSync(join(repo.dir, 'src', 'big.js'), BIG);
+    writeFileSync(join(repo.dir, 'src', 'huge.txt'), 'h'.repeat(LIMITS.fileBytes + 10));
+    // Shown, line 1 reads " !" and line 2 "Chat !": "Chat !" occurs once in each view, but on disk
+    // it is the end of line 1, not line 2.
+    writeFileSync(join(repo.dir, 'src', 'place.js'), 'LibreChat !\nChat LibreChat!\n');
+    writeFileSync(join(repo.dir, 'src', 'emoji.js'), 'x\u{1F600}y\n');
+    sh(repo.dir, ['add', '-A']);
+    sh(repo.dir, ['-c', 'user.name=t', '-c', 'user.email=t@x', 'commit', '-q', '-m', 'add edge files']);
+    repo.head = sh(repo.dir, ['rev-parse', 'HEAD']);
+    const w = world(repo, { turns: [
+      tool('fix_edit', { path: 'src/latin1.js', old_text: 'const a = 1;', new_text: 'const a = 2;' }),
+      tool('fix_edit', { path: 'src/aaa.txt', old_text: 'aa', new_text: 'b' }),
+      tool('fix_edit', { path: 'src/shown.js', old_text: '//  enabled', new_text: '// off' }),
+      tool('fix_edit', { path: 'src/shown.js', old_text: '// LibreChat enabled', new_text: '// on' }),
+      tool('fix_edit', { path: 'src/crlf.js', old_text: 'const b = 2;', new_text: 'const b = 2;\nconst c = 3;' }),
+      tool('fix_edit', { path: 'src/crlf.js', old_text: 'const a = 1;', new_text: 'const a = 0;\r\nconst z = 9;' }),
+      tool('fix_edit', { path: 'src/del.js', old_text: 'drop();\n' }),
+      tool('fix_edit', { path: 'src/del.js', old_text: 'drop();\n', new_text: null }),
+      tool('fix_edit', { path: 'src/del.js', old_text: 'drop();\n', new_text: '' }),
+      tool('fix_edit', { path: 'src/big.js', old_text: 'export const v5000 = 5000;', new_text: 'export const v5000 = 5001;' }),
+      tool('fix_write', { path: 'src/huge.txt', content: 'short' }),
+      tool('fix_write', { path: 'src/new.js' }),
+      tool('fix_edit', { path: 'src/place.js', old_text: 'Chat !', new_text: 'Chat ?' }),
+      tool('fix_edit', { path: 'src/emoji.js', old_text: 'x\uD83D', new_text: 'x' }),
+      tool('fix_edit', { path: 'src/emoji.js', old_text: 'y', new_text: '\uDE00' }),
+      finish(),
+    ] });
+    const { record: r } = await runFix(w.ctx);
+    const res = (i) => JSON.stringify(w.calls.model[i].messages.at(-1));
+    const at = (p) => spawnSync('git', ['show', `${r.new_head}:${p}`], { cwd: repo.dir, encoding: 'utf8' }).stdout;
+    check('a file that is not UTF-8 is not edited, and its bytes stay', /src\/latin1\.js is not UTF-8 text/.test(res(1)) && readFileSync(join(repo.dir, 'src', 'latin1.js')).equals(LATIN1) && !r.files.includes('src/latin1.js'), res(1));
+    check('overlapping matches count: "aa" in "aaa" occurs twice', /old_text occurs 2 times in src\/aaa\.txt/.test(res(2)), res(2));
+    check('unique on disk but twice as shown: refused, since the model may mean the other one', /old_text occurs once in src\/shown\.js but 2 times in the file as you are shown it/.test(res(3)), res(3));
+    check('old_text holding a word the model is not shown: refused', /old_text holds text that reaches you with words removed \(line 1 of src\/shown\.js is shown/.test(res(4)), res(4));
+    check('a CRLF file: LF replacement lines get CRLF, CRLF ones are not doubled', /edited src\/crlf\.js/.test(res(5)) && /edited src\/crlf\.js/.test(res(6))
+      && at('src/crlf.js') === 'const a = 0;\r\nconst z = 9;\r\nconst b = 2;\r\nconst c = 3;\r\n', JSON.stringify(at('src/crlf.js')));
+    check('a missing or null new_text is an error, never a deletion; an empty one deletes', /must both be strings/.test(res(7)) && /must both be strings/.test(res(8)) && /edited src\/del\.js/.test(res(9)) && at('src/del.js') === 'keep();\n');
+    check('a one-line edit in a 540 KB file lands (the payload limit is the replacement\'s)', /edited src\/big\.js: lines 5001-5001 replaced by 1 line\(s\)/.test(res(10)) && at('src/big.js') === BIG.replace('export const v5000 = 5000;', 'export const v5000 = 5001;'), res(10));
+    check('fix_write will not replace a file too large to check', /src\/huge\.txt is larger than 1000000 bytes, too large to check before it is replaced/.test(res(11)) && statSync(join(repo.dir, 'src', 'huge.txt')).size === LIMITS.fileBytes + 10, res(11));
+    check('fix_write needs its content', /content must be a string/.test(res(12)) && !existsSync(join(repo.dir, 'src', 'new.js')));
+    check('once on disk and once as shown, but not the same place: refused, the file as it was', /the old_text you were shown is in a different place in src\/place\.js/.test(res(13))
+      && readFileSync(join(repo.dir, 'src', 'place.js'), 'utf8') === 'LibreChat !\nChat LibreChat!\n', res(13));
+    check('half of a character in old_text or new_text is refused, the file as it was', /half of a character/.test(res(14)) && /half of a character/.test(res(15))
+      && readFileSync(join(repo.dir, 'src', 'emoji.js'), 'utf8') === 'x\u{1F600}y\n');
+    check('no temporary file is left in the checkout', !readdirSync(join(repo.dir, 'src')).some((n) => n.includes('.fix-')));
+    check('the run is the edits that landed', r.outcome === 'fixed' && r.files.slice().sort().join() === 'src/big.js,src/crlf.js,src/del.js', r.files.join());
+    rmSync(w.out, { recursive: true, force: true });
+    rmSync(repo.dir, { recursive: true, force: true });
+  }
+  {
+    // dario#1936: a file with lines the model is shown with words removed.
+    const repo = makeRepo();
+    const NAMES = '// works with LibreChat and TypingMind\nexport const n = 1;\n';
+    writeFileSync(join(repo.dir, 'src', 'names.js'), NAMES);
+    sh(repo.dir, ['add', '-A']);
+    sh(repo.dir, ['-c', 'user.name=t', '-c', 'user.email=t@x', 'commit', '-q', '-m', 'add names']);
+    repo.head = sh(repo.dir, ['rev-parse', 'HEAD']);
+    const w = world(repo, { turns: [
+      tool('fix_read', { path: 'src/names.js' }),
+      tool('fix_write', { path: 'src/names.js', content: '// works with  and \nexport const n = 2;\n' }),
+      tool('fix_edit', { path: 'src/names.js', old_text: '// works with  and \nexport const n = 1;', new_text: 'export const n = 2;' }),
+      tool('fix_edit', { path: 'src/names.js', old_text: 'export const n = 1;', new_text: 'export const n = 2;' }),
+      finish(),
+    ] });
+    const { record: r } = await runFix(w.ctx);
+    const res = (i) => JSON.stringify(w.calls.model[i].messages.at(-1));
+    check('the read names line 1', /line 1: shown with words removed/.test(res(1)));
+    check('fix_write will not write that file whole', /line 1 of src\/names\.js is shown with words removed .* change the file with fix_edit/.test(res(2)), res(2));
+    check('old_text copied from the altered line does not match, and the error says why', /old_text is not in src\/names\.js.*line 1 of this file is shown with words removed/.test(res(3)), res(3));
+    check('an edit beside it lands, and the altered line is whole in the commit', r.outcome === 'fixed'
+      && sh(repo.dir, ['show', `${r.new_head}:src/names.js`]) === '// works with LibreChat and TypingMind\nexport const n = 2;');
+    rmSync(w.out, { recursive: true, force: true });
+    rmSync(repo.dir, { recursive: true, force: true });
+  }
+
+  console.log('\n  runFix: a target with two names');
+  {
+    const repo = makeRepo();
+    writeFileSync(join(repo.dir, 'src', 'a.txt'), 'same\n');
+    writeFileSync(join(repo.dir, 'src', 'b.txt'), 'same\n');
+    sh(repo.dir, ['add', '-A']);
+    sh(repo.dir, ['-c', 'user.name=t', '-c', 'user.email=t@x', 'commit', '-q', '-m', 'add a and b']);
+    repo.head = sh(repo.dir, ['rev-parse', 'HEAD']);
+    // As a command in the checkout could leave them: b is now another name for a.
+    rmSync(join(repo.dir, 'src', 'b.txt'));
+    linkSync(join(repo.dir, 'src', 'a.txt'), join(repo.dir, 'src', 'b.txt'));
+    const w = world(repo, { turns: [
+      tool('fix_edit', { path: 'src/a.txt', old_text: 'same', new_text: 'changed' }),
+      tool('fix_write', { path: 'src/b.txt', content: 'changed\n' }),
+      finish(),
+    ] });
+    const { record: r } = await runFix(w.ctx);
+    const res = (i) => JSON.stringify(w.calls.model[i].messages.at(-1));
+    check('fix_edit and fix_write refuse a file with two names, and neither name changes', /src\/a\.txt has 2 names \(hard links\)/.test(res(1)) && /src\/b\.txt has 2 names \(hard links\)/.test(res(2))
+      && readFileSync(join(repo.dir, 'src', 'a.txt'), 'utf8') === 'same\n' && readFileSync(join(repo.dir, 'src', 'b.txt'), 'utf8') === 'same\n' && r.outcome === 'no_change', `${res(1)} ${res(2)} ${r.outcome}`);
+    rmSync(w.out, { recursive: true, force: true });
+    rmSync(repo.dir, { recursive: true, force: true });
+  }
+
+  console.log('\n  runFix: a write that fails partway ends the run');
+  {
+    const repo = makeRepo();
+    const w = world(repo, { turns: [
+      tool('fix_edit', { path: 'src/b.js', old_text: 'export const token = process.env.X;', new_text: 'export const token = read();' }),
+      finish(),
+    ] });
+    w.ctx.writeIo = { ...WRITE_IO, writeFileSync: () => { throw Object.assign(new Error('ENOSPC: no space left on device, write'), { code: 'ENOSPC' }); } };
+    const { record: r } = await runFix(w.ctx);
+    check('the run could not finish, says which file and why, and nothing is committed', r.outcome === 'refused'
+      && r.notes === `${UNFINISHED_PREFIX} writing src/b.js failed partway (ENOSPC), so the file may be damaged` && r.new_head === null && !existsSync(join(w.out, 'fix.bundle')) && w.calls.model.length === 1, r.notes);
+    rmSync(w.out, { recursive: true, force: true });
+    rmSync(repo.dir, { recursive: true, force: true });
+  }
+
+  {
+    // fix_write of a new file whose descriptor check fails after the exclusive open made it: the run
+    // ends as one that could not finish and nothing is committed, the empty file with it.
+    const repo = makeRepo();
+    const w = world(repo, { turns: [tool('fix_write', { path: 'src/new.js', content: 'export const n = 1;\n' }), finish()] });
+    w.ctx.writeIo = { ...WRITE_IO, fstatSync: () => { throw Object.assign(new Error('EIO: i/o error, fstat'), { code: 'EIO' }); } };
+    const { record: r } = await runFix(w.ctx);
+    check('a failure after fix_write created the file ends the run, no commit, no bundle', r.outcome === 'refused'
+      && r.notes === `${UNFINISHED_PREFIX} writing src/new.js failed partway (EIO), so the file may be damaged` && r.new_head === null && !existsSync(join(w.out, 'fix.bundle')), r.notes);
+    rmSync(w.out, { recursive: true, force: true });
+    rmSync(repo.dir, { recursive: true, force: true });
+  }
+
+  console.log('\n  runFix: a refusal under the spent budget is unfinished');
+  {
+    const repo = makeRepo();
+    const w = world(repo, { turns: [(b) => (b.tool_choice?.name === 'finish_fix' ? tool('finish_fix', { outcome: 'refused', reason: 'The change did not fit in the turns left.' }) : tool('fix_list', {}))] });
+    const { record: r } = await runFix(w.ctx);
+    check('the notes start with the prefix the dispatcher retries once on', r.outcome === 'refused'
+      && r.notes === `${UNFINISHED_PREFIX} the budget was spent before a fix was made. The change did not fit in the turns left.` && fixProblem(r) === null, r.notes);
+    rmSync(w.out, { recursive: true, force: true });
+    rmSync(repo.dir, { recursive: true, force: true });
+  }
+  {
+    const repo = makeRepo();
+    const w = world(repo, { turns: [tool('finish_fix', { outcome: 'refused', reason: 'The finding is about captured data.' })] });
+    const { record: r } = await runFix(w.ctx);
+    check('a refusal before the budget ran out is the model\'s judgment, without the prefix', r.outcome === 'refused' && r.notes === 'The finding is about captured data.', r.notes);
     rmSync(w.out, { recursive: true, force: true });
     rmSync(repo.dir, { recursive: true, force: true });
   }
@@ -1098,7 +1439,7 @@ if (!gitOk) {
     const repo = makeRepo();
     const w = world(repo, { turns: [tool('fix_list', {})] });
     const { record: r } = await runFix(w.ctx);
-    check(`turns: refused after ${LIMITS.turns} model calls`, r.outcome === 'refused' && /within 40 turns/.test(r.notes) && r.turns === LIMITS.turns && w.calls.model.length === LIMITS.turns && fixProblem(r) === null);
+    check(`turns: refused after ${LIMITS.turns} model calls`, r.outcome === 'refused' && /within 40 turns/.test(r.notes) && r.notes.startsWith(UNFINISHED_PREFIX) && r.turns === LIMITS.turns && w.calls.model.length === LIMITS.turns && fixProblem(r) === null);
     rmSync(w.out, { recursive: true, force: true });
     rmSync(repo.dir, { recursive: true, force: true });
   }

@@ -27,7 +27,7 @@
 //     brief quotes them line by line, names them as the task and says nothing in them changes its
 //     rules. What holds whatever the model then does is in the code: the write rules, the
 //     allowlist and the checks on the commit never read the ticket.
-//   - Nothing under .github/ is in the commit. fix_write writes nothing there, and a change a
+//   - Nothing under .github/ is in the commit. fix_edit and fix_write write nothing there, and a change a
 //     command makes there in the checkout is left out of the commit, as the test gate leaves it
 //     out of the tree it tests. The fix lane may commit a workflow the pull request itself
 //     changes, since that change already runs with the pull request's permissions on the next
@@ -138,7 +138,7 @@ export function taskBrief({ repo, base, run = null, ticket, title, brief, recent
     '', 'Brief:', ...quoted(brief),
     '', 'Nothing under .github/ may be written in this run: no file there, new or existing.',
     ...(named.length
-      ? ['', `Captured data, marked ${PROTECTED_ATTR} (never written by fix_write): ${named.join(', ')}${more > 0 ? `, and ${more} more` : ''}. A task that reaches the text inside one of these says so in the summary; the file is not edited.`]
+      ? ['', `Captured data, marked ${PROTECTED_ATTR} (never written by fix_edit or fix_write): ${named.join(', ')}${more > 0 ? `, and ${more} more` : ''}. A task that reaches the text inside one of these says so in the summary; the file is not edited.`]
       : []),
     ...(lessons.length
       ? ['', `Lessons the fix lane drew from its earlier fixes that fell short (${lessons.length}). General advice, background only: the ticket above is the task.`, ...lessons.map((l) => `- ${l}`)]
@@ -356,7 +356,7 @@ export function exitCode(record) {
 // description is a new pull request's and is required, the subject is also its title, and the
 // task stands where the review's findings stood. The schemas are the fix lane's.
 const WORDING = {
-  fix_write: { description: 'Write a whole file in the checkout (created if absent). Read it first and write it back complete. Never under .git/, node_modules/ or .github/.' },
+  fix_write: { description: 'Write a whole file in the checkout (created if absent). For a new file; to change a file that exists, use fix_edit. Never under .git/, node_modules/ or .github/.' },
   fix_describe: {
     description: 'Write the description of the pull request this change becomes, as the complete text: what changed and why, and how it was tested. Plain markdown. Required when the outcome is fixed: call it before finish_fix. No attribution lines and no em dashes.',
     properties: { body: 'The whole description, markdown.' },

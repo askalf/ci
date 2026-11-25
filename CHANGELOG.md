@@ -13,6 +13,52 @@ names the commit's date and the pull request it came from.
 
 ## November 2026
 
+- Redline looks for a pull request's earlier rounds in up to ten listings of 100 of the
+  repository's finished dispatches since the pull request opened, not in the newest 100 of all of
+  them. On a private repository its earlier verdicts are only in its dispatched runs' artifacts,
+  and the runs were looked for in one page: the repository's newest 100 dispatches of
+  `redline.yml`, of which the newest 8 for the pull request were read. On one repository that uses
+  Redline those 100 reached back about four days, and a pull request's runs older than that page
+  were not read: one with no run in it was read from zero, with no earlier findings in the brief,
+  no delta and no round count. And 8 runs hold fewer than 8 heads whenever two of them are at one
+  head (a re-read, or a second dispatch), so a cap of 8 was reached only when each of the 8 was a
+  request at a head of its own; one pull request there had 32 runs over 18 heads. The runs are now
+  listed from the repository's finished dispatches on the default branch made since the pull
+  request opened, 100 at a time and ten listings at most, and the newest 40 of the pull request's
+  are read, each once. Each listing after the first asks for the runs made at or before the oldest
+  one the listing before it returned: with page numbers, a run that left the list between two
+  listings (re-run, or deleted) would have moved the run after it past the page boundary unread.
+  When every run of a full listing was made in one second, a bound at that second would list the
+  same runs again, so the runs made in that second are paged through by number, finished or not
+  (so a run re-run meanwhile moves no other), and the next listing asks for those made before it. A listing that fails ends the search, and the runs found
+  before it are still read. Runs older than those ten listings are still not found. A verdict
+  artifact is still kept seven days, so a verdict older than that cannot be read from its run; a
+  newer round-cap notice still states the count it was capped on.
+
+- The fixer changes part of a file with `fix_edit`, and reads what reaches it whole. Its only
+  write tool replaced whole files, and what it read was not always the file: the model is reached
+  through dario, which cuts a tool result over 30,000 characters and removes some product names
+  from the text it carries, while `fix_read` returned up to 1,000 lines (its description said
+  400). On dario#1936 the fix belonged in `src/cc-template.ts`: a read of it arrived cut at about
+  line 550, ten of its lines arrived with words missing, and writing the file back whole would
+  have changed text the model never saw, so it searched until the budget ran out and refused.
+  `fix_edit` replaces one exact piece of a UTF-8 file. The piece must occur once on disk and once
+  in the file as the model is shown it, overlapping matches counted, and both matches must be
+  the same characters of the file. A CRLF file keeps its line ends, and every byte outside the
+  match stays as it was. Both write tools write in place, so a file keeps its owner, group,
+  ordinary permission bits and access list (a write by an account that does not own it can clear
+  set-user-ID or set-group-ID, which is not put back). They change only a regular file with one
+  name: a hard-linked file, a FIFO, a socket or a device is refused with nothing changed, and is
+  opened without blocking. A write that fails partway ends the run with nothing committed.
+  `fix_read` returns at most 400 lines, keeps its whole result under 24,000
+  characters and says where to read on; it probes a file's first 8 KB before reading the rest
+  and reads at most 8 MB. `fix_read` and
+  `fix_search` name the lines shown with words removed, and `fix_write` refuses to replace a file
+  that has one, or one over 1 MB it cannot check. A run that ends on its budget, or refuses
+  only once the budget is spent, now starts its notes with `The fix run could not finish:`, as a
+  run that died does, so the dispatcher sends one more run at that head instead of leaving the
+  pull request at the refusal.
+
 - The file `REDLINE_MODELS_FILE` names may set `REDLINE_ROUND_CAP`. The models file could not set
   the cap: it took only the four model pins, so a host whose pins come from a reviewed repository
   still kept its cap in its env file or in the runner's environment, where no review sees it. A
@@ -109,7 +155,8 @@ names the commit's date and the pull request it came from.
   tree that declares none gives a fixed result with `tests: null`, which says only that the gate
   ran no suite on the accepted tree, not what ran on an earlier one. A record that is not a fixed
   build is passed on as it is. The fix lane's gate still runs in the job that edited, as before. Its
-  tools are pinned as `build-tools.json`. No repository calls the workflow yet: a caller pins a
+  tools, the fix lane's with `fix_edit` among them and nothing under `.github/` written by either
+  write tool, are pinned as `build-tools.json`. No repository calls the workflow yet: a caller pins a
   commit that is already on `main`, so it comes in a later change.
 - A review before the push can be given Redline's earlier verdicts on the branch.
   `local.mjs pack --earlier <file>`, once per file and oldest first, adds a verdict the author
