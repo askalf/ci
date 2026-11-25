@@ -2188,8 +2188,8 @@ console.log('\n  earlier verdicts from the runs, and the round cap');
           w.calls.listings = (w.calls.listings ?? 0) + 1;
           if (failPage && w.calls.listings >= failPage) return Promise.resolve({ ok: false, status: 502, headers: new Headers(), json: async () => ({ message: 'bad gateway' }), text: async () => 'bad gateway' });
           const res = f(url, init);
-          // Something changes the list after the first listing is answered.
-          if (between && w.calls.listings === 1) between(runs);
+          // Something changes the list after a listing is answered.
+          if (between) between(runs, w.calls.listings);
           return res;
         }
         return f(url, init);
@@ -2266,25 +2266,27 @@ console.log('\n  earlier verdicts from the runs, and the round cap');
       // A run on the first listing leaves the list before the second: re-run (so not finished), or
       // deleted. A page number would now start one run later and skip the PR's newest run.
       const o = others(100);
-      const { ctx, calls } = worldOf(mine(4), o, { between: () => { o[0].status = 'in_progress'; o[0].conclusion = null; } });
+      const { ctx, calls } = worldOf(mine(4), o, { between: (_, n) => { if (n === 1) { o[0].status = 'in_progress'; o[0].conclusion = null; } } });
       const r = await runReview(ctx);
       check('a run re-run between two listings moves no run of this PR past them: all four counted, capped', r.outcome === 'capped' && r.rounds === 4 && calls.model.length === 0);
       const o2 = others(100);
-      const { ctx: c2, calls: k2 } = worldOf(mine(4), o2, { between: (runs) => runs.splice(runs.indexOf(o2[5]), 1) });
+      const { ctx: c2, calls: k2 } = worldOf(mine(4), o2, { between: (runs, n) => { if (n === 1) runs.splice(runs.indexOf(o2[5]), 1); } });
       const r2 = await runReview(c2);
       check('nor a run deleted between them', r2.outcome === 'capped' && r2.rounds === 4 && k2.model.length === 0);
     }
     {
       // 100 or more runs made in one second: a bound at that second would list the same runs
-      // again, so the next listing is the next page of the same query.
+      // again, so that second is listed on its own (created at exactly that second, finished or
+      // not, from page 1), and then the runs made before it.
       const crowd = (count) => Array.from({ length: count }, (_, i) => run(700000 + i, { display_title: `Redline review askalf/r#8 @ ${hd(800000 + i)}`, created_at: when(200000) }));
       const T = when(200000);
       const { ctx, calls } = worldOf(mine(4), crowd(100));
       const r = await runReview(ctx);
-      const [, w2, w3] = calls.lists.map((l) => new URLSearchParams(l));
-      check('a full listing made in one second, with this PR\'s four rounds just older: that second is paged from page 2, then the runs made before it are listed, and all four count, capped',
-        r.outcome === 'capped' && r.rounds === 4 && calls.lists.length === 3 && w2.get('page') === '2' && w2.get('created') === `${T}..${T}`
-        && !w3.has('page') && w3.get('created') === `2026-11-08T00:00:00Z..${new Date(Date.parse(T) - 1000).toISOString().replace(/\.\d{3}Z$/, 'Z')}`);
+      const [w1, w2, w3, w4] = calls.lists.map((l) => new URLSearchParams(l));
+      check('a full listing made in one second, with this PR\'s four rounds just older: that second is paged from page 1 with no status, then the runs made before it are listed, and all four count, capped',
+        r.outcome === 'capped' && r.rounds === 4 && calls.lists.length === 4 && w1.get('status') === 'completed'
+        && [w2, w3].every((x, i) => x.get('page') === String(i + 1) && x.get('created') === `${T}..${T}` && !x.has('status'))
+        && !w4.has('page') && w4.get('status') === 'completed' && w4.get('created') === `2026-11-08T00:00:00Z..${new Date(Date.parse(T) - 1000).toISOString().replace(/\.\d{3}Z$/, 'Z')}`);
       // One of this PR's rounds inside a crowded second, past the first 100 runs made in it.
       const rows = [{ id: 9990, head: hd(999), at: when(200000), more: '' }, ...mine(3)];
       const { ctx: c2, calls: k2 } = worldOf(rows, crowd(150));
@@ -2296,18 +2298,26 @@ console.log('\n  earlier verdicts from the runs, and the round cap');
       const r3 = await runReview(c3);
       const q3 = k3.lists.map((l) => new URLSearchParams(l));
       check('after a crowded second, the listings of older runs carry no page number: all four rounds count, capped',
-        r3.outcome === 'capped' && r3.rounds === 4 && q3.length === 4 && q3[1].get('page') === '2' && [q3[2], q3[3]].every((x) => !x.has('page') && /\.\./.test(x.get('created'))));
+        r3.outcome === 'capped' && r3.rounds === 4 && q3.length === 5 && q3[1].get('page') === '1' && q3[2].get('page') === '2' && [q3[3], q3[4]].every((x) => !x.has('page') && /\.\./.test(x.get('created'))));
+      // This PR's fourth round is the 101st run of a crowded second, and one of the first 100 is
+      // re-run while that second is listed: after the first listing, or after its first page.
+      for (const after of [1, 2]) {
+        const c = crowd(100);
+        const { ctx: cx, calls: kx } = worldOf([{ id: 9990, head: hd(999), at: when(200000), more: '' }, ...mine(3)], c, { between: (_, n) => { if (n === after) { c[0].status = 'in_progress'; c[0].conclusion = null; } } });
+        const rx = await runReview(cx);
+        check(`a run of a crowded second re-run after listing ${after}: the round at its 101st place still counts, capped`, rx.outcome === 'capped' && rx.rounds === 4 && kx.model.length === 0);
+      }
       // A run of the crowded second leaves the list (re-run) before that second is paged: only
       // that second is paged by number, so the older rounds are all still listed.
       const c4 = crowd(100);
-      const { ctx: cc4, calls: k4 } = worldOf(mine(4), c4, { between: () => { c4[0].status = 'in_progress'; c4[0].conclusion = null; } });
+      const { ctx: cc4, calls: k4 } = worldOf(mine(4), c4, { between: (_, n) => { if (n === 1) { c4[0].status = 'in_progress'; c4[0].conclusion = null; } } });
       const r4 = await runReview(cc4);
       check('a run of a crowded second re-run before that second is paged: the four older rounds all count, capped', r4.outcome === 'capped' && r4.rounds === 4 && k4.model.length === 0);
       // A crowded second at the very time the PR opened: nothing can be older, so nothing older is asked for.
       const atOpen = Array.from({ length: 100 }, (_, i) => run(710000 + i, { display_title: `Redline review askalf/r#8 @ ${hd(810000 + i)}`, created_at: '2026-11-08T00:00:00Z' }));
       const { ctx: c5, calls: k5 } = worldOf([], atOpen);
       await runReview(c5);
-      check('a crowded second at the time the PR opened is paged, and nothing before it is asked for', k5.lists.length === 2);
+      check('a crowded second at the time the PR opened is paged, and nothing before it is asked for', k5.lists.length === 3);
     }
     {
       const lines = [];

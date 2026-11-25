@@ -744,11 +744,13 @@ export async function ghBytes(ctx, path, maxBytes = LIMITS.artifactBytes) {
  * that second are listed again, and a run is counted once, by its id.
  *
  * When every run of a full listing was made in one second, a bound at that second would list the
- * same runs again. So that one second is paged through by number (the runs made at exactly that
- * second, from page 2) until a page is not full, and the listing after it asks for the runs made
- * before that second. Only there, among 100 or more runs made in one second, does a page number
- * decide what is listed, so a run leaving that second can skip only another run made in it. A full
- * listing with no creation time on any run ends the search, logged.
+ * same runs again. So that one second is paged through by number: the runs made at exactly that
+ * second, finished or not, from page 1 until a page is not full; the listing after it asks for the
+ * runs made before that second. Those pages ask for no status, so a run re-run meanwhile stays in
+ * its place and moves no other run across a page (reviewRunsOf still takes only finished runs).
+ * Only there, among 100 or more runs made in one second, does a page number decide what is listed,
+ * and only a run of that second deleted meanwhile can still move another run of it across a page.
+ * A full listing with no creation time on any run ends the search, logged.
  *
  * A listing that fails ends the search, logged, and the runs found before it are still read. A
  * round is a head, and a head can have more than one run (a re-read, a second dispatch), so a
@@ -774,13 +776,15 @@ export async function earlierVerdicts(ctx, { pr }) {
     let page = 1;
     let ended = false;
     for (let listing = 1; listing <= LIMITS.runPages && runs.length < LIMITS.earlierRuns; listing++) {
-      const q = new URLSearchParams({ event: 'workflow_dispatch', status: 'completed', branch: defaultBranch, per_page: '100' });
+      const q = new URLSearchParams({ event: 'workflow_dispatch', branch: defaultBranch, per_page: '100' });
       if (second) {
         q.set('created', `${second}..${second}`);
         q.set('page', String(page));
+      } else {
+        q.set('status', 'completed');
+        if (before) q.set('created', since ? `${since}..${before}` : `<=${before}`);
+        else if (since) q.set('created', `>=${since}`);
       }
-      else if (before) q.set('created', since ? `${since}..${before}` : `<=${before}`);
-      else if (since) q.set('created', `>=${since}`);
       let listed;
       try {
         listed = await gh(ctx, `/repos/${repo}/actions/workflows/redline.yml/runs?${q}`);
@@ -827,7 +831,7 @@ export async function earlierVerdicts(ctx, { pr }) {
       const at = rows.find((r) => Date.parse(r?.created_at) === oldestAt).created_at;
       if (oldestAt === newestAt) {
         second = at;
-        page = 2;
+        page = 1;
       } else {
         before = at;
       }
