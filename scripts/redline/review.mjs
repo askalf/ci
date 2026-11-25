@@ -741,10 +741,13 @@ export async function ghBytes(ctx, path, maxBytes = LIMITS.artifactBytes) {
  * before it returned, not for its next page. A page number counts from the newest run, so a run
  * that leaves the list between two listings (re-run, and so not finished, or deleted) would move
  * the run after it past the page boundary unread. The bound is inclusive, so the runs made in
- * that second are listed again, and a run is counted once, by its id. A full listing that brings
- * no run not already listed ends the search, logged. So does a listing that fails, and the runs
- * found before it are still read. A round is a head, and a head can have more than one run (a
- * re-read, a second dispatch), so a window of N runs can hold fewer than N rounds.
+ * that second are listed again, and a run is counted once, by its id. When every run of a full
+ * listing was made in one second, a bound at that second would list the same runs again, so the
+ * next listing is the next page of the same query instead: only among 100 or more runs made in
+ * one second are runs paged through by number. A listing that fails ends the search,
+ * logged, and the runs found before it are still read. A round is a head, and a head can have
+ * more than one run (a re-read, a second dispatch), so a window of N runs can hold fewer than N
+ * rounds.
  *
  * An artifact that is missing, expired, malformed, or for another PR or head is passed over; an
  * artifact read that fails leaves the rest unread and is logged, never a failed review.
@@ -760,10 +763,12 @@ export async function earlierVerdicts(ctx, { pr }) {
     const runs = [];
     const listedIds = new Set();
     let before = '';
+    let page = 1;
     for (let listing = 1; listing <= LIMITS.runPages && runs.length < LIMITS.earlierRuns; listing++) {
       const q = new URLSearchParams({ event: 'workflow_dispatch', status: 'completed', branch: defaultBranch, per_page: '100' });
       if (before) q.set('created', since ? `${since}..${before}` : `<=${before}`);
       else if (since) q.set('created', `>=${since}`);
+      if (page > 1) q.set('page', String(page));
       let listed;
       try {
         listed = await gh(ctx, `/repos/${repo}/actions/workflows/redline.yml/runs?${q}`);
@@ -780,13 +785,15 @@ export async function earlierVerdicts(ctx, { pr }) {
       }
       runs.push(...reviewRunsOf(fresh, { repo, pr: n, defaultBranch }));
       if (rows.length < 100) break;
-      const times = rows.map((r) => r?.created_at).filter((t) => typeof t === 'string' && Number.isFinite(Date.parse(t)));
-      const oldest = times.reduce((a, b) => (Date.parse(b) < Date.parse(a) ? b : a), times[0] ?? '');
-      if (!fresh.length || !oldest) {
-        ctx.log?.(`earlier verdicts: listing ${listing} of runs brought no run not already listed; this PR's runs older than those, if any, are not read`);
-        break;
+      const times = rows.map((r) => Date.parse(r?.created_at)).filter(Number.isFinite);
+      const oldestAt = Math.min(...times);
+      const newestAt = Math.max(...times);
+      if (!times.length || oldestAt === newestAt) {
+        page += 1;
+      } else {
+        before = rows.find((r) => Date.parse(r?.created_at) === oldestAt).created_at;
+        page = 1;
       }
-      before = oldest;
       if (listing === LIMITS.runPages && runs.length < LIMITS.earlierRuns) ctx.log?.(`earlier verdicts: listed runs ${LIMITS.runPages} times, as many as are made; this PR's runs older than those, if any, are not read`);
     }
     for (const run of runs.slice(0, LIMITS.earlierRuns)) {

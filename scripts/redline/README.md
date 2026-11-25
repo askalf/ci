@@ -79,7 +79,8 @@ nothing was posted at (every head on a private repository, where the post never 
 `redline-verdict` artifact of the PR's earlier dispatched runs, read with the job's own token: the
 runs are looked for in the repository's finished dispatches on the default branch made since the
 PR opened, in at most ten listings of 100, each after the first asking for the runs made at or
-before the oldest one the listing before it returned, and the newest 40 of the PR's are read. An
+before the oldest one the listing before it returned (or, when every run of a full listing was
+made in one second, for the next page of that listing), and the newest 40 of the PR's are read. An
 artifact is kept seven days, so a verdict older than that cannot be read from its run; a newer
 round-cap notice still states the count it was capped on. Only
 the dispatch account's dispatches of `redline.yml` on the default branch are read (askalf, or the

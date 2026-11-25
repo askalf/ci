@@ -28,7 +28,9 @@ names the commit's date and the pull request it came from.
   at a time and ten listings at most, and the newest 40 of the pull request's are read, each once.
   Each listing after the first asks for the runs made at or before the oldest one the listing
   before it returned: with page numbers, a run that left the list between two listings (re-run,
-  or deleted) would have moved the run after it past the page boundary unread. A listing that
+  or deleted) would have moved the run after it past the page boundary unread. When every run of
+  a full listing was made in one second, the next listing is the next page of that listing, since
+  a bound at that second would list the same runs again. A listing that
   fails ends the search, and the runs found before it are still read. Runs older than those ten
   listings are still not found. A verdict artifact is still kept seven days, so a verdict older than that
   cannot be read from its run; a newer round-cap notice still states the count it was capped on.

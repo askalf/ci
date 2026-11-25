@@ -2275,15 +2275,26 @@ console.log('\n  earlier verdicts from the runs, and the round cap');
       check('nor a run deleted between them', r2.outcome === 'capped' && r2.rounds === 4 && k2.model.length === 0);
     }
     {
-      // A full listing whose runs were all made in one second, and listed already: asking again
-      // would bring the same runs, so the search ends there and says so.
-      const lines = [];
-      const same = Array.from({ length: 150 }, (_, i) => run(700000 + i, { display_title: `Redline review askalf/r#8 @ ${hd(800000 + i)}`, created_at: when(200000) }));
-      const { ctx, calls } = worldOf(mine(4), same);
-      ctx.log = (l) => lines.push(l);
+      // 100 or more runs made in one second: a bound at that second would list the same runs
+      // again, so the next listing is the next page of the same query.
+      const crowd = (count) => Array.from({ length: count }, (_, i) => run(700000 + i, { display_title: `Redline review askalf/r#8 @ ${hd(800000 + i)}`, created_at: when(200000) }));
+      const { ctx, calls } = worldOf(mine(4), crowd(100));
       const r = await runReview(ctx);
-      check('a full listing that brings no run not already listed ends the search, logged',
-        r.outcome === 'posted' && calls.lists.length === 2 && lines.some((l) => l.includes('listing 2 of runs brought no run not already listed')));
+      const [q, q2] = calls.lists.map((l) => new URLSearchParams(l));
+      check('a full listing made in one second, with this PR\'s four rounds just older: the next page of the same query is asked for, and all four count, capped',
+        r.outcome === 'capped' && r.rounds === 4 && calls.lists.length === 2 && q2.get('page') === '2' && q2.get('created') === q.get('created'));
+      // One of this PR's rounds inside a crowded second, past the first 100 runs made in it.
+      const rows = [{ id: 9990, head: hd(999), at: when(200000), more: '' }, ...mine(3)];
+      const { ctx: c2, calls: k2 } = worldOf(rows, crowd(150));
+      const r2 = await runReview(c2);
+      check('a round made in a crowded second past its first 100 runs is counted too: capped', r2.outcome === 'capped' && r2.rounds === 4 && k2.model.length === 0);
+      // After the crowded second, a full listing of older runs: the bound moves, and its listing
+      // starts at page 1 again.
+      const { ctx: c3, calls: k3 } = worldOf(mine(4), [...crowd(100), ...others(150).map((o) => ({ ...o, created_at: new Date(Date.parse(o.created_at) - 3_600_000).toISOString() }))]);
+      const r3 = await runReview(c3);
+      const q3 = k3.lists.map((l) => new URLSearchParams(l));
+      check('after paging through a crowded second, the next bound is listed from page 1: all four rounds count, capped',
+        r3.outcome === 'capped' && r3.rounds === 4 && q3.length === 3 && q3[1].get('page') === '2' && !q3[2].has('page') && /\.\./.test(q3[2].get('created')));
     }
     {
       // The list moves between two pages: the run last on page 1 is first on page 2 too. Counted
