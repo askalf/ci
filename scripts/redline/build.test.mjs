@@ -703,6 +703,26 @@ if (!gitOk) {
       rmSync(own, { recursive: true, force: true });
       done(w, repo);
     }
+    if (process.platform !== 'win32') {
+      // A root package.json that is a link to a manifest in the tree is read through it, as npm and
+      // the checkout read it: an edit elsewhere is tested as usual.
+      const repo = makeRepo({ extra: (dir) => {
+        mkdirSync(join(dir, 'manifest'));
+        writeFileSync(join(dir, 'manifest', 'package.json'), `${JSON.stringify({ name: 'r', private: true, scripts: { test: 'node test.mjs' } }, null, 2)}\n`);
+        symlinkSync('manifest/package.json', join(dir, 'package.json'));
+      } });
+      const w = world(repo, { turns: [write, describe, finish()] });
+      const { record: r } = await runBuild(w.ctx);
+      check('a package.json that links to a manifest in the tree is read through the link, and the suite runs', r.outcome === 'fixed' && r.tests?.command === 'npm test' && r.tests.exit_code === 0, `${r.outcome} ${r.notes}`);
+      done(w, repo);
+      // A change that points it out of the tree is refused, never read.
+      const repo2 = withTests();
+      const relink = "import { rmSync, symlinkSync } from 'node:fs';\nrmSync('package.json');\nsymlinkSync('../outside.json', 'package.json');\n";
+      const w2 = world(repo2, { turns: [write, tool('fix_write', { path: 'relink.mjs', content: relink }), tool('fix_run', { command: 'node relink.mjs' }), describe, finish(), finish()] });
+      const { record: r2 } = await runBuild(w2.ctx);
+      check('a change whose package.json links out of the tree cannot pass', r2.outcome === 'tests_failed' && /package\.json links to \.\.\/outside\.json, outside the checkout/.test(result(w2, 5)), `${r2.outcome} ${result(w2, 5).slice(0, 200)}`);
+      done(w2, repo2);
+    }
     {
       // The suite finds its tests through git, and the change adds one that fails: in the gate's
       // checkout HEAD and the index are the candidate's, so git lists it, and it fails the build.
@@ -761,12 +781,12 @@ if (!gitOk) {
       done(w2, repo2);
     }
     {
-      // The change puts package.json out of step with package-lock.json: the clean install fails,
-      // and that is the gate's result, though the suite uses only Node's own modules and would pass.
+      // The change leaves package-lock.json that npm cannot read: the clean install fails without
+      // asking the registry anything, and that is the gate's result, though the suite uses only
+      // Node's own modules and would pass.
       const lock = `${JSON.stringify({ name: 'r', lockfileVersion: 3, requires: true, packages: { '': { name: 'r' } } }, null, 2)}\n`;
       const repo = makeRepo({ pkg: { name: 'r', private: true, scripts: { test: 'node test.mjs' } }, extra: (dir) => writeFileSync(join(dir, 'package-lock.json'), lock) });
-      const drifted = `${JSON.stringify({ name: 'r', private: true, scripts: { test: 'node test.mjs' }, dependencies: { 'left-pad': '1.3.0' } }, null, 2)}\n`;
-      const w = world(repo, { turns: [write, tool('fix_write', { path: 'package.json', content: drifted }), describe, finish(), finish()] });
+      const w = world(repo, { turns: [write, tool('fix_write', { path: 'package-lock.json', content: '{ "name": "r", "lockfileVersion": 3,' }), describe, finish(), finish()] });
       const { record: r } = await runBuild(w.ctx);
       check('an install that fails in the clean checkout fails the gate, and the record names the install, not the tests',
         r.outcome === 'tests_failed' && /^npm ci /.test(r.tests?.command ?? '') && r.tests.exit_code !== 0 && /The install fails at your change, in a clean checkout of it \(`npm ci /.test(result(w, 4)), `${r.outcome} ${JSON.stringify(r.tests)}`);

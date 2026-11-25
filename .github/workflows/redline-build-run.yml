@@ -9,7 +9,7 @@
 # the ops tick verifies the artifact, pushes the commit as a new branch and opens the pull request
 # with the token it already holds. Nothing under .github/ is in the commit, whatever the ticket
 # asks: the build's write tool writes nothing there, and a change a command makes there in the
-# checkout is left out of the commit and put back before the tests run.
+# checkout is left out of the commit, and so out of the checkout the tests run in.
 # The title and the brief are a ticket's text. They are in the build step's environment, which the
 # run's log prints, so on a public repository they are public.
 # The model is reached through FIX_ENV_FILE, which only the exec account that runs this job can

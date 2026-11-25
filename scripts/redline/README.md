@@ -277,16 +277,19 @@ checks that the checkout is exactly the reviewed head, then `fix.mjs`:
 - runs the test script on the tree the commit holds: when the model finishes, the kept paths are
   staged as one tree, and the suite runs on that tree in a checkout of its own (made from the
   tree's objects, with a copy of `.git` whose HEAD and index are a commit of that tree on the start
-  commit) and a HOME of its own, as the run account. The gate reads what to run from that tree, so a first test script or a new package
+  commit, which the run account's git trusts from a config it cannot change) and a HOME of its own,
+  as the run account. The gate reads what to run from that tree, so a first test script or a new package
   manager in the change is what runs; it installs afresh there, runs the build script first when
   the model ran it, and the first of those steps to fail is the result, an install that fails
   among them. A change that drops the start commit's test script, or whose package.json does not
-  parse, cannot pass. A file the commit does not carry, an ignored one a command left among them,
-  is not there: before the suite starts, what the run account left in the temporary directories is
-  removed (a file it cannot remove fails the run), and it is denied the model's checkout and the
-  commands' HOME until the gate ends. Without a run account the commands are this account's, and a
-  path outside the checkouts and HOMEs is not covered. What the suite writes is removed with that
-  checkout: the commit must be the tree that was tested. A change the commit will leave out
+  parse (a link is read through to a file in the same tree, as npm reads it), cannot pass. A file
+  the commit does not carry in the model's checkout or the commands' HOME, an ignored one a command
+  left among them, is not there, and with a run account the suite is denied both until the gate
+  ends. A path outside the checkouts and HOMEs, which a command and the suite can each name, is not
+  covered: the exec rows' sandbox gives the job its own temporary directories and allows no
+  namespace, so there is no private filesystem to give the suite, and nothing is removed for it.
+  The pull request's own CI runs the suite where none of that exists. What the suite writes is
+  removed with that checkout: the commit must be the tree that was tested. A change the commit will leave out
   (below) is also put back as the start commit has it in the model's checkout, and the bounce
   names what was put back. A failing gate is bounced to the model once, then reported. The bounce, `fix.json` (`tests.failing`) and the notes name the failed
   tests the output reports (TAP `not ok`, jest/vitest `FAIL`); the gate is the exit code alone;

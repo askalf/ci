@@ -61,17 +61,21 @@ names the commit's date and the pull request it came from.
   a build's output), and a file in the commands' HOME. A suite that rewrote a tracked file after
   its assertions also had those bytes committed untested. The kept paths are now staged as one tree
   before the gate, and the suite runs on that tree in a checkout of its own made from the tree's
-  objects, with a copy of `.git` whose HEAD and index are a commit of that tree, and a HOME of its
-  own, as the run account, so a suite that finds its tests through git finds the new ones. What
+  objects, with a copy of `.git` whose HEAD and index are a commit of that tree, which the run
+  account's git trusts from a config it cannot change, and a HOME of its own, as the run account,
+  so a suite that finds its tests through git finds the new ones. What
   to run is read from that tree, so a change that adds the first test script, or moves to another
   package manager, is tested as it stands; the install runs afresh there, the build script runs
   first when the model ran it, and an install or a build that fails fails the gate, whatever a test
   would say after it. A change that drops the start commit's test script, or whose package.json
-  does not parse, cannot pass. What the suite writes is removed with its checkout, and the commit
-  must be the tree the gate tested. With a run account, what it left in the temporary directories
-  is removed before the suite starts, a file it cannot remove failing the run, and it is denied the
-  model's checkout and the commands' HOME until the gate ends; without one, the commands are this
-  account's, and a path outside the checkouts and HOMEs is not covered. A change left out is also put back in the model's
+  does not parse, cannot pass; a package.json that is a link is read through it to a file in the
+  same tree, and one that links out of the tree is refused. What the suite writes is removed with its checkout, and the commit
+  must be the tree the gate tested. With a run account the suite is denied the model's checkout and
+  the commands' HOME until the gate ends. A path outside the checkouts and HOMEs, which a command
+  and the suite can each name, is not covered: the exec rows' sandbox gives the job its own
+  temporary directories and allows no namespace, so there is no private filesystem to give the
+  suite, and nothing is removed for it. The pull request's own CI runs the suite where none of that
+  exists. A change left out is also put back in the model's
   checkout, and the bounce says which step failed in the clean checkout and names what was put
   back. The commit's message is checked by the lane's own rule: the fix lane's attribution check
   read `Claude support for offline builds`, a title the build lane allows, as a credit line, and

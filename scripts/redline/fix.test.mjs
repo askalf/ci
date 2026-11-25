@@ -1237,15 +1237,17 @@ if (!gitOk) {
             && /^sudo -n -u redline-run -- setfacl -R -m u:[^:]+:rwX,d:u:[^:]+:rwX /.test(calls[i + 3]);
         });
         check('after every command its processes are killed and what it made is readable again', killAfter);
-        // The test gate: what the run account left in the temporary directories is removed, and it is
-        // denied the checkout and the commands' HOME, before the gate's install and suite; both are
-        // given back after.
+        // The test gate: the run account is denied the checkout and the commands' HOME before the
+        // gate's install and suite, and both are given back after. Nothing is removed for it.
         const gateTest = calls.findLastIndex((l) => / -- env -i .*timeout -k 10 \d+ npm test$/.test(l));
-        const removed = at(/^sudo -n -u redline-run -- find \/.* -depth -user redline-run -delete$/);
+        const gateInstall = calls.findLastIndex((l) => / -- env -i .*timeout -k 10 \d+ npm install /.test(l));
         const deny = [at(new RegExp(`^setfacl -m u:redline-run:--- ${repo.dir}$`)), at(/^setfacl -m u:redline-run:--- \/.*redline-fix-home-[^/ ]+$/)];
         const back = [calls.findLastIndex((l) => l === `setfacl -m u:redline-run:rwx ${repo.dir}`), calls.findLastIndex((l) => /^setfacl -m u:redline-run:rwx \/.*redline-fix-home-[^/ ]+$/.test(l))];
-        check('before the gate\'s suite the run account\'s leftovers are removed and it is denied the checkout and HOME; after it, both are given back',
-          removed > 0 && deny.every((i) => i > removed && i < gateTest) && back.every((i) => i > gateTest), JSON.stringify({ removed, deny, gateTest, back }));
+        check('before the gate\'s install and suite the run account is denied the checkout and HOME; after them, both are given back, and nothing is removed for it',
+          deny.every((i) => i > 0 && i < gateInstall) && back.every((i) => i > gateTest) && !calls.some((l) => / -delete$/.test(l)), JSON.stringify({ deny, gateInstall, gateTest, back }));
+        check('the gate\'s commands trust the gate\'s checkout in a git config of their own, and the model\'s do not',
+          [calls[gateInstall], calls[gateTest]].every((l) => / GIT_CONFIG_GLOBAL=\/\S*redline-gate-trust-[^/ ]+\/gitconfig /.test(l ?? ''))
+          && calls.filter((l) => / -- env -i .*timeout -k 10 \d+ node test\.mjs$/.test(l)).every((l) => !/GIT_CONFIG_GLOBAL/.test(l)));
         check('and the fix goes through', r.outcome === 'fixed' && r.files.join() === 'src/b.js' && fixProblem(r) === null);
         rmSync(w.out, { recursive: true, force: true });
         rmSync(repo.dir, { recursive: true, force: true });
@@ -1399,22 +1401,30 @@ if (!gitOk) {
         done(run);
       }
       {
-        // A command leaves a file at a fixed path outside the checkout and its HOME, and the suite
-        // passes only with it: the model's own run passes, and the gate, which removes what the run
-        // account left in the temporary directories before the suite, fails.
-        const fixed = join(tmpdir(), `redline-fixed-${process.pid}`);
-        const flag = join(fixed, 'flag');
-        const make = `import { mkdirSync, writeFileSync } from 'node:fs';\nmkdirSync(${JSON.stringify(fixed)}, { recursive: true });\nwriteFileSync(${JSON.stringify(flag)}, 'x');\n`;
-        const repo = makeRepo({ pkg: { name: 'r', private: true, scripts: { test: 'node test.mjs' } }, testBody: `import { existsSync } from 'node:fs';\nprocess.exit(existsSync(${JSON.stringify(flag)}) ? 0 : 1);\n` });
-        const w = world(repo, { turns: [tool('fix_write', { path: 'src/b.js', content: FIXED_B }), tool('fix_write', { path: 'make.mjs', content: make }),
-          tool('fix_run', { command: 'node make.mjs' }), tool('fix_run', { command: 'npm test' }), finish(), finish()] });
-        let r;
-        try { ({ record: r } = await runFix({ ...w.ctx, runAs: realRunAs, guardFiles: [secret] })); } catch (e) { r = { outcome: 'refused', notes: e.message }; }
-        const own = JSON.stringify(w.calls.model[4]?.messages.at(-1) ?? '');
-        check('a file a command left at a fixed path outside the checkout is gone before the gate\'s suite: the model\'s run passed on it, the gate fails without it',
-          /exit 0/.test(own) && r.outcome === 'tests_failed' && !existsSync(fixed), `${r.outcome} ${own.slice(0, 120)} ${existsSync(fixed)}`);
-        rmSync(w.out, { recursive: true, force: true });
-        rmSync(repo.dir, { recursive: true, force: true });
+        // A suite that finds its tests through git, run as the run account: git refuses a checkout
+        // another account owns unless it is trusted, and the gate trusts its own. A passing change
+        // passes; one that adds a failing test fails.
+        const runner = "import { spawnSync } from 'node:child_process';\nconst ls = spawnSync('git', ['ls-files', 'tests'], { encoding: 'utf8' });\n"
+          + "if (ls.status !== 0) { console.log(ls.stderr); process.exit(3); }\nconst files = ls.stdout.split('\\n').filter(Boolean);\n"
+          + "for (const f of files) if (spawnSync(process.execPath, [f]).status !== 0) process.exit(1);\nprocess.exit(files.length ? 0 : 2);\n";
+        const gitSuite = async (added) => {
+          const repo = makeRepo({ pkg: { name: 'r', private: true, scripts: { test: 'node test.mjs' } }, testBody: runner });
+          mkdirSync(join(repo.dir, 'tests'));
+          writeFileSync(join(repo.dir, 'tests', 'b.mjs'), 'process.exit(0);\n');
+          sh(repo.dir, ['add', '-A']);
+          sh(repo.dir, ['-c', 'user.name=t', '-c', 'user.email=t@x', 'commit', '-q', '-m', 'test: a suite git lists']);
+          repo.head = sh(repo.dir, ['rev-parse', 'HEAD']);
+          const w = world(repo, { turns: [tool('fix_write', { path: 'src/b.js', content: FIXED_B }), tool('fix_write', { path: 'tests/added.mjs', content: added }), finish(), finish()] });
+          let r;
+          try { ({ record: r } = await runFix({ ...w.ctx, runAs: realRunAs, guardFiles: [secret] })); } catch (e) { r = { outcome: 'refused', notes: e.message }; }
+          rmSync(w.out, { recursive: true, force: true });
+          rmSync(repo.dir, { recursive: true, force: true });
+          return r;
+        };
+        const good = await gitSuite('process.exit(0);\n');
+        check('as the run account, git lists the gate\'s tests and a passing change passes', good.outcome === 'fixed' && good.tests?.exit_code === 0, `${good.outcome} ${JSON.stringify(good.tests)}`);
+        const bad = await gitSuite('process.exit(1);\n');
+        check('and a change that adds a failing test git lists fails the gate', bad.outcome === 'tests_failed' && bad.tests?.exit_code === 1, `${bad.outcome} ${JSON.stringify(bad.tests)}`);
       }
       for (const [name, body] of [
         // .git is read-only but its directory entry is not: rename it and put a writable copy,
@@ -1550,7 +1560,7 @@ if (!gitOk) {
       const modelSaw = (i) => JSON.stringify(w.calls.model[i]?.messages.at(-1) ?? '');
       check('the model\'s own run passed on the edited fixture', /exit 0/.test(modelSaw(4)), modelSaw(4).slice(0, 300));
       check('the gate put the fixture back and ran the suite on the tree the commit holds: it fails there, and the model is told what was put back',
-        r.outcome === 'tests_failed' && r.tests?.exit_code === 1 && /test script fails/.test(modelSaw(5)) && /put back as the start commit has them before the run: data\/payload\.json/.test(modelSaw(5)), `${r.outcome} ${modelSaw(5).slice(0, 400)}`);
+        r.outcome === 'tests_failed' && r.tests?.exit_code === 1 && /test script fails/.test(modelSaw(5)) && /the gate ran without them, and they are now put back here as the start commit has them: data\/payload\.json/.test(modelSaw(5)), `${r.outcome} ${modelSaw(5).slice(0, 400)}`);
       check('the fixture in the checkout is the start commit\'s again, and the notes name it as left out',
         readFileSync(join(repo.dir, 'data', 'payload.json'), 'utf8') === '{"captured":true}\n' && new RegExp(`data/payload.json.*${PROTECTED_ATTR}`).test(r.notes) && fixProblem(r) === null, r.notes);
       rmSync(w.out, { recursive: true, force: true });
