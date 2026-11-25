@@ -1573,7 +1573,9 @@ export async function workCheckout(ctx, job) {
         if (!sha) return { broken: `the change's package.json leads to ${[...done, name].join('/')}, which is not in it` };
         if (mode === '120000') {
           if (++links > 8) return { broken: 'the change\'s package.json goes through more than eight links' };
-          const target = git(root, genv, ['cat-file', 'blob', sha]) ?? '';
+          // The target as the link holds it: git()'s output loses a final newline, which is part
+          // of the name the checkout follows.
+          const target = gitBytes(root, genv, ['cat-file', 'blob', sha]).toString('utf8');
           if (posix.isAbsolute(target)) return { broken: `the change's package.json links to ${target.slice(0, 120)}, outside the checkout` };
           parts = [...target.split('/').filter(Boolean), ...rest];
           continue;

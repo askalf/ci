@@ -956,6 +956,17 @@ if (!gitOk) {
       const { record: rm } = await runBuild(wm.ctx);
       check('a package.json that links into a directory named like pathspec magic (`:release`) is read through it, and the suite runs', rm.outcome === 'fixed' && rm.tests?.command === 'npm test' && rm.tests.exit_code === 0, `${rm.outcome} ${rm.notes}`);
       done(wm, magic);
+      // A link to a file whose name ends in a newline is followed to that file, as the checkout
+      // follows it, not to the name without it.
+      const nl = makeRepo({ extra: (dir) => {
+        mkdirSync(join(dir, 'conf'));
+        writeFileSync(join(dir, 'conf', 'manifest\n'), `${JSON.stringify({ name: 'r', private: true, scripts: { test: 'node test.mjs' } }, null, 2)}\n`);
+        symlinkSync('conf/manifest\n', join(dir, 'package.json'));
+      } });
+      const wn = world(nl, { turns: [write, describe, finish()] });
+      const { record: rn } = await runBuild(wn.ctx);
+      check('a package.json that links to a file whose name ends in a newline is read through that file, and the suite runs', rn.outcome === 'fixed' && rn.tests?.command === 'npm test' && rn.tests.exit_code === 0, `${rn.outcome} ${rn.notes}`);
+      done(wn, nl);
       // A change that points it out of the tree is refused, never read.
       const repo2 = withTests();
       const relink = "import { rmSync, symlinkSync } from 'node:fs';\nrmSync('package.json');\nsymlinkSync('../outside.json', 'package.json');\n";
