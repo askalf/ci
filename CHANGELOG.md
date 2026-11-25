@@ -53,18 +53,26 @@ names the commit's date and the pull request it came from.
   lines and anything outside those blocks are read as before, so attribution or a secret there
   still blocks. A block of that shape is left out whoever wrote it. `local.mjs pack --pr` carries
   the author's account type, so a local review reads the description as CI does.
-- The fix lane's test gate runs the suite on the tree the commit holds, and on nothing else. It ran
-  the suite in the checkout the model worked in, or took the model's own last run there, and three
-  things that are not in the commit could make it pass: a change the commit leaves out (a
-  `redline-protected` file, `.github/` the pull request does not change, a `.gitattributes`, what
-  the install dirtied, a file over the size limit), a file the repository ignores that a command
-  left (a local config, a build's output), and a file in the commands' HOME. A suite that rewrote a
-  tracked file after its assertions also had those bytes committed untested. The kept paths are now
-  staged as one tree before the gate, and the suite runs on that tree alone: in a checkout of its
-  own made from the tree's objects, with a copy of `.git` at the start commit, the install run
-  there afresh and a HOME of its own, as the run account. What the suite writes there is removed
-  with it, and the commit must be the tree the gate tested. A change left out is also put back in
-  the model's checkout, and the bounce says the suite ran in a clean checkout and names what was put
+- The fix lane's test gate runs the suite on the tree the commit holds. It ran the suite in the
+  checkout the model worked in, or took the model's own last run there, and three things that are
+  not in the commit could make it pass: a change the commit leaves out (a `redline-protected`
+  file, `.github/` the pull request does not change, a `.gitattributes`, what the install dirtied,
+  a file over the size limit), a file the repository ignores that a command left (a local config,
+  a build's output), and a file in the commands' HOME. A suite that rewrote a tracked file after
+  its assertions also had those bytes committed untested. The kept paths are now staged as one tree
+  before the gate, and the suite runs on that tree in a checkout of its own made from the tree's
+  objects, with a copy of `.git` whose HEAD and index are a commit of that tree, and a HOME of its
+  own, as the run account, so a suite that finds its tests through git finds the new ones. What
+  to run is read from that tree, so a change that adds the first test script, or moves to another
+  package manager, is tested as it stands; the install runs afresh there, the build script runs
+  first when the model ran it, and an install or a build that fails fails the gate, whatever a test
+  would say after it. A change that drops the start commit's test script, or whose package.json
+  does not parse, cannot pass. What the suite writes is removed with its checkout, and the commit
+  must be the tree the gate tested. With a run account, what it left in the temporary directories
+  is removed before the suite starts, a file it cannot remove failing the run, and it is denied the
+  model's checkout and the commands' HOME until the gate ends; without one, the commands are this
+  account's, and a path outside the checkouts and HOMEs is not covered. A change left out is also put back in the model's
+  checkout, and the bounce says which step failed in the clean checkout and names what was put
   back. The commit's message is checked by the lane's own rule: the fix lane's attribution check
   read `Claude support for offline builds`, a title the build lane allows, as a credit line, and
   refused the build after the commit was made.
@@ -81,7 +89,8 @@ names the commit's date and the pull request it came from.
   run account, the allowlist, the test gate, the limits, the secret checks and the commit as askalf.
   Its commit carries nothing under `.github/`, it refuses to run on a runner without a run account
   of its own (`FIX_RUN_AS`), and its base must be a commit of the caller's default branch. It must describe the
-  pull request its commit becomes (`fix_describe`, asked for once, then the summary stands in),
+  pull request its commit becomes (`fix_describe`, asked for once, then the summary stands in), in
+  text that passes the public-text check's credit rule (`creditHits`) either way,
   keeps the model's own subject prefix, and uploads the `redline-build` artifact: `build.json`,
   `notes.md`, `description.md` and `build.bundle`. It pushes nothing and opens no pull request. The
   ticket's title and brief show in the run's log, so on a public repository they are public. Its

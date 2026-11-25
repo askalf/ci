@@ -4,7 +4,7 @@
 
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, symlinkSync, chmodSync, statSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { createServer as createNetServer } from 'node:net';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -1237,6 +1237,15 @@ if (!gitOk) {
             && /^sudo -n -u redline-run -- setfacl -R -m u:[^:]+:rwX,d:u:[^:]+:rwX /.test(calls[i + 3]);
         });
         check('after every command its processes are killed and what it made is readable again', killAfter);
+        // The test gate: what the run account left in the temporary directories is removed, and it is
+        // denied the checkout and the commands' HOME, before the gate's install and suite; both are
+        // given back after.
+        const gateTest = calls.findLastIndex((l) => / -- env -i .*timeout -k 10 \d+ npm test$/.test(l));
+        const removed = at(/^sudo -n -u redline-run -- find \/.* -depth -user redline-run -delete$/);
+        const deny = [at(new RegExp(`^setfacl -m u:redline-run:--- ${repo.dir}$`)), at(/^setfacl -m u:redline-run:--- \/.*redline-fix-home-[^/ ]+$/)];
+        const back = [calls.findLastIndex((l) => l === `setfacl -m u:redline-run:rwx ${repo.dir}`), calls.findLastIndex((l) => /^setfacl -m u:redline-run:rwx \/.*redline-fix-home-[^/ ]+$/.test(l))];
+        check('before the gate\'s suite the run account\'s leftovers are removed and it is denied the checkout and HOME; after it, both are given back',
+          removed > 0 && deny.every((i) => i > removed && i < gateTest) && back.every((i) => i > gateTest), JSON.stringify({ removed, deny, gateTest, back }));
         check('and the fix goes through', r.outcome === 'fixed' && r.files.join() === 'src/b.js' && fixProblem(r) === null);
         rmSync(w.out, { recursive: true, force: true });
         rmSync(repo.dir, { recursive: true, force: true });
@@ -1332,12 +1341,13 @@ if (!gitOk) {
       const reports = () => {
         const out = {};
         for (const f of readdirSync(outside).filter((n) => n.endsWith('.json'))) {
-          out[f.startsWith('redline-gate-') ? 'gate' : f.startsWith('redline-fix-repo-') ? 'checkout' : f] = JSON.parse(readFileSync(join(outside, f), 'utf8'));
+          out[f === 'gate.json' || f.startsWith('redline-gate-') ? 'gate' : f.startsWith('redline-fix-repo-') ? 'checkout' : f] = JSON.parse(readFileSync(join(outside, f), 'utf8'));
         }
         return out;
       };
-      const realRun = async (body, inspect = () => {}, extra = {}) => {
+      const realRun = async (body, inspect = () => {}, extra = {}, before = () => {}) => {
         const repo = makeRepo({ pkg: { name: 'r', private: true, scripts: { test: 'node test.mjs' } }, testBody: body });
+        before(repo.dir);
         const w = world(repo, { turns: [tool('fix_write', { path: 'src/b.js', content: FIXED_B }), tool('fix_write', { path: 'run.mjs', content: body }), tool('fix_run', { command: 'node run.mjs' }), finish()] });
         // A throw is a refusal, as the CLI makes it.
         let r;
@@ -1352,19 +1362,26 @@ if (!gitOk) {
       };
       {
         const body = [
-          "import { readFileSync, writeFileSync, appendFileSync } from 'node:fs';",
+          "import { readFileSync, writeFileSync, appendFileSync, readdirSync } from 'node:fs';",
           "import { basename, join } from 'node:path';",
           'const r = { uid: process.getuid(), env: Object.keys(process.env), home: process.env.HOME };',
           `try { readFileSync(${JSON.stringify(secret)}); r.key = 'read'; } catch (e) { r.key = e.code; }`,
           "try { appendFileSync('.git/config', '#'); r.git = 'written'; } catch (e) { r.git = e.code; }",
           "try { writeFileSync('scratch.txt', 'x'); r.checkout = 'written'; } catch (e) { r.checkout = e.code; }",
-          `writeFileSync(join(${JSON.stringify(outside)}, basename(process.cwd()) + '.json'), JSON.stringify(r));`, '',
+          // The checkout the model works in, as the test wrote its path down for the gate's suite.
+          `try { const paths = JSON.parse(readFileSync(${JSON.stringify(join(outside, 'paths.json'))}, 'utf8')); readdirSync(paths.checkout); r.interactive = 'read'; } catch (e) { r.interactive = e.code ?? 'no paths'; }`,
+          // Its own checkout's report stays in it; the gate's goes outside, since its checkout goes.
+          `writeFileSync(basename(process.cwd()).startsWith('redline-gate-') ? join(${JSON.stringify(outside)}, 'gate.json') : 'report.json', JSON.stringify(r));`, '',
         ].join('\n');
-        const run = await realRun(body);
-        const seen = reports();
+        let checkoutReport;
+        const run = await realRun(body,
+          (dir) => { try { checkoutReport = JSON.parse(readFileSync(join(dir, 'report.json'), 'utf8')); } catch { /* none */ } },
+          {}, (dir) => writeFileSync(join(outside, 'paths.json'), JSON.stringify({ checkout: dir })));
+        const seen = { checkout: checkoutReport, gate: reports().gate };
         const confined = (x) => x !== undefined && x.uid !== process.getuid() && x.key === 'EACCES' && x.git === 'EACCES' && x.checkout === 'written' && !x.env.includes('GH_READ_TOKEN');
         check('a command runs as the run account and cannot read the key file or write .git, but can write the checkout', confined(seen.checkout), JSON.stringify(seen.checkout));
         check('the test gate\'s suite runs as the run account too, in a checkout of its own whose .git it cannot write, with a HOME of its own', confined(seen.gate) && seen.gate.home !== seen.checkout?.home, JSON.stringify(seen.gate));
+        check('and it cannot read the checkout the model works in', seen.gate?.interactive === 'EACCES' && seen.checkout?.interactive !== 'EACCES', JSON.stringify({ gate: seen.gate?.interactive, checkout: seen.checkout?.interactive }));
         check('and the fix goes through', run.r.outcome === 'fixed' && fixProblem(run.r) === null, run.r.notes);
         // The files the run account made, read from the bundle (the commit was made in a private
         // copy of .git): every cleanup pass after a command leaves them as they were made, so none
@@ -1380,6 +1397,24 @@ if (!gitOk) {
         check('a file a command made is committed as it was made, not executable', modes === '100644 run.mjs, 100644 scratch.txt, 100644 src/b.js', modes);
         rmSync(verifier, { recursive: true, force: true });
         done(run);
+      }
+      {
+        // A command leaves a file at a fixed path outside the checkout and its HOME, and the suite
+        // passes only with it: the model's own run passes, and the gate, which removes what the run
+        // account left in the temporary directories before the suite, fails.
+        const fixed = join(tmpdir(), `redline-fixed-${process.pid}`);
+        const flag = join(fixed, 'flag');
+        const make = `import { mkdirSync, writeFileSync } from 'node:fs';\nmkdirSync(${JSON.stringify(fixed)}, { recursive: true });\nwriteFileSync(${JSON.stringify(flag)}, 'x');\n`;
+        const repo = makeRepo({ pkg: { name: 'r', private: true, scripts: { test: 'node test.mjs' } }, testBody: `import { existsSync } from 'node:fs';\nprocess.exit(existsSync(${JSON.stringify(flag)}) ? 0 : 1);\n` });
+        const w = world(repo, { turns: [tool('fix_write', { path: 'src/b.js', content: FIXED_B }), tool('fix_write', { path: 'make.mjs', content: make }),
+          tool('fix_run', { command: 'node make.mjs' }), tool('fix_run', { command: 'npm test' }), finish(), finish()] });
+        let r;
+        try { ({ record: r } = await runFix({ ...w.ctx, runAs: realRunAs, guardFiles: [secret] })); } catch (e) { r = { outcome: 'refused', notes: e.message }; }
+        const own = JSON.stringify(w.calls.model[4]?.messages.at(-1) ?? '');
+        check('a file a command left at a fixed path outside the checkout is gone before the gate\'s suite: the model\'s run passed on it, the gate fails without it',
+          /exit 0/.test(own) && r.outcome === 'tests_failed' && !existsSync(fixed), `${r.outcome} ${own.slice(0, 120)} ${existsSync(fixed)}`);
+        rmSync(w.out, { recursive: true, force: true });
+        rmSync(repo.dir, { recursive: true, force: true });
       }
       for (const [name, body] of [
         // .git is read-only but its directory entry is not: rename it and put a writable copy,
@@ -1411,9 +1446,18 @@ if (!gitOk) {
           + "const d = basename(process.cwd()).startsWith('redline-gate-') ? 'gate-locked' : 'locked';\n"
           + "mkdirSync(d + '/inner', { recursive: true });\nwriteFileSync(d + '/f.txt', 'x\\n');\nwriteFileSync(d + '/inner/g.txt', 'y\\n');\n"
           + "spawnSync('setfacl', ['-R', '-b', d]);\nchmodSync(d + '/f.txt', 0o600);\nchmodSync(d + '/inner/g.txt', 0o600);\nchmodSync(d + '/inner', 0o000);\nchmodSync(d, 0o700);\n";
-        const run = await realRun(lock);
+        // This run's temporary directories in one of their own, which the run account can pass
+        // through, so another test's do not count.
+        const own = mkdtempSync(join(tmpdir(), 'redline-fix-tmp-'));
+        chmodSync(own, 0o711);
+        const was = process.env.TMPDIR;
+        process.env.TMPDIR = own;
+        let run;
+        try { run = await realRun(lock); } finally { if (was === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = was; }
         check('files the run account locked to itself are reached and committed, and nothing is left this account cannot remove',
-          run.r.outcome === 'fixed' && ['locked/f.txt', 'locked/inner/g.txt'].every((f) => run.r.files.includes(f)) && !readdirSync(tmpdir()).some((d) => d.startsWith('redline-gate-')), run.r.notes);
+          run.r.outcome === 'fixed' && ['locked/f.txt', 'locked/inner/g.txt'].every((f) => run.r.files.includes(f))
+          && readdirSync(own).every((n) => n === basename(run.repo.dir) || n === basename(run.w.out)), `${run.r.notes} ${readdirSync(own).join()}`);
+        rmSync(own, { recursive: true, force: true });
         done(run);
       }
       {

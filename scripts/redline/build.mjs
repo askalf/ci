@@ -61,6 +61,7 @@ import {
   cleanSubject, cleanNotes, descriptionProblem, fetchLessons, fixEffort, protectedPaths, renderNotes, runAccount, runProblem, toolchainLines,
   workCheckout, sealResult, hostSetup, runToExit,
 } from './fix.mjs';
+import { creditHits } from './public-text.mjs';
 
 export const BUILD_VERSION = 1;
 /**
@@ -200,11 +201,23 @@ export function buildSubject(line) {
 }
 
 /**
+ * Why the public-text check would refuse this pull request description for a credit, or null: its
+ * own rule (creditHits), so a description this lane writes, from fix_describe or the summary,
+ * passes the check the pull request meets when it opens. Pure.
+ */
+export function descriptionCreditProblem(body) {
+  const hit = creditHits({ body: String(body ?? '') })[0];
+  return hit ? `line ${hit.line} credits a model or a tool as the maker ("${String(hit.text).trim().slice(0, 80)}"), which the public-text check refuses` : null;
+}
+
+/**
  * The pull request description for a change the model never described: its summary, without
- * attribution lines or dashes, or the commit subject when nothing of the summary is left. Pure.
+ * attribution lines, credit lines (descriptionCreditProblem's) or dashes, or the commit subject
+ * when nothing of the summary is left. Pure.
  */
 export function summaryAsDescription(sub) {
-  const kept = String(sub?.summary ?? '').replace(/\r\n/g, '\n').split('\n').filter((l) => !DESCRIPTION_ATTRIBUTION.test(l)).join('\n');
+  const kept = String(sub?.summary ?? '').replace(/\r\n/g, '\n').split('\n')
+    .filter((l) => !DESCRIPTION_ATTRIBUTION.test(l) && descriptionCreditProblem(l) === null).join('\n');
   return cleanNotes(kept) || String(sub?.subject ?? '');
 }
 
@@ -358,10 +371,11 @@ async function buildTicket(ctx, record) {
     // offline builds`) is never refused once committed.
     tools: TOOLS, subject: buildSubject, refusedMessage: (message) => BUILD_SUBJECT_BANNED.test(message), bundle: 'build.bundle',
     // fix_describe writes the new pull request's description. There is no current one to start
-    // from, so the rules are the text's own: not empty, no attribution, no dashes, its ceiling.
+    // from, so the rules are the text's own: not empty, no attribution, no dashes, its ceiling,
+    // and no credit the public-text check refuses.
     describe: {
       required: true,
-      problem: (body) => descriptionProblem(body, ''),
+      problem: (body) => descriptionProblem(body, '') ?? descriptionCreditProblem(body),
       kept: (lines) => `the pull request description is this text (${lines} lines)`,
       ask: DESCRIBE_FIRST,
       fallback: summaryAsDescription,

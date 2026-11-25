@@ -1429,6 +1429,53 @@ export async function workCheckout(ctx, job) {
     acl(['-R', '-m', `u:${runAs}:rX,d:u:${runAs}:rX`, join(dir, '.git')]);
     acl(['-m', `u:${runAs}:rwx,d:u:${runAs}:rwX,d:u:${me}:rwX`, dirHome]);
   };
+  // The test gate's isolation from what the commands did, with a run account (gateTests): before
+  // the suite starts, every file the run account owns in the temporary directories it can write
+  // (the job's /tmp and /var/tmp are its own under the exec rows' sandbox, with /dev/shm and this
+  // process's tmpdir) is removed, but for the checkout and the commands' HOME; then it is denied
+  // both of those until the gate ends. A file it could not remove fails the gate's setup, so the
+  // suite never runs beside one. Without a run account the commands run as this account, whose
+  // own files these are, and nothing is removed.
+  const sharedTemps = [...new Set([tmpdir(), '/tmp', '/var/tmp', '/dev/shm'].filter((d) => existsSync(d)).map((d) => realpathSync(d)))];
+  const keepOut = () => [root, home, out].map((d) => { try { return realpathSync(d); } catch { return d; } });
+  const holds = (outer, inner) => inner === outer || inner.startsWith(`${outer}${sep}`);
+  // The entries under a directory the run account may have made, other than the ones to keep and
+  // the directories that lead to them: those are walked into, as this account can list them.
+  const leftBy = (dirs) => {
+    const keep = keepOut();
+    const found = [];
+    const walk = (d) => {
+      let names;
+      try { names = readdirSync(d); } catch { return; }
+      for (const n of names) {
+        const p = join(d, n);
+        if (keep.some((k) => holds(k, p))) continue;
+        if (keep.some((k) => holds(p, k))) { walk(p); continue; }
+        found.push(p);
+      }
+    };
+    for (const d of dirs) walk(d);
+    return found;
+  };
+  // find over the paths a hundred at a time, so a crowded temporary directory never makes an
+  // argument list too long.
+  const findIn = (paths, args) => {
+    const outs = [];
+    for (let i = 0; i < paths.length; i += 100) outs.push(String(asRun(['find', ...paths.slice(i, i + 100), ...args]).stdout ?? ''));
+    return outs.join('');
+  };
+  const isolate = () => {
+    // Its own directories first, each as it is reached, so the removal can enter one it locked
+    // (find acts on a directory before it reads it); then all it owns, deepest first. Nothing it
+    // does not own is touched.
+    const paths = leftBy(sharedTemps);
+    findIn(paths, ['-user', runAs, '-type', 'd', '-exec', 'chmod', 'u+rwx', '{}', ';']);
+    findIn(paths, ['-depth', '-user', runAs, '-delete']);
+    const left = findIn(leftBy(sharedTemps), ['-user', runAs, '-print', '-quit']).trim().split('\n')[0];
+    if (left) throw new Error(`the run account left ${left.slice(0, 200)} outside the checkout, and it could not be removed before the tests`);
+    for (const d of [root, home]) acl(['-m', `u:${runAs}:---`, d]);
+  };
+  const unisolate = () => { for (const d of [root, home]) acl(['-m', `u:${runAs}:rwx`, d]); };
   // Every command the checkout supplies goes through here.
   const exec = (argv, seconds, extraEnv = {}) => { const r = run(root, { ...cenv, ...extraEnv }, argv, seconds, runAs); settle(); return r; };
   try {
@@ -1511,42 +1558,86 @@ export async function workCheckout(ctx, job) {
       return { tree, keep };
     };
     const testArgv = plan.pm && plan.scripts.includes('test') ? [plan.pm, 'test'] : null;
+    // Whether the model ran the build script here: the gate runs it again before the suite, since
+    // a suite that reads the build's output (an ignored dist/) needs it, and the output made here
+    // is not carried over.
+    let ranBuild = false;
+    // The toolchain the candidate declares, as detectRunner reads the checkout's: the names at the
+    // tree's root and its package.json. The gate runs what the change declares, a first test script
+    // or a new package manager among it; the allowlist the model works with stays the start's.
+    // `broken` when a package.json is there and does not parse: the gate cannot say what to run.
+    const planOf = (tree) => {
+      const names = (git(root, genv, ['ls-tree', '-z', '--name-only', tree]) ?? '').split('\0').filter(Boolean);
+      if (!names.includes('package.json')) return { plan: detectRunner(names, null) };
+      try { return { plan: detectRunner(names, JSON.parse(git(root, genv, ['cat-file', 'blob', `${tree}:package.json`]) ?? '')) }; } catch { return { broken: true }; }
+    };
     // The test gate. The suite runs on the candidate tree alone, in a checkout of its own made from
-    // the tree's objects, with the install run there afresh and a HOME of its own, and never in this
-    // checkout: an ignored file a command left here (a local config, a build's output), a file in
-    // the commands' HOME, or a change the commit leaves out can make a suite pass here that fails on
-    // the commit. What the suite writes there is thrown away with it, so the commit is the tree that
-    // was tested and nothing the suite did. The gate's checkout has a .git of its own, a copy of
-    // this process's, at the start commit, so a suite that asks git sees what it sees here.
-    // Returns { command, exit, out, timedOut, tree }.
-    const gateTests = (tree) => {
+    // the tree's objects, with the install (and the build, when the model ran it) run there afresh
+    // and a HOME of its own, and never in this checkout: an ignored file a command left here (a
+    // local config, a build's output), a file in the commands' HOME, or a change the commit leaves
+    // out can make a suite pass here that fails on the commit. What the suite writes there is
+    // thrown away with it, so the commit is the tree that was tested and nothing the suite did. With
+    // a run account the suite cannot reach this checkout or the commands' HOME, and what the
+    // commands left in the temporary directories is removed before it starts (isolate); without
+    // one, a path outside the two checkouts and HOMEs that a command and the suite each name is not
+    // covered. The gate's checkout has a .git of its own, a copy of this process's, with HEAD and
+    // the index at a commit of the candidate on the start commit. The first step that fails is the
+    // result: an install or a build that fails fails the gate, whatever a test would say after it.
+    // Returns { command, exit, out, timedOut, tree, stage } (stage: manifest, install, build or
+    // test), or null when neither the start commit nor the change has a test script.
+    const gateTests = (tree, subject) => {
+      const found = planOf(tree);
+      if ('broken' in found) return { command: 'package.json', exit: 1, out: 'the change\'s package.json does not parse, so what its tests are cannot be read', timedOut: false, tree, stage: 'manifest' };
+      const p = found.plan;
+      const testCmd = p.pm && p.scripts.includes('test') ? [p.pm, 'test'] : null;
+      if (!testCmd) {
+        if (!testArgv) return null;
+        return { command: 'package.json', exit: 1, out: `the change leaves no \`test\` script in package.json, and the start commit has one (\`${testArgv.join(' ')}\`)`, timedOut: false, tree, stage: 'manifest' };
+      }
+      ctx.log?.('  running the test script in a clean checkout of the change');
       const dir = realpathSync(mkdtempSync(join(tmpdir(), 'redline-gate-')));
       const gateHome = mkdtempSync(join(tmpdir(), 'redline-gate-home-'));
       const genvGate = { ...genv, GIT_DIR: join(dir, '.git'), GIT_WORK_TREE: dir };
-      const result = (exit, out, timedOut = false) => ({ command: testArgv.join(' '), exit, out, timedOut, tree });
+      const result = (stage, argv, exit, out, timedOut = false) => ({ command: argv.join(' '), exit, out, timedOut, tree, stage });
       try {
         cpSync(git(root, genv, ['rev-parse', '--absolute-git-dir']), join(dir, '.git'), { recursive: true });
+        // HEAD, the index and the files all the candidate: a commit of its tree on the start commit,
+        // with the subject it would carry, so a suite that finds its tests through git finds them.
         git(dir, genvGate, ['read-tree', tree]);
         git(dir, genvGate, ['checkout-index', '-a', '-f']);
-        git(dir, genvGate, ['reset', '-q', start]);
-        if (runAs) grant(dir, gateHome);
+        const who = { GIT_AUTHOR_NAME: AUTHOR.name, GIT_AUTHOR_EMAIL: AUTHOR.email, GIT_COMMITTER_NAME: AUTHOR.name, GIT_COMMITTER_EMAIL: AUTHOR.email };
+        git(dir, genvGate, ['update-ref', '--no-deref', 'HEAD', git(dir, { ...genvGate, ...who }, ['commit-tree', tree, '-p', start, '-m', subject])]);
+        if (runAs) {
+          grant(dir, gateHome);
+          isolate();
+        }
         workDirs.push(dir, gateHome);
         const env = childEnv(ctx.env ?? process.env, gateHome, ctx.proxy);
         const gexec = (argv, seconds, extraEnv = {}) => { const r = run(dir, { ...env, ...extraEnv }, argv, seconds, runAs); settle(); return r; };
-        let installed = '';
-        if (plan.install) {
-          const s = secondsLeft(LIMITS.installS);
-          // No time to install is a failed suite: a change is never reported without its tests.
-          if (!s) return result(124, 'not run: the time budget was spent before the install in the clean checkout', true);
-          const i = gexec(plan.install, s, plan.installEnv);
-          if (i.exit !== 0) installed = `The install in the clean checkout, \`${plan.install.join(' ')}\`, exited ${i.exit}${i.timedOut ? ' (timed out)' : ''}:\n${capOutput(i.out, 3_000)}\n\n`;
+        // A step with no time left is a failed step: a change is never reported without its tests.
+        const step = (stage, argv, cap, extraEnv = {}) => {
+          const s = secondsLeft(cap);
+          return s ? gexec(argv, s, extraEnv) : { exit: 124, out: `not run: the time budget was spent before the ${stage} in the clean checkout`, timedOut: true };
+        };
+        let install = p.install;
+        if (p.berry) {
+          const v = step('install', ['yarn', '--version'], 60, p.installEnv);
+          install = v.exit === 0 ? berryInstall(v.out) : null;
+          if (!install) return result('install', ['yarn', '--version'], v.exit || 1, `\`yarn --version\` gave no yarn 2+ version (exit ${v.exit}), so no install could skip dependencies' builds:\n${v.out}`, v.timedOut);
         }
-        const s = secondsLeft(LIMITS.runMaxS);
-        if (!s) return result(124, `${installed}not run: the time budget was spent`, true);
-        const t = gexec(testArgv, s);
-        return result(t.exit, `${installed}${t.out}`, t.timedOut);
+        if (install) {
+          const i = step('install', install, LIMITS.installS, p.installEnv);
+          if (i.exit !== 0) return result('install', install, i.exit, i.out, i.timedOut);
+        }
+        if (ranBuild && p.scripts.includes('build')) {
+          const b = step('build', [p.pm, 'run', 'build'], LIMITS.runMaxS);
+          if (b.exit !== 0) return result('build', [p.pm, 'run', 'build'], b.exit, b.out, b.timedOut);
+        }
+        const t = step('test', testCmd, LIMITS.runMaxS);
+        return result('test', testCmd, t.exit, t.out, t.timedOut);
       } finally {
         workDirs.splice(2);
+        if (runAs) unisolate();
         for (const d of [dir, gateHome]) {
           try { rmSync(d, { recursive: true, force: true }); } catch (e) { ctx.log?.(`::warning::could not remove ${d}: ${e.code ?? e.message}`); }
         }
@@ -1585,6 +1676,7 @@ export async function workCheckout(ctx, job) {
         if (a.error) return `error: ${a.error}`;
         const s = secondsLeft(Math.min(LIMITS.runMaxS, Math.max(1, Number(input.timeout_seconds) || LIMITS.runDefaultS)));
         if (!s) return 'error: the time budget is spent; call finish_fix now';
+        if (a.argv[0] === plan.pm && a.argv[1] === 'run' && a.argv[2] === 'build') ranBuild = true;
         const r = exec(a.argv, s);
         return `exit ${r.exit}${r.timedOut ? ' (timed out)' : ''}\n${capOutput(r.out)}`;
       }
@@ -1620,19 +1712,23 @@ export async function workCheckout(ctx, job) {
         askedToDescribe = true;
         return { error: job.describe.ask };
       }
-      if (testArgv && staged().keep.length) {
-        const putBack = undoSkipped();
-        const { tree } = candidate();
-        ctx.log?.('  running the test script in a clean checkout of the change');
-        const t = gateTests(tree);
+      if (staged().keep.length) {
+        // The tree is the kept paths alone, so it is the same before and after a left-out edit is put back.
+        const t = gateTests(candidate().tree, checked.sub.subject);
+        // A change with no test script anywhere has no tests to report, whatever an earlier one had.
         tests = t;
-        if (t.exit !== 0 && bounces < LIMITS.testBounces) {
-          bounces++;
-          const failed = failingTests(t.out);
-          const named = failed.length ? `\nFailed: ${failed.join(', ')}` : '';
-          return { error: `The test script fails at your change (\`${t.command}\` exited ${t.exit}${t.timedOut ? ', timed out' : ''}):${named}\n${capOutput(t.out, 6_000)}`
-            + `\n\nThe suite ran in a clean checkout of the change, installed afresh with a HOME of its own: a file the commit does not carry (ignored, untracked and left out, or outside the checkout) was not there.`
-            + `${putBack.length ? `\n\nThese edits are not in the commit, so they were put back as the start commit has them before the run: ${putBack.join(', ')}.` : ''}\n\nFix it and run the tests again, then call finish_fix.` };
+        if (t) {
+          const putBack = undoSkipped();
+          if (t.exit !== 0 && bounces < LIMITS.testBounces) {
+            bounces++;
+            const failed = t.stage === 'test' ? failingTests(t.out) : [];
+            const named = failed.length ? `\nFailed: ${failed.join(', ')}` : '';
+            const what = { install: 'The install fails', build: 'The build script fails', test: 'The test script fails' }[t.stage];
+            const head = t.stage === 'manifest' ? `The change cannot be tested: ${t.out}.`
+              : `${what} at your change, in a clean checkout of it (\`${t.command}\` exited ${t.exit}${t.timedOut ? ', timed out' : ''}):${named}\n${capOutput(t.out, 6_000)}`;
+            return { error: `${head}\n\nThe gate checks out the change alone, with a HOME of its own${runAs ? ', removes what your commands left in the temporary directories' : ''}, installs afresh${ranBuild ? ', runs the build script' : ''} and runs the tests: a file the commit does not carry (an ignored one, or one left out) is not there.`
+              + `${putBack.length ? `\n\nThese edits are not in the commit, so they were put back as the start commit has them before the run: ${putBack.join(', ')}.` : ''}\n\nFix it and run the tests again, then call finish_fix.` };
+          }
         }
       }
       return { sub: checked.sub };

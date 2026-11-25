@@ -274,15 +274,21 @@ checks that the checkout is exactly the reviewed head, then `fix.mjs`:
   and `build` scripts and `node <file>`, without a shell, in a scrubbed environment, and
   `fix_describe` replace the PR description for a finding on it (whole text, no attribution, no
   em dashes, never when the brief showed only part of the current one);
-- runs the test script on the tree the commit holds, and on nothing else: when the model finishes,
-  the kept paths are staged as one tree, and the suite runs on that tree in a checkout of its own
-  (made from the tree's objects, with a copy of `.git` at the start commit), with the install run
-  there afresh and a HOME of its own, as the run account. A file the commit does not carry, an
-  ignored one a command left or one in the commands' HOME among them, is not there, and what the
-  suite writes is removed with that checkout: the commit must be the tree that was tested. A change
-  the commit will leave out (below) is also put back as the start commit has it in the model's
-  checkout, and the bounce names what was put back. A failing suite is bounced to the model once,
-  then reported. The bounce, `fix.json` (`tests.failing`) and the notes name the failed
+- runs the test script on the tree the commit holds: when the model finishes, the kept paths are
+  staged as one tree, and the suite runs on that tree in a checkout of its own (made from the
+  tree's objects, with a copy of `.git` whose HEAD and index are a commit of that tree on the start
+  commit) and a HOME of its own, as the run account. The gate reads what to run from that tree, so a first test script or a new package
+  manager in the change is what runs; it installs afresh there, runs the build script first when
+  the model ran it, and the first of those steps to fail is the result, an install that fails
+  among them. A change that drops the start commit's test script, or whose package.json does not
+  parse, cannot pass. A file the commit does not carry, an ignored one a command left among them,
+  is not there: before the suite starts, what the run account left in the temporary directories is
+  removed (a file it cannot remove fails the run), and it is denied the model's checkout and the
+  commands' HOME until the gate ends. Without a run account the commands are this account's, and a
+  path outside the checkouts and HOMEs is not covered. What the suite writes is removed with that
+  checkout: the commit must be the tree that was tested. A change the commit will leave out
+  (below) is also put back as the start commit has it in the model's checkout, and the bounce
+  names what was put back. A failing gate is bounced to the model once, then reported. The bounce, `fix.json` (`tests.failing`) and the notes name the failed
   tests the output reports (TAP `not ok`, jest/vitest `FAIL`); the gate is the exit code alone;
 - commits everything changed except `.github/**` the PR does not change (and any `.github/**`
   removal), `.gitattributes`, `redline-protected` files, files over 1 MB and what the install dirtied, as
