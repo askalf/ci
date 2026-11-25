@@ -35,6 +35,30 @@ names the commit's date and the pull request it came from.
   artifact is still kept seven days, so a verdict older than that cannot be read from its run; a
   newer round-cap notice still states the count it was capped on.
 
+- The fixer changes part of a file with `fix_edit`, and reads what reaches it whole. Its only
+  write tool replaced whole files, and what it read was not always the file: the model is reached
+  through dario, which cuts a tool result over 30,000 characters and removes some product names
+  from the text it carries, while `fix_read` returned up to 1,000 lines (its description said
+  400). On dario#1936 the fix belonged in `src/cc-template.ts`: a read of it arrived cut at about
+  line 550, ten of its lines arrived with words missing, and writing the file back whole would
+  have changed text the model never saw, so it searched until the budget ran out and refused.
+  `fix_edit` replaces one exact piece of a UTF-8 file. The piece must occur once on disk and once
+  in the file as the model is shown it, overlapping matches counted, and both matches must be
+  the same characters of the file. A CRLF file keeps its line ends, and every byte outside the
+  match stays as it was. Both write tools write in place, so a file keeps its owner, group,
+  ordinary permission bits and access list (a write by an account that does not own it can clear
+  set-user-ID or set-group-ID, which is not put back). They change only a regular file with one
+  name: a hard-linked file, a FIFO, a socket or a device is refused with nothing changed, and is
+  opened without blocking. A write that fails partway ends the run with nothing committed.
+  `fix_read` returns at most 400 lines, keeps its whole result under 24,000
+  characters and says where to read on; it probes a file's first 8 KB before reading the rest
+  and reads at most 8 MB. `fix_read` and
+  `fix_search` name the lines shown with words removed, and `fix_write` refuses to replace a file
+  that has one, or one over 1 MB it cannot check. A run that ends on its budget, or refuses
+  only once the budget is spent, now starts its notes with `The fix run could not finish:`, as a
+  run that died does, so the dispatcher sends one more run at that head instead of leaving the
+  pull request at the refusal.
+
 - The file `REDLINE_MODELS_FILE` names may set `REDLINE_ROUND_CAP`. The models file could not set
   the cap: it took only the four model pins, so a host whose pins come from a reviewed repository
   still kept its cap in its env file or in the runner's environment, where no review sees it. A

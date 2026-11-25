@@ -273,11 +273,33 @@ checks that the checkout is exactly the reviewed head, then `fix.mjs`:
   `yarn --version` reports, `--skip-builds` in 2 and `--mode=skip-build` from 3, since a
   `dependenciesMeta` `built: true` overrides `YARN_ENABLE_SCRIPTS`; an unreadable version installs
   nothing);
-- lets the model `fix_list`, `fix_read`, `fix_search`, `fix_write` (inside the checkout; under
+- lets the model `fix_list`, `fix_read`, `fix_search`, `fix_edit` and `fix_write` (inside the checkout; under
   `.github/` only a file the pull request itself changes, and never `redline*.yml`, the review's
   and this lane's own workflows; never a `.gitattributes`, never a file the reviewed head marks `redline-protected`
   in `.gitattributes`, such as captured payloads and vendored code; the marks are read from that
-  commit, so nothing the run does to `.gitattributes` lifts them) and `fix_run` an allowlist only: the package.json `test`, `lint`, `typecheck`
+  commit, so nothing the run does to `.gitattributes` lifts them). `fix_edit` replaces one exact
+  piece of a UTF-8 file that exists: the text must occur once on disk and once in the file as the
+  model is shown it, overlapping matches counted, and the two matches must be the same characters
+  of the file; half of a character in either text is refused; a file whose lines all end CRLF
+  takes the replacement with CRLF; every byte outside the match is written back as it was.
+  `fix_write` writes a whole file, given as a string. Both write in place, so a file keeps its
+  owner, group, ordinary permission bits and access list and no copy is made (a write by an
+  account that does not own the file can clear its set-user-ID or set-group-ID bit, and that bit
+  is not put back). `fix_read`, `fix_edit` and `fix_write` open a file without blocking:
+  `fix_read` reads only a regular file (a hard-linked one included), and the write tools change
+  only a regular file with one name, opened without truncation, so a file with a second name (a
+  hard link), a FIFO, a socket or a device is refused with nothing changed. (`fix_search` is
+  `redline_search`, which opens files as it finds them; a FIFO there holds the search until its
+  10-second limit stops it.) A failure once a file is truncated, or created, ends the run as one that could not finish, with
+  nothing committed, and the dispatcher tries the head once more on a fresh checkout. The model is reached through dario, which cuts a tool
+  result over 30,000 characters and removes some product names from the text it carries
+  (`shownText` follows its scrub), so `fix_read` returns at most 400 lines and its whole result,
+  notes included, stays under 24,000 characters, saying where to read on, and `fix_read` and
+  `fix_search` name the lines they show with words removed. `fix_write` never replaces a file
+  with such a line, or one over 1 MB it cannot check, and `fix_edit` refuses an `old_text` that
+  takes in a removed word (a piece of such a line the scrub left whole can still be edited), so
+  text the model never saw is never written back. And
+  `fix_run` an allowlist only: the package.json `test`, `lint`, `typecheck`
   and `build` scripts and `node <file>`, without a shell, in a scrubbed environment, and
   `fix_describe` replace the PR description for a finding on it (whole text, no attribution, no
   em dashes, never when the brief showed only part of the current one);
@@ -301,7 +323,10 @@ checks that the checkout is exactly the reviewed head, then `fix.mjs`:
 
 Limits: 40 turns, 30 files, 400 KB of diff; past any of them the outcome is `refused`. Wall time
 counts from the start of the run, install included: at 45 minutes the model must call `finish_fix`,
-and no command, test or model call starts past 52 minutes; a run out of time is `refused`, never `fixed`. A
+and no command, test or model call starts past 52 minutes; a run out of time is `refused`, never `fixed`.
+A run that ends on its budget (out of turns or time, or a refusal made only once the budget was
+spent) has not judged the findings: its notes start with `The fix run could not finish:`, which
+the dispatcher reads as a run that died, so the head is dispatched once more, then rests. A
 job killed at its 60-minute timeout still uploads a `fix.json` that says so. The job exits 0 for
 `fixed`, and for `no_change` with `description: true` (the fix was a new description, which the
 caller applies); 1 for anything else. `fix-tools.json` is the fixer's `TOOLS` as a file, pinned in `truecopy.lock` like the
