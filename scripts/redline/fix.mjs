@@ -90,7 +90,7 @@
 // there is no bundled fallback, and a variable that is unset, a file that cannot be read or an empty
 // file ends the run.
 
-import { readFileSync, writeFileSync, mkdirSync, rmSync, existsSync, lstatSync, realpathSync, statSync, readdirSync, appendFileSync, mkdtempSync, readlinkSync, cpSync, openSync, fstatSync, closeSync, readSync, renameSync, chmodSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, rmSync, existsSync, lstatSync, realpathSync, statSync, readdirSync, appendFileSync, mkdtempSync, readlinkSync, cpSync, openSync, fstatSync, closeSync, readSync, renameSync, fchmodSync } from 'node:fs';
 import { join, resolve, relative, dirname, basename, sep, posix } from 'node:path';
 import { tmpdir, userInfo } from 'node:os';
 import { createHash } from 'node:crypto';
@@ -929,29 +929,34 @@ const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[
 const cutWhole = (s, n) => { const part = s.slice(0, n); return /[\uD800-\uDBFF]$/.test(part) ? part.slice(0, -1) : part; };
 
 /**
- * Replace the file at abs with bytes, all or nothing: they go to a new file beside it, which takes
- * the ordinary permission bits of `mode` when one is given, and that file is renamed over abs only
- * once every byte is written. A failure leaves abs as it was and removes the new file, and only a
- * file this call created.
+ * Replace the file at abs with bytes, all or nothing: they go to a new file beside it, and that file
+ * is renamed over abs only once every byte is written and it is closed. A failure anywhere leaves
+ * abs as it was and removes the new file, and only a file this call created.
  *
- * The new file's name is short and its own, not abs's name with a suffix: abs's name may already
- * be near the filesystem's limit for one path component. Only `mode & 0o777` is kept: the new file
- * belongs to the account this runs as, so a set-user-ID, set-group-ID or sticky bit that the run
- * account left on the old one is never carried to a file of this account.
+ * `mode` is the old file's mode (null for a new file). The copy of an existing file is created 0600,
+ * so no other account can open it while the bytes go in, and takes `mode & 0o777` through its
+ * descriptor before it is closed and renamed: the copy belongs to the account this runs as, so a
+ * set-user-ID, set-group-ID or sticky bit the run account left on the old file is never carried to a
+ * file of this account. A new file is created as writeFileSync would create it. The copy's name is
+ * short and its own, not abs's name with a suffix: abs's name may already be near the filesystem's
+ * limit for one path component. `io` is the filesystem, for the tests.
  */
-export function replaceFile(abs, bytes, mode = null) {
+export const REPLACE_IO = { openSync, writeFileSync, fchmodSync, closeSync, renameSync, rmSync };
+export function replaceFile(abs, bytes, mode = null, io = REPLACE_IO) {
   const tmp = join(dirname(abs), `.fix-${process.pid}-${createHash('sha256').update(`${abs}|${Date.now()}|${Math.random()}`).digest('hex').slice(0, 12)}`);
   // Exclusive: a name that is taken throws here, before anything is created to remove.
-  let fd = openSync(tmp, 'wx');
+  const fd = io.openSync(tmp, 'wx', mode === null ? 0o666 : 0o600);
+  let open = true;
   try {
-    writeFileSync(fd, bytes);
-    closeSync(fd);
-    fd = null;
-    if (mode !== null) chmodSync(tmp, mode & 0o777);
-    renameSync(tmp, abs);
+    io.writeFileSync(fd, bytes);
+    if (mode !== null) io.fchmodSync(fd, mode & 0o777);
+    // Closed once: a close that fails has released the descriptor all the same.
+    open = false;
+    io.closeSync(fd);
+    io.renameSync(tmp, abs);
   } catch (e) {
-    if (fd !== null) closeSync(fd);
-    rmSync(tmp, { force: true });
+    if (open) { try { io.closeSync(fd); } catch { /* released either way */ } }
+    try { io.rmSync(tmp, { force: true }); } catch { /* the first error is the one to report */ }
     throw e;
   }
 }

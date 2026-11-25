@@ -2,7 +2,7 @@
 // The model and GitHub are stubbed through ctx.fetch; git is real, on throwaway repositories under
 // the temp directory. Nothing leaves the machine.
 
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, symlinkSync, chmodSync, statSync, readdirSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, symlinkSync, chmodSync, statSync, readdirSync, fstatSync, closeSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer as createNetServer } from 'node:net';
@@ -17,7 +17,7 @@ import {
   LIMITS, OUTCOMES, AUTHOR, FIX_VERSION, DEFAULT_MODEL, SUBJECT_BANNED, EFFORT_LEVELS, fixEffort, priorRounds, REVIEW_PAGES_MAX,
   HISTORY, FIX_POSTER, appliedFixComments, fixVerdicts, historyFinding, allReviews, repoFixHistory, formatHistory,
   LESSONS, lessonsAccess, lessonQuery, fetchLessons,
-  runIdentity, alteredInTransit, alteredLines, fixRead, fixSearch, UNFINISHED_PREFIX, unfinished, CONNECTION_CUT_CHARS, occurrences, shownText, shownView, replaceFile,
+  runIdentity, alteredInTransit, alteredLines, fixRead, fixSearch, UNFINISHED_PREFIX, unfinished, CONNECTION_CUT_CHARS, occurrences, shownText, shownView, replaceFile, REPLACE_IO,
 } from './fix.mjs';
 import { bumpCaller, fixCallerYaml, REVIEW_WORKFLOW, FIX_WORKFLOW, PUBLIC_TEXT_WORKFLOW, POST_WORKFLOW, CALLERS } from './pin.mjs';
 
@@ -481,7 +481,33 @@ console.log('\n  what the model is shown');
       writeFileSync(long, 'a');
       replaceFile(long, Buffer.from('b'), 0o100644);
       check('a file whose name is 250 bytes is replaced', readFileSync(long, 'utf8') === 'b' && !readdirSync(d2).some((n) => n.startsWith('.fix-')));
+      // While the bytes go in: the copy of an existing file is 0600, whatever the umask; a new file
+      // gets the mode writeFileSync gives one.
+      const sec = join(d2, 'secret.txt');
+      writeFileSync(sec, 'old');
+      const during = [];
+      replaceFile(sec, Buffer.from('new'), 0o100640, { ...REPLACE_IO, writeFileSync: (fd, b) => { during.push(fstatSync(fd).mode & 0o777); return writeFileSync(fd, b); } });
+      check('the copy of an existing file is 0600 while its bytes are written, then takes the old mode', during.join() === String(0o600) && readFileSync(sec, 'utf8') === 'new' && (statSync(sec).mode & 0o777) === 0o640, during.map((m) => m.toString(8)).join());
+      const ref = join(d2, 'ref.txt');
+      writeFileSync(ref, 'r');
+      const fresh = join(d2, 'fresh.txt');
+      replaceFile(fresh, Buffer.from('f'));
+      check('a new file gets the mode writeFileSync would give it', (statSync(fresh).mode & 0o777) === (statSync(ref).mode & 0o777));
     }
+    // A close or a write that fails: the error is thrown, the file stays as it was, the copy is
+    // removed (a close that fails has still released its descriptor, so it is not retried).
+    const kept = join(d2, 'kept.txt');
+    writeFileSync(kept, 'original');
+    let closes = 0;
+    const closeFails = { ...REPLACE_IO, closeSync: (fd) => { closes++; closeSync(fd); throw Object.assign(new Error('EIO: i/o error, close'), { code: 'EIO' }); } };
+    const cErr = await throws(() => replaceFile(kept, Buffer.from('changed'), 0o100644, closeFails));
+    check('a close that fails: thrown once, the file as it was, no copy left', cErr?.code === 'EIO' && closes === 1 && readFileSync(kept, 'utf8') === 'original' && !readdirSync(d2).some((n) => n.startsWith('.fix-')), `${cErr} closes=${closes}`);
+    const writeFails = { ...REPLACE_IO, writeFileSync: () => { throw Object.assign(new Error('ENOSPC: no space left on device, write'), { code: 'ENOSPC' }); } };
+    const wErr = await throws(() => replaceFile(kept, Buffer.from('changed'), 0o100644, writeFails));
+    check('a write that fails: the same', wErr?.code === 'ENOSPC' && readFileSync(kept, 'utf8') === 'original' && !readdirSync(d2).some((n) => n.startsWith('.fix-')), String(wErr));
+    const renameFails = { ...REPLACE_IO, renameSync: () => { throw Object.assign(new Error('EXDEV: cross-device link not permitted, rename'), { code: 'EXDEV' }); } };
+    const rErr = await throws(() => replaceFile(kept, Buffer.from('changed'), 0o100644, renameFails));
+    check('a rename that fails: the same', rErr?.code === 'EXDEV' && readFileSync(kept, 'utf8') === 'original' && !readdirSync(d2).some((n) => n.startsWith('.fix-')), String(rErr));
     rmSync(d2, { recursive: true, force: true });
   }
   check('unfinished prefixes the reason the dispatcher reads', unfinished(' the budget ran out. ') === `${UNFINISHED_PREFIX} the budget ran out.` && UNFINISHED_PREFIX === 'The fix run could not finish:');
