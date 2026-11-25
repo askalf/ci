@@ -55,6 +55,29 @@
       }
     },
     {
+      "name": "fix_edit",
+      "description": "Change part of a file in the checkout: old_text, copied exactly from fix_read without the line numbers and the tab, must occur once in the file, and is replaced by new_text. Take enough lines around the change for old_text to occur once. Use this for every change to a file that exists. The same paths as fix_write.",
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "path",
+          "old_text",
+          "new_text"
+        ],
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "old_text": {
+            "type": "string"
+          },
+          "new_text": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    {
       "name": "fix_list",
       "description": "List a directory of the checkout (directories end with /).",
       "input_schema": {
@@ -69,7 +92,7 @@
     },
     {
       "name": "fix_read",
-      "description": "Read numbered lines of a file in the checkout. At most 400 lines per call.",
+      "description": "Read numbered lines of a file in the checkout: at most 400 lines and 24000 characters per call. The result says where to read on.",
       "input_schema": {
         "type": "object",
         "required": [
@@ -131,7 +154,7 @@
     },
     {
       "name": "fix_write",
-      "description": "Write a whole file in the checkout (created if absent). Read it first and write it back complete. Never under .git/ or node_modules/; under .github/ only the files the brief lists as writable there.",
+      "description": "Write a whole file in the checkout (created if absent). For a new file; to change a file that exists, use fix_edit. Never under .git/ or node_modules/; under .github/ only the files the brief lists as writable there.",
       "input_schema": {
         "type": "object",
         "required": [

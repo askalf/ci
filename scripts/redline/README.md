@@ -266,11 +266,18 @@ checks that the checkout is exactly the reviewed head, then `fix.mjs`:
   `yarn --version` reports, `--skip-builds` in 2 and `--mode=skip-build` from 3, since a
   `dependenciesMeta` `built: true` overrides `YARN_ENABLE_SCRIPTS`; an unreadable version installs
   nothing);
-- lets the model `fix_list`, `fix_read`, `fix_search`, `fix_write` (inside the checkout; under
+- lets the model `fix_list`, `fix_read`, `fix_search`, `fix_edit` and `fix_write` (inside the checkout; under
   `.github/` only a file the pull request itself changes, and never `redline*.yml`, the review's
   and this lane's own workflows; never a `.gitattributes`, never a file the reviewed head marks `redline-protected`
   in `.gitattributes`, such as captured payloads and vendored code; the marks are read from that
-  commit, so nothing the run does to `.gitattributes` lifts them) and `fix_run` an allowlist only: the package.json `test`, `lint`, `typecheck`
+  commit, so nothing the run does to `.gitattributes` lifts them). `fix_edit` replaces one exact
+  piece of a file that exists (the text must occur once, as it is on disk); `fix_write` writes a
+  whole file. The model is reached through dario, which cuts a tool result over 30,000 characters
+  and removes some product names from the text it carries, so `fix_read` returns at most 400
+  lines and 24,000 characters and says where to read on, and `fix_read` and `fix_search` name the
+  lines they show with words removed. `fix_write` never rewrites a file with such a line, and
+  `fix_edit` cannot match one, so text the model never saw is never written back. And
+  `fix_run` an allowlist only: the package.json `test`, `lint`, `typecheck`
   and `build` scripts and `node <file>`, without a shell, in a scrubbed environment, and
   `fix_describe` replace the PR description for a finding on it (whole text, no attribution, no
   em dashes, never when the brief showed only part of the current one);
@@ -294,7 +301,10 @@ checks that the checkout is exactly the reviewed head, then `fix.mjs`:
 
 Limits: 40 turns, 30 files, 400 KB of diff; past any of them the outcome is `refused`. Wall time
 counts from the start of the run, install included: at 45 minutes the model must call `finish_fix`,
-and no command, test or model call starts past 52 minutes; a run out of time is `refused`, never `fixed`. A
+and no command, test or model call starts past 52 minutes; a run out of time is `refused`, never `fixed`.
+A run that ends on its budget (out of turns or time, or a refusal made only once the budget was
+spent) has not judged the findings: its notes start with `The fix run could not finish:`, which
+the dispatcher reads as a run that died, so the head is dispatched once more, then rests. A
 job killed at its 60-minute timeout still uploads a `fix.json` that says so. The job exits 0 for
 `fixed`, and for `no_change` with `description: true` (the fix was a new description, which the
 caller applies); 1 for anything else. `fix-tools.json` is the fixer's `TOOLS` as a file, pinned in `truecopy.lock` like the

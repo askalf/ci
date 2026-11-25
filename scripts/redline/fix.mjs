@@ -161,6 +161,7 @@ export const PACKAGE_MANAGERS = ['npm', 'pnpm', 'yarn', 'bun'];
 export const LIMITS = {
   turns: 40, forceFinishAt: 36, timeMs: 45 * 60_000, hardMs: 52 * 60_000, files: 30, diffBytes: 400_000, fileBytes: 1_000_000,
   writeBytes: 400_000, runDefaultS: 600, runMaxS: 900, installS: 600, runOutChars: 16_000,
+  readLines: 400, readChars: 24_000,
   maxTokens: 16_000, modelTimeoutMs: 240_000, textOnlyTurns: 3, testBounces: 1,
   notesChars: 6_000, bodyChars: 8_000, diffChars: 120_000, subjectChars: 72, descriptionChars: 20_000,
 };
@@ -848,6 +849,104 @@ export function exitCode(record) {
   return record.outcome === 'fixed' || (record.outcome === 'no_change' && record.description === true) ? 0 : 1;
 }
 
+// ---------- what the model is shown ----------
+
+// The lane's model calls go through dario, which changes what it carries in two ways
+// (src/cc-template.ts there): a tool result over 30,000 characters is cut, and the product names in
+// its CONTENT_FRAMEWORK_PATTERNS are removed from every message text, tool results included, unless
+// the name sits in a path or a slug. So fix_read and fix_search keep a result under the cut
+// (LIMITS.readChars) and name the lines they show with words removed: on disk those lines are not
+// what the model saw, so fix_edit cannot match them and fix_write does not rewrite their file.
+// 2026-11-25, dario#1936: a default read of src/cc-template.ts (1,000 lines, 54,000 characters)
+// arrived cut at about line 550, with ten lines missing words, and since a whole-file write was the
+// only way to change a file, the fixer spent its turns searching and refused.
+export const CONNECTION_CUT_CHARS = 30_000;
+const CONNECTION_REMOVES = [
+  /\b(roo[- ]?cline|roo[- ]?code|big[- ]?agi|claude[- ]?bridge)\b/gi,
+  /\b(librechat|typingmind)\b/gi,
+];
+
+/** True when dario removes a word from this text on its way to the model; a word after . / \ - _ or before / \ stays, as there. */
+export function alteredInTransit(text) {
+  const s = String(text ?? '');
+  for (const re of CONNECTION_REMOVES) {
+    for (const m of s.matchAll(re)) {
+      const before = m.index > 0 ? s[m.index - 1] : '';
+      const after = s[m.index + m[0].length] ?? '';
+      if (before && './\\-_'.includes(before)) continue;
+      if (after === '/' || after === '\\') continue;
+      return true;
+    }
+  }
+  return false;
+}
+
+/** The 1-based numbers of the lines of text that alteredInTransit changes. */
+export function alteredLines(text) {
+  const out = [];
+  String(text ?? '').split('\n').forEach((line, i) => { if (alteredInTransit(line)) out.push(i + 1); });
+  return out;
+}
+
+const ALTERED_NOTE = 'shown with words removed on the way to you, and whole on disk';
+/** "line 3" or "lines 3, 9", at most 20 named. */
+const namedLines = (nums) => `${nums.length > 1 ? 'lines' : 'line'} ${nums.slice(0, 20).join(', ')}${nums.length > 20 ? ', ...' : ''}`;
+const isAre = (nums) => (nums.length > 1 ? 'are' : 'is');
+
+/** fix_read: redline_read's numbered lines, at most LIMITS.readLines and LIMITS.readChars, naming the lines alteredInTransit changes. */
+export function fixRead(root, input = {}) {
+  const start = Math.max(1, Math.floor(Number(input.start_line)) || 1);
+  const end = Math.max(start, Math.min(Math.floor(Number(input.end_line)) || Infinity, start + LIMITS.readLines - 1));
+  const raw = String(readTool(root, 'redline_read', { path: input.path, start_line: start, end_line: end }));
+  if (raw.startsWith('error:')) return raw;
+  const rows = raw.split('\n');
+  const total = rows.length && /^\(file has \d+ lines\)$/.test(rows.at(-1)) ? rows.pop() : '';
+  let out = '';
+  let last = start - 1;
+  let cut = false;
+  const altered = [];
+  for (const row of rows) {
+    const m = /^(\d+)\t/.exec(row);
+    if (!m) continue; // redline_read's own cap note: this cap is lower
+    if (out.length + row.length + 1 > LIMITS.readChars) {
+      if (!out) {
+        // One line longer than a read: its start, and where it stops.
+        out = `${row.slice(0, LIMITS.readChars - 200)}\n(line ${m[1]} goes on past what one read shows; take fix_edit's old_text from the part above)\n`;
+        if (alteredInTransit(row.slice(m[0].length, LIMITS.readChars - 200))) altered.push(Number(m[1]));
+        last = Number(m[1]);
+      }
+      cut = true;
+      break;
+    }
+    out += `${row}\n`;
+    last = Number(m[1]);
+    if (alteredInTransit(row.slice(m[0].length))) altered.push(last);
+  }
+  if (cut) out += `(output cap reached at line ${last}: read on with start_line ${last + 1})\n`;
+  if (altered.length) {
+    out += `(${namedLines(altered)}: ${ALTERED_NOTE}. Never put such a line in fix_edit's old_text: take old_text from the lines around it. Change this file with fix_edit, not fix_write.)\n`;
+  }
+  return `${out}${total}`;
+}
+
+/** fix_search: redline_search's matches, kept under LIMITS.readChars, naming the matches alteredInTransit changes. */
+export function fixSearch(root, input = {}) {
+  const raw = String(readTool(root, 'redline_search', input));
+  if (raw.startsWith('error:') || raw === '(no matches)') return raw;
+  let out = '';
+  let cut = false;
+  const altered = [];
+  for (const row of raw.split('\n')) {
+    if (out.length + row.length + 1 > LIMITS.readChars) { cut = true; break; }
+    out += `${row}\n`;
+    const m = /^(.+?:\d+): /.exec(row);
+    if (m && alteredInTransit(row.slice(m[0].length))) altered.push(m[1]);
+  }
+  if (cut) out += '(output cap reached: narrow the pattern or the path)\n';
+  if (altered.length) out += `(${altered.join(', ')}: ${ALTERED_NOTE})\n`;
+  return out.trimEnd();
+}
+
 // ---------- tools ----------
 
 // Every tool name is fix_* (or finish_fix), never a common tool name. dario maps a non-Claude-Code
@@ -857,11 +956,13 @@ export function exitCode(record) {
 export const TOOLS = [
   { name: 'fix_list', description: 'List a directory of the checkout (directories end with /).',
     input_schema: { type: 'object', properties: { path: { type: 'string', description: 'Directory relative to the repo root; default the root.' } } } },
-  { name: 'fix_read', description: 'Read numbered lines of a file in the checkout. At most 400 lines per call.',
+  { name: 'fix_read', description: `Read numbered lines of a file in the checkout: at most ${LIMITS.readLines} lines and ${LIMITS.readChars} characters per call. The result says where to read on.`,
     input_schema: { type: 'object', required: ['path'], properties: { path: { type: 'string' }, start_line: { type: 'integer', minimum: 1 }, end_line: { type: 'integer', minimum: 1 } } } },
   { name: 'fix_search', description: 'Search the checkout with a JavaScript regular expression. At most 80 matches.',
     input_schema: { type: 'object', required: ['pattern'], properties: { pattern: { type: 'string' }, path: { type: 'string', description: 'Directory or file to search; default the root.' } } } },
-  { name: 'fix_write', description: 'Write a whole file in the checkout (created if absent). Read it first and write it back complete. Never under .git/ or node_modules/; under .github/ only the files the brief lists as writable there.',
+  { name: 'fix_edit', description: 'Change part of a file in the checkout: old_text, copied exactly from fix_read without the line numbers and the tab, must occur once in the file, and is replaced by new_text. Take enough lines around the change for old_text to occur once. Use this for every change to a file that exists. The same paths as fix_write.',
+    input_schema: { type: 'object', required: ['path', 'old_text', 'new_text'], properties: { path: { type: 'string' }, old_text: { type: 'string' }, new_text: { type: 'string' } } } },
+  { name: 'fix_write', description: 'Write a whole file in the checkout (created if absent). For a new file; to change a file that exists, use fix_edit. Never under .git/ or node_modules/; under .github/ only the files the brief lists as writable there.',
     input_schema: { type: 'object', required: ['path', 'content'], properties: { path: { type: 'string' }, content: { type: 'string' } } } },
   { name: 'fix_run', description: `Run one allowed command in the checkout, without a shell; stdout and stderr together, capped. Default timeout ${LIMITS.runDefaultS}s, at most ${LIMITS.runMaxS}s. The allowed commands are listed in the brief.`,
     input_schema: { type: 'object', required: ['command'], properties: { command: { type: 'string' }, timeout_seconds: { type: 'integer', minimum: 1, maximum: LIMITS.runMaxS } } } },
@@ -875,6 +976,13 @@ export const TOOLS = [
       tests_run: { type: 'string', description: 'The test command you ran last and its result.' },
       reason: { type: 'string', description: 'refused: why no finding can be fixed in this PR.' } } } },
 ];
+
+// A run that ended on its budget, or on a model that stopped calling tools, has not judged the
+// findings. Its notes start with the prefix the dispatcher reads (FIX_TRANSIENT_PREFIX in askalf/platform
+// apps/ci/src/runtime/fix-ci.ts), so the head is dispatched once more, then rests. A refusal the model
+// made before the budget ran out is its judgment on the findings and is reported as it is.
+export const UNFINISHED_PREFIX = 'The fix run could not finish:';
+export const unfinished = (why) => `${UNFINISHED_PREFIX} ${String(why ?? '').trim()}`;
 
 export const FINISH_REQUIRED = 'The budget is spent. Your next response must be a finish_fix tool call with outcome, subject, summary and '
   + 'tests_run, describing what you changed so far. Do not call any other tool and do not answer in text.';
@@ -968,7 +1076,7 @@ export async function runLoop(ctx, brief) {
         continue;
       }
       const r = await ctx.finalize(u.input ?? {});
-      if (r.sub) return { sub: r.sub, turns };
+      if (r.sub) return { sub: r.sub, turns, forced: force };
       ctx.log?.(`  finish_fix bounced: ${String(r.error).split('\n')[0]}`);
       out.push({ type: 'tool_result', tool_use_id: u.id, is_error: true, content: r.error });
     }
@@ -992,7 +1100,7 @@ export function buildBrief({ pr, files, headSha, review, items, plan, installNot
       ? `Under .github/ you may write only these files, which this PR already changes: ${githubFiles.join(', ')}. No other file there, and no new file there.`
       : 'Nothing under .github/ is written in this run: the PR changes no file there that this lane may edit.',
     ...(protectedFiles.length
-      ? ['', `Captured data, marked ${PROTECTED_ATTR} (never written by fix_write): ${protectedFiles.join(', ')}. A finding about the text inside one of these is answered in the summary, not by an edit.`]
+      ? ['', `Captured data, marked ${PROTECTED_ATTR} (never written by fix_edit or fix_write): ${protectedFiles.join(', ')}. A finding about the text inside one of these is answered in the summary, not by an edit.`]
       : []),
     '', `Review summary: ${review.summary || '(none)'}`,
     '', `Findings (${findings.length}):`, ...findings.map(formatFinding),
@@ -1411,23 +1519,68 @@ async function answerReview(ctx) {
 
     const tool = (name, input) => {
       if (name === 'fix_list') return readTool(root, 'redline_list', input);
-      if (name === 'fix_read') return readTool(root, 'redline_read', input);
-      if (name === 'fix_search') return readTool(root, 'redline_search', input);
+      if (name === 'fix_read') return fixRead(root, input);
+      if (name === 'fix_search') return fixSearch(root, input);
+      // Where fix_edit and fix_write may write: { abs, rel } or { error }. Throws what safeWritePath throws.
+      const target = (path) => {
+        const abs = safeWritePath(root, path, github);
+        const rel = relative(realpathSync(root), abs).split(sep).join('/');
+        const landing = landingPath(root, abs);
+        const marked = protectedPaths(attrs, [...new Set([rel, landing])]);
+        if (marked.has(rel) || marked.has(landing)) return { error: `error: ${landing} is marked ${PROTECTED_ATTR} in .gitattributes: it is captured data and is never edited here. Leave it as it is and say in the summary that this finding is about data the fix lane does not change` };
+        const now = staged().keep;
+        if (!now.includes(rel) && now.length >= LIMITS.files) return { error: `error: the fix already changes ${now.length} files, the limit; no further file is written` };
+        return { abs, rel };
+      };
+      if (name === 'fix_edit') {
+        try {
+          const t = target(input.path);
+          if (t.error) return t.error;
+          if (!existsSync(t.abs)) return `error: ${t.rel} does not exist; write a new file with fix_write`;
+          if (statSync(t.abs).size > LIMITS.fileBytes) return `error: ${t.rel} is larger than ${LIMITS.fileBytes} bytes`;
+          const buf = readFileSync(t.abs);
+          if (buf.includes(0)) return `error: ${t.rel} is a binary file`;
+          const text = buf.toString('utf8');
+          let oldText = String(input.old_text ?? '');
+          let newText = String(input.new_text ?? '');
+          if (!oldText) return 'error: old_text is empty; copy the lines to change from fix_read';
+          const count = (needle) => { let n = 0; for (let i = text.indexOf(needle); i !== -1; i = text.indexOf(needle, i + needle.length)) n++; return n; };
+          let n = count(oldText);
+          // A file with CRLF line ends: the lines as read, joined the way the file joins them.
+          if (n === 0 && text.includes('\r\n') && !oldText.includes('\r')) {
+            const crlf = (x) => x.replace(/\n/g, '\r\n');
+            if (count(crlf(oldText)) > 0) { oldText = crlf(oldText); newText = crlf(newText); n = count(oldText); }
+          }
+          if (n === 0) {
+            const shown = alteredLines(text);
+            return `error: old_text is not in ${t.rel}. Read the lines again with fix_read and copy them exactly, without the line numbers and the tab${shown.length ? `; ${namedLines(shown)} of this file ${isAre(shown)} ${ALTERED_NOTE}, so old_text cannot include ${shown.length > 1 ? 'them' : 'it'}` : ''}`;
+          }
+          if (n > 1) return `error: old_text occurs ${n} times in ${t.rel}; take more of the lines around the change so it occurs once`;
+          const at = text.indexOf(oldText);
+          const next = text.slice(0, at) + newText + text.slice(at + oldText.length);
+          if (Buffer.byteLength(next) > LIMITS.writeBytes) return `error: the file would be larger than ${LIMITS.writeBytes} bytes`;
+          writeFileSync(t.abs, next);
+          written.add(t.rel);
+          const from = text.slice(0, at).split('\n').length;
+          return `edited ${t.rel}: lines ${from}-${from + oldText.split('\n').length - 1} replaced by ${newText.split('\n').length} line(s); the file has ${next.split('\n').length} lines`;
+        } catch (e) { return `error: ${e.message}`; }
+      }
       if (name === 'fix_write') {
         try {
-          const abs = safeWritePath(root, input.path, github);
           const content = String(input.content ?? '');
           if (Buffer.byteLength(content) > LIMITS.writeBytes) return `error: content is larger than ${LIMITS.writeBytes} bytes`;
-          const rel = relative(realpathSync(root), abs).split(sep).join('/');
-          const landing = landingPath(root, abs);
-          const marked = protectedPaths(attrs, [...new Set([rel, landing])]);
-          if (marked.has(rel) || marked.has(landing)) return `error: ${landing} is marked ${PROTECTED_ATTR} in .gitattributes: it is captured data and is never edited here. Leave it as it is and say in the summary that this finding is about data the fix lane does not change`;
-          const now = staged().keep;
-          if (!now.includes(rel) && now.length >= LIMITS.files) return `error: the fix already changes ${now.length} files, the limit; no further file is written`;
-          mkdirSync(dirname(abs), { recursive: true });
-          writeFileSync(abs, content);
-          written.add(rel);
-          return `wrote ${rel} (${content.split('\n').length} lines)`;
+          const t = target(input.path);
+          if (t.error) return t.error;
+          // A file whose lines reach the model with words removed is never written back whole: what
+          // the model saw of those lines is not what is on disk.
+          if (existsSync(t.abs) && statSync(t.abs).size <= LIMITS.fileBytes) {
+            const shown = alteredLines(readFileSync(t.abs, 'utf8'));
+            if (shown.length) return `error: ${namedLines(shown)} of ${t.rel} ${isAre(shown)} ${ALTERED_NOTE}, so writing the file whole would change ${shown.length > 1 ? 'them' : 'it'}; change the file with fix_edit`;
+          }
+          mkdirSync(dirname(t.abs), { recursive: true });
+          writeFileSync(t.abs, content);
+          written.add(t.rel);
+          return `wrote ${t.rel} (${content.split('\n').length} lines)`;
         } catch (e) { return `error: ${e.message}`; }
       }
       if (name === 'fix_describe') {
@@ -1485,7 +1638,7 @@ async function answerReview(ctx) {
       }, brief);
     } catch (e) {
       // Past hardMs no model call starts: nothing is reported as fixed without the model finishing.
-      if (e instanceof OutOfTime) return refuse(`The time budget was spent before the fix finished (${e.message}).`, { turns: calls });
+      if (e instanceof OutOfTime) return refuse(unfinished(`the time budget was spent before the fix finished (${e.message}).`), { turns: calls });
       throw e;
     }
     const turns = loop.turns;
@@ -1493,9 +1646,9 @@ async function answerReview(ctx) {
       command: tests.command, exit_code: tests.exit, summary: summariseTests(tests.out),
       ...(tests.exit !== 0 ? { failing: failingTests(tests.out) } : {}),
     } : null;
-    if (loop.refused) return refuse(loop.refused, { turns, tests: testsRecord });
+    if (loop.refused) return refuse(unfinished(`${loop.refused}.`), { turns, tests: testsRecord });
     const sub = loop.sub;
-    if (sub.outcome === 'refused') return refuse(sub.reason, { turns, tests: testsRecord });
+    if (sub.outcome === 'refused') return refuse(loop.forced ? unfinished(`the budget was spent before a fix was made. ${sub.reason}`) : sub.reason, { turns, tests: testsRecord });
 
     const st = staged();
     const described = description !== null;
@@ -1611,7 +1764,7 @@ async function main() {
   let description = null;
   try { ({ record, description = null } = await runFix(ctx)); } catch (e) {
     console.error(`::error::the fix run could not finish: ${maskSecrets(e.message, hidden)}`);
-    record = fixRecord({ ...ctx, outcome: 'refused', notes: renderNotes({ outcome: 'refused', reason: `The fix run could not finish: ${maskSecrets(e.message, hidden)}` }) });
+    record = fixRecord({ ...ctx, outcome: 'refused', notes: renderNotes({ outcome: 'refused', reason: unfinished(maskSecrets(e.message, hidden)) }) });
   }
   saveFix(out, record, description);
   const line = `Redline fix: ${record.outcome}${record.new_head ? ` at ${record.new_head}` : ''}${record.files.length ? ` (${record.files.length} file${record.files.length === 1 ? '' : 's'})` : ''}`;
