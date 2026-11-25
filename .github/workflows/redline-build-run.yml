@@ -185,7 +185,7 @@ jobs:
           '
 
       - name: Fetch the build script from ci-repo
-        uses: askalf/ci/actions/checkout-with-retry@b7aa6c761d009fff5c2ef6e416c3c95c6d9011b9 # main 2026-11-25, askalf/ci#242
+        uses: askalf/ci/actions/checkout-with-retry@12840236ea760c3fcc1b846abc1f852ab9e235b2 # main 2026-11-25, askalf/ci#244
         with:
           repository: ${{ inputs.ci-repo }}
           ref: ${{ inputs.redline-ref }}
@@ -197,7 +197,7 @@ jobs:
       # Fifteen commits deep: the brief shows the model the base's last subjects, whose style the
       # new commit's subject follows.
       - name: Check out the base to build on
-        uses: askalf/ci/actions/checkout-with-retry@b7aa6c761d009fff5c2ef6e416c3c95c6d9011b9 # main 2026-11-25, askalf/ci#242
+        uses: askalf/ci/actions/checkout-with-retry@12840236ea760c3fcc1b846abc1f852ab9e235b2 # main 2026-11-25, askalf/ci#244
         with:
           ref: ${{ inputs.base }}
           path: work
@@ -373,7 +373,7 @@ jobs:
           '
 
       - name: Fetch the build script from ci-repo
-        uses: askalf/ci/actions/checkout-with-retry@b7aa6c761d009fff5c2ef6e416c3c95c6d9011b9 # main 2026-11-25, askalf/ci#242
+        uses: askalf/ci/actions/checkout-with-retry@12840236ea760c3fcc1b846abc1f852ab9e235b2 # main 2026-11-25, askalf/ci#244
         with:
           repository: ${{ inputs.ci-repo }}
           ref: ${{ inputs.redline-ref }}
@@ -384,7 +384,7 @@ jobs:
 
       # The base again, as deep as the build job had it, so the candidate's one commit lands on it.
       - name: Check out the base to verify on
-        uses: askalf/ci/actions/checkout-with-retry@b7aa6c761d009fff5c2ef6e416c3c95c6d9011b9 # main 2026-11-25, askalf/ci#242
+        uses: askalf/ci/actions/checkout-with-retry@12840236ea760c3fcc1b846abc1f852ab9e235b2 # main 2026-11-25, askalf/ci#244
         with:
           ref: ${{ inputs.base }}
           path: work
