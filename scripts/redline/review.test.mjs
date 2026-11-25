@@ -2278,11 +2278,13 @@ console.log('\n  earlier verdicts from the runs, and the round cap');
       // 100 or more runs made in one second: a bound at that second would list the same runs
       // again, so the next listing is the next page of the same query.
       const crowd = (count) => Array.from({ length: count }, (_, i) => run(700000 + i, { display_title: `Redline review askalf/r#8 @ ${hd(800000 + i)}`, created_at: when(200000) }));
+      const T = when(200000);
       const { ctx, calls } = worldOf(mine(4), crowd(100));
       const r = await runReview(ctx);
-      const [q, q2] = calls.lists.map((l) => new URLSearchParams(l));
-      check('a full listing made in one second, with this PR\'s four rounds just older: the next page of the same query is asked for, and all four count, capped',
-        r.outcome === 'capped' && r.rounds === 4 && calls.lists.length === 2 && q2.get('page') === '2' && q2.get('created') === q.get('created'));
+      const [, w2, w3] = calls.lists.map((l) => new URLSearchParams(l));
+      check('a full listing made in one second, with this PR\'s four rounds just older: that second is paged from page 2, then the runs made before it are listed, and all four count, capped',
+        r.outcome === 'capped' && r.rounds === 4 && calls.lists.length === 3 && w2.get('page') === '2' && w2.get('created') === `${T}..${T}`
+        && !w3.has('page') && w3.get('created') === `2026-11-08T00:00:00Z..${new Date(Date.parse(T) - 1000).toISOString().replace(/\.\d{3}Z$/, 'Z')}`);
       // One of this PR's rounds inside a crowded second, past the first 100 runs made in it.
       const rows = [{ id: 9990, head: hd(999), at: when(200000), more: '' }, ...mine(3)];
       const { ctx: c2, calls: k2 } = worldOf(rows, crowd(150));
@@ -2293,8 +2295,27 @@ console.log('\n  earlier verdicts from the runs, and the round cap');
       const { ctx: c3, calls: k3 } = worldOf(mine(4), [...crowd(100), ...others(150).map((o) => ({ ...o, created_at: new Date(Date.parse(o.created_at) - 3_600_000).toISOString() }))]);
       const r3 = await runReview(c3);
       const q3 = k3.lists.map((l) => new URLSearchParams(l));
-      check('after paging through a crowded second, the next bound is listed from page 1: all four rounds count, capped',
-        r3.outcome === 'capped' && r3.rounds === 4 && q3.length === 3 && q3[1].get('page') === '2' && !q3[2].has('page') && /\.\./.test(q3[2].get('created')));
+      check('after a crowded second, the listings of older runs carry no page number: all four rounds count, capped',
+        r3.outcome === 'capped' && r3.rounds === 4 && q3.length === 4 && q3[1].get('page') === '2' && [q3[2], q3[3]].every((x) => !x.has('page') && /\.\./.test(x.get('created'))));
+      // A run of the crowded second leaves the list (re-run) before that second is paged: only
+      // that second is paged by number, so the older rounds are all still listed.
+      const c4 = crowd(100);
+      const { ctx: cc4, calls: k4 } = worldOf(mine(4), c4, { between: () => { c4[0].status = 'in_progress'; c4[0].conclusion = null; } });
+      const r4 = await runReview(cc4);
+      check('a run of a crowded second re-run before that second is paged: the four older rounds all count, capped', r4.outcome === 'capped' && r4.rounds === 4 && k4.model.length === 0);
+      // A crowded second at the very time the PR opened: nothing can be older, so nothing older is asked for.
+      const atOpen = Array.from({ length: 100 }, (_, i) => run(710000 + i, { display_title: `Redline review askalf/r#8 @ ${hd(810000 + i)}`, created_at: '2026-11-08T00:00:00Z' }));
+      const { ctx: c5, calls: k5 } = worldOf([], atOpen);
+      await runReview(c5);
+      check('a crowded second at the time the PR opened is paged, and nothing before it is asked for', k5.lists.length === 2);
+    }
+    {
+      const lines = [];
+      let listings = 0;
+      const rows = Array.from({ length: 100 }, (_, i) => ({ id: 720000 + i, status: 'completed', conclusion: 'success', event: 'workflow_dispatch', path: '.github/workflows/redline.yml', display_title: 'x', head_branch: 'main' }));
+      const fetchRuns = async () => { listings++; return { ok: true, status: 200, headers: new Headers(), json: async () => ({ workflow_runs: rows }), text: async () => '' }; };
+      await reviewModule.earlierVerdicts({ repo: 'askalf/r', pr: 7, readToken: 'read', fetch: fetchRuns, log: (l) => lines.push(l) }, { pr: { base: { repo: { default_branch: 'main' } } } });
+      check('a full listing with no creation time on any run ends the search, logged', listings === 1 && lines.some((l) => l.includes('no creation time')));
     }
     {
       // The list moves between two pages: the run last on page 1 is first on page 2 too. Counted

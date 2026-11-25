@@ -741,13 +741,18 @@ export async function ghBytes(ctx, path, maxBytes = LIMITS.artifactBytes) {
  * before it returned, not for its next page. A page number counts from the newest run, so a run
  * that leaves the list between two listings (re-run, and so not finished, or deleted) would move
  * the run after it past the page boundary unread. The bound is inclusive, so the runs made in
- * that second are listed again, and a run is counted once, by its id. When every run of a full
- * listing was made in one second, a bound at that second would list the same runs again, so the
- * next listing is the next page of the same query instead: only among 100 or more runs made in
- * one second are runs paged through by number. A listing that fails ends the search,
- * logged, and the runs found before it are still read. A round is a head, and a head can have
- * more than one run (a re-read, a second dispatch), so a window of N runs can hold fewer than N
- * rounds.
+ * that second are listed again, and a run is counted once, by its id.
+ *
+ * When every run of a full listing was made in one second, a bound at that second would list the
+ * same runs again. So that one second is paged through by number (the runs made at exactly that
+ * second, from page 2) until a page is not full, and the listing after it asks for the runs made
+ * before that second. Only there, among 100 or more runs made in one second, does a page number
+ * decide what is listed, so a run leaving that second can skip only another run made in it. A full
+ * listing with no creation time on any run ends the search, logged.
+ *
+ * A listing that fails ends the search, logged, and the runs found before it are still read. A
+ * round is a head, and a head can have more than one run (a re-read, a second dispatch), so a
+ * window of N runs can hold fewer than N rounds.
  *
  * An artifact that is missing, expired, malformed, or for another PR or head is passed over; an
  * artifact read that fails leaves the rest unread and is logged, never a failed review.
@@ -762,18 +767,26 @@ export async function earlierVerdicts(ctx, { pr }) {
     const since = typeof pr?.created_at === 'string' ? pr.created_at : '';
     const runs = [];
     const listedIds = new Set();
+    // A creation time to the second, as GitHub writes one.
+    const isoSecond = (ms) => new Date(ms).toISOString().replace(/\.\d{3}Z$/, 'Z');
     let before = '';
+    let second = '';
     let page = 1;
+    let ended = false;
     for (let listing = 1; listing <= LIMITS.runPages && runs.length < LIMITS.earlierRuns; listing++) {
       const q = new URLSearchParams({ event: 'workflow_dispatch', status: 'completed', branch: defaultBranch, per_page: '100' });
-      if (before) q.set('created', since ? `${since}..${before}` : `<=${before}`);
+      if (second) {
+        q.set('created', `${second}..${second}`);
+        q.set('page', String(page));
+      }
+      else if (before) q.set('created', since ? `${since}..${before}` : `<=${before}`);
       else if (since) q.set('created', `>=${since}`);
-      if (page > 1) q.set('page', String(page));
       let listed;
       try {
         listed = await gh(ctx, `/repos/${repo}/actions/workflows/redline.yml/runs?${q}`);
       } catch (e) {
         ctx.log?.(`earlier verdicts: listing ${listing} of runs failed (${e.message}); the ${runs.length} run(s) of this PR found before it are read`);
+        ended = true;
         break;
       }
       const rows = Array.isArray(listed?.workflow_runs) ? listed.workflow_runs : [];
@@ -784,18 +797,42 @@ export async function earlierVerdicts(ctx, { pr }) {
         fresh.push(r);
       }
       runs.push(...reviewRunsOf(fresh, { repo, pr: n, defaultBranch }));
-      if (rows.length < 100) break;
+      if (second) {
+        // A crowded second is paged until a page is not full; then the runs made before it.
+        if (rows.length < 100) {
+          const prior = Date.parse(second) - 1000;
+          second = '';
+          if (since && prior < Date.parse(since)) {
+            ended = true;
+            break;
+          }
+          before = isoSecond(prior);
+        } else {
+          page += 1;
+        }
+        continue;
+      }
+      if (rows.length < 100) {
+        ended = true;
+        break;
+      }
       const times = rows.map((r) => Date.parse(r?.created_at)).filter(Number.isFinite);
+      if (!times.length) {
+        ctx.log?.(`earlier verdicts: listing ${listing} of runs gave no creation time to list older runs from; this PR's runs older than those, if any, are not read`);
+        ended = true;
+        break;
+      }
       const oldestAt = Math.min(...times);
       const newestAt = Math.max(...times);
-      if (!times.length || oldestAt === newestAt) {
-        page += 1;
+      const at = rows.find((r) => Date.parse(r?.created_at) === oldestAt).created_at;
+      if (oldestAt === newestAt) {
+        second = at;
+        page = 2;
       } else {
-        before = rows.find((r) => Date.parse(r?.created_at) === oldestAt).created_at;
-        page = 1;
+        before = at;
       }
-      if (listing === LIMITS.runPages && runs.length < LIMITS.earlierRuns) ctx.log?.(`earlier verdicts: listed runs ${LIMITS.runPages} times, as many as are made; this PR's runs older than those, if any, are not read`);
     }
+    if (!ended && runs.length < LIMITS.earlierRuns) ctx.log?.(`earlier verdicts: listed runs ${LIMITS.runPages} times, as many as are made; this PR's runs older than those, if any, are not read`);
     for (const run of runs.slice(0, LIMITS.earlierRuns)) {
       const arts = await gh(ctx, `/repos/${repo}/actions/runs/${run.id}/artifacts`);
       const a = (arts?.artifacts ?? []).find((x) => x?.name === VERDICT_ARTIFACT && x.expired !== true && Number.isInteger(x.id));
