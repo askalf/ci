@@ -452,7 +452,7 @@ console.log('\n  what the model is shown');
     writeFileSync(join(d2, 'blob.bin'), Buffer.alloc(LIMITS.readFileBytes + 1_000));
     check('a large binary is refused from its first 8 KB', fixRead(d2, { path: 'blob.bin' }) === 'error: binary file, not readable as text');
     writeFileSync(join(d2, 'big.log'), Buffer.alloc(LIMITS.readFileBytes + 1_000, 'a'));
-    check('a text file past readFileBytes is refused with the way to its lines', /^error: the file is \d+ bytes, more than fix_read reads \(\d+\); find the lines with fix_search$/.test(fixRead(d2, { path: 'big.log' })));
+    check('a text file past readFileBytes is refused, and the error says the lane does not change it', /^error: the file is \d+ bytes, more than fix_read reads \(\d+\), and the fix lane does not change a file this large$/.test(fixRead(d2, { path: 'big.log' })));
     // replaceFile: all or nothing. A rename onto a directory fails; the directory stays and no
     // temporary file is left beside it.
     mkdirSync(join(d2, 'dir'));
@@ -464,6 +464,23 @@ console.log('\n  what the model is shown');
     replaceFile(join(d2, 'run.sh'), Buffer.from('#!/bin/sh\necho b\n'), statSync(join(d2, 'run.sh')).mode);
     check('a replace lands whole, keeps the mode, and leaves no temporary file', readFileSync(join(d2, 'run.sh'), 'utf8') === '#!/bin/sh\necho b\n'
       && (process.platform === 'win32' || (statSync(join(d2, 'run.sh')).mode & 0o777) === 0o755) && !readdirSync(d2).some((n) => n.includes('.fix-')));
+    if (process.platform !== 'win32') {
+      // A set-user-ID bit the run account left on the old file is not carried to the new one; the
+      // ordinary bits are.
+      const suid = join(d2, 'suid.sh');
+      writeFileSync(suid, '#!/bin/sh\n');
+      chmodSync(suid, 0o4755);
+      if ((statSync(suid).mode & 0o4000) === 0) console.log('  skip the set-user-ID check: this filesystem drops the bit');
+      else {
+        replaceFile(suid, Buffer.from('#!/bin/sh\necho x\n'), statSync(suid).mode);
+        check('a replace keeps the ordinary bits and drops set-user-ID', (statSync(suid).mode & 0o7777) === 0o755, (statSync(suid).mode & 0o7777).toString(8));
+      }
+      // A name near the 255-byte component limit: the new file's own name is short, so it still fits.
+      const long = join(d2, 'n'.repeat(250));
+      writeFileSync(long, 'a');
+      replaceFile(long, Buffer.from('b'), statSync(long).mode);
+      check('a file whose name is 250 bytes is replaced', readFileSync(long, 'utf8') === 'b' && !readdirSync(d2).some((n) => n.startsWith('.fix-')));
+    }
     rmSync(d2, { recursive: true, force: true });
   }
   check('unfinished prefixes the reason the dispatcher reads', unfinished(' the budget ran out. ') === `${UNFINISHED_PREFIX} the budget ran out.` && UNFINISHED_PREFIX === 'The fix run could not finish:');

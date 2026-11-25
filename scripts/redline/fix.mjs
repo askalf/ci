@@ -930,16 +930,27 @@ const cutWhole = (s, n) => { const part = s.slice(0, n); return /[\uD800-\uDBFF]
 
 /**
  * Replace the file at abs with bytes, all or nothing: they go to a new file beside it, which takes
- * `mode` when one is given, and that file is renamed over abs only once every byte is written. A
- * failure leaves abs as it was and removes the new file.
+ * the ordinary permission bits of `mode` when one is given, and that file is renamed over abs only
+ * once every byte is written. A failure leaves abs as it was and removes the new file, and only a
+ * file this call created.
+ *
+ * The new file's name is short and its own, not abs's name with a suffix: abs's name may already
+ * be near the filesystem's limit for one path component. Only `mode & 0o777` is kept: the new file
+ * belongs to the account this runs as, so a set-user-ID, set-group-ID or sticky bit that the run
+ * account left on the old one is never carried to a file of this account.
  */
 export function replaceFile(abs, bytes, mode = null) {
-  const tmp = join(dirname(abs), `.${basename(abs)}.fix-${process.pid}-${createHash('sha256').update(`${abs}|${Date.now()}|${Math.random()}`).digest('hex').slice(0, 12)}`);
+  const tmp = join(dirname(abs), `.fix-${process.pid}-${createHash('sha256').update(`${abs}|${Date.now()}|${Math.random()}`).digest('hex').slice(0, 12)}`);
+  // Exclusive: a name that is taken throws here, before anything is created to remove.
+  let fd = openSync(tmp, 'wx');
   try {
-    writeFileSync(tmp, bytes, { flag: 'wx' });
-    if (mode !== null) chmodSync(tmp, mode & 0o7777);
+    writeFileSync(fd, bytes);
+    closeSync(fd);
+    fd = null;
+    if (mode !== null) chmodSync(tmp, mode & 0o777);
     renameSync(tmp, abs);
   } catch (e) {
+    if (fd !== null) closeSync(fd);
     rmSync(tmp, { force: true });
     throw e;
   }
@@ -958,7 +969,7 @@ export function fixRead(root, input = {}) {
       const probe = Buffer.alloc(Math.min(8192, st.size));
       const got = readSync(fd, probe, 0, probe.length, 0);
       if (probe.subarray(0, got).includes(0)) return 'error: binary file, not readable as text';
-      if (st.size > LIMITS.readFileBytes) return `error: the file is ${st.size} bytes, more than fix_read reads (${LIMITS.readFileBytes}); find the lines with fix_search`;
+      if (st.size > LIMITS.readFileBytes) return `error: the file is ${st.size} bytes, more than fix_read reads (${LIMITS.readFileBytes}), and the fix lane does not change a file this large`;
       text = readFileSync(fd).toString('utf8');
     } finally { closeSync(fd); }
   } catch (e) {
