@@ -77,8 +77,9 @@ for every blocking finding the diff grounds in the one review, and
 Redline's earlier verdicts on the PR go to the model as data: the posted reviews, and, for a head
 nothing was posted at (every head on a private repository, where the post never runs), the
 `redline-verdict` artifact of the PR's earlier dispatched runs, read with the job's own token: the
-runs are looked for in the newest 1,000 of the repository's finished dispatches on the default
-branch made since the PR opened (ten pages of 100), and the newest 40 of the PR's are read. An
+runs are looked for in the repository's finished dispatches on the default branch made since the
+PR opened, in at most ten listings of 100, each after the first asking for the runs made at or
+before the oldest one the listing before it returned, and the newest 40 of the PR's are read. An
 artifact is kept seven days, so a verdict older than that cannot be read from its run; a newer
 round-cap notice still states the count it was capped on. Only
 the dispatch account's dispatches of `redline.yml` on the default branch are read (askalf, or the
