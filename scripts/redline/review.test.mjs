@@ -395,12 +395,20 @@ function world({ reviews = [], heads = [HEAD], turns, modelStatus = [], draft = 
     }
     const p = u.pathname;
     if (init.method === 'POST' && p.endsWith('/reviews')) { const b = JSON.parse(init.body); calls.posted.push({ ...b, auth: init.headers.authorization }); return json({ html_url: 'https://x/review/1' }); }
-    if (/\/pulls\/7$/.test(p)) { const sha = heads[Math.min(headReads++, heads.length - 1)]; return json({ number: 7, state: 'open', draft, title: 'feat: add token', body: 'Adds it.', user: { login: 'askalf' }, head: { sha, ref: 'feat/x', repo: { full_name: headRepo } }, base: { ref: 'main', sha: BASE, repo: { full_name: 'askalf/r', default_branch: 'main' } } }); }
+    if (/\/pulls\/7$/.test(p)) { const sha = heads[Math.min(headReads++, heads.length - 1)]; return json({ number: 7, state: 'open', draft, title: 'feat: add token', body: 'Adds it.', created_at: '2026-11-08T00:00:00Z', user: { login: 'askalf' }, head: { sha, ref: 'feat/x', repo: { full_name: headRepo } }, base: { ref: 'main', sha: BASE, repo: { full_name: 'askalf/r', default_branch: 'main' } } }); }
     if (p.endsWith('/reviews')) return json(u.searchParams.get('page') === '1' ? reviews : []);
     if (p.endsWith('/contents/.gitattributes')) return attributes === null ? json({ message: 'Not Found' }, 404) : json({ type: 'file', encoding: 'base64', content: Buffer.from(attributes).toString('base64') });
     if (p.endsWith('/files')) return json(u.searchParams.get('page') === '1' ? (files ?? [{ filename: 'src/b.js', status: 'modified', additions: 1, deletions: 0, patch: PATCH }]) : []);
     if (p.endsWith('/commits')) return json(u.searchParams.get('page') === '1' ? [{ sha: HEAD, commit: { message: 'feat: add token' } }] : []);
-    if (p.endsWith('/actions/workflows/redline.yml/runs') && runs) return json({ workflow_runs: runs.filter((r) => u.searchParams.get('event') ? r.event === u.searchParams.get('event') : true) });
+    if (p.endsWith('/actions/workflows/redline.yml/runs') && runs) {
+      const s = u.searchParams;
+      (calls.lists ??= []).push(s.toString());
+      const since = s.get('created')?.replace(/^>=/, '');
+      const kept = runs.filter((r) => (!s.get('event') || r.event === s.get('event')) && (!s.get('status') || r.status === s.get('status'))
+        && (!s.get('branch') || r.head_branch === s.get('branch')) && (!since || Date.parse(r.created_at) >= Date.parse(since)));
+      const size = Number(s.get('per_page') ?? 30); const page = Number(s.get('page') ?? 1);
+      return json({ total_count: kept.length, workflow_runs: kept.slice((page - 1) * size, page * size) });
+    }
     if (/\/compare\/[0-9a-f]{40}\.\.\.[0-9a-f]{40}$/.test(p) && compare) { calls.compares = (calls.compares ?? 0) + 1; return json({ status: 'ahead', files: compare }); }
     const pinCompare = /^\/repos\/askalf\/ci\/compare\/([0-9a-f]{40})\.\.\.(main|[0-9a-f]{40})$/.exec(p);
     if (pinCompare && pins) {
@@ -2127,30 +2135,107 @@ console.log('\n  earlier verdicts from the runs, and the round cap');
     // Capped pushes fill the history a run reads (the newest LIMITS.earlierRuns): four real requests
     // (heads 1-4), then cap verdicts at every later head. The cap must stand on what the caps carry.
     const capVr = (h) => vr(h, 'REQUEST_CHANGES', renderCapBody(4, 4, { commit_id: sha(4), body: 'asked at 4444444' }, h));
-    const at = (id) => ({ created_at: `2026-11-08T${String(id).padStart(2, '0')}:00:00Z` });
+    const W = LIMITS.earlierRuns;
+    const hd = (id) => (id < 10 ? sha(id) : id.toString(16).padStart(40, '0'));
     const history = (caps) => {
       const ids = [1, 2, 3, 4, ...Array.from({ length: caps }, (_, i) => 5 + i)];
       return {
-        runs: [...ids].reverse().map((id) => run(id, at(id))),
+        runs: [...ids].reverse().map((id) => run(id, { display_title: title(hd(id)), created_at: new Date(Date.UTC(2026, 10, 8, 1, 0, id)).toISOString() })),
         artifacts: artsOf(ids),
-        zips: { ...zipsOf([1, 2, 3, 4]), ...zipsOf(ids.slice(4), capVr) },
+        zips: Object.fromEntries(ids.map((id) => [100 + id, makeZip('verdict.json', JSON.stringify(id <= 4 ? vr(hd(id)) : capVr(hd(id))))])),
       };
     };
-    check('the window is the one these cases rely on', LIMITS.earlierRuns === 8);
-    const five = history(5);
-    const { ctx: c5, calls: k5 } = world({ ...five, turns: [submit(APPROVE)] });
+    const { ctx: c5, calls: k5 } = world({ ...history(W - 3), turns: [submit(APPROVE)] });
     const r5 = await runReview(c5);
-    check('four requests then five capped pushes (three requests left in the window): a new head stays capped, no model call',
+    check('four requests then capped pushes up to three short of the window (three requests left in it): a new head stays capped, no model call',
       r5.outcome === 'capped' && r5.rounds === 4 && k5.model.length === 0 && k5.posted[0].body.includes('asked at 4444444'));
-    const eight = history(8);
-    const { ctx: c8, calls: k8 } = world({ ...eight, turns: [submit(APPROVE)] });
+    const { ctx: c8, calls: k8 } = world({ ...history(W), turns: [submit(APPROVE)] });
     const r8 = await runReview(c8);
-    check('four requests then eight capped pushes (only caps in the window): still capped, and the cap quotes the request the caps carried, once',
+    check('four requests then a window of capped pushes (only caps in it): still capped, and the cap quotes the request the caps carried, once',
       r8.outcome === 'capped' && r8.rounds === 4 && k8.model.length === 0 && k8.posted[0].body.includes('asked at 4444444')
       && k8.posted[0].body.split('This pull request has had').length === 2);
-    const { ctx: cr, calls: kr } = world({ ...history(8), turns: [submit(APPROVE)] });
+    const { ctx: cr, calls: kr } = world({ ...history(W), turns: [submit(APPROVE)] });
     const rr = await runReview({ ...cr, reread: true });
     check('a re-read still lifts it', rr.outcome === 'posted' && kr.model.length === 1);
+  }
+  {
+    // Where the runs are found: every finished dispatch on the default branch since the PR opened,
+    // page by page, however many other PRs' runs came after them.
+    const W = LIMITS.earlierRuns;
+    const hd = (id) => id.toString(16).padStart(40, '0');
+    const when = (i) => new Date(Date.UTC(2026, 10, 8, 1, 0, i)).toISOString();
+    // This PR's runs, newest first: `heads` heads, `per` runs at each (the later ones re-reads), every one a request.
+    const mine = (heads, per = 1, from = 1) => {
+      const out = [];
+      for (let h = from; h < from + heads; h++) for (let k = 0; k < per; k++) out.push({ id: h * 10 + k, head: hd(h), at: when(h * 10 + k), more: k ? ' (re-read)' : '' });
+      return out.reverse();
+    };
+    const worldOf = (rows, others = [], over = {}) => {
+      const runs = [...others, ...rows.map((x) => run(x.id, { display_title: title(x.head, x.more), created_at: x.at }))];
+      const artifacts = Object.fromEntries(rows.map((x) => [x.id, [{ id: 100000 + x.id, name: VERDICT_ARTIFACT, expired: false }]]));
+      const zips = Object.fromEntries(rows.map((x) => [100000 + x.id, makeZip('verdict.json', JSON.stringify(vr(x.head)))]));
+      const w = world({ runs, artifacts, zips, turns: [submit(APPROVE)], ...over });
+      const f = w.ctx.fetch; w.calls.artifactLists = 0;
+      w.ctx.fetch = (url, init) => { if (/\/actions\/runs\/\d+\/artifacts$/.test(new URL(url).pathname)) w.calls.artifactLists++; return f(url, init); };
+      return w;
+    };
+    const other = (i) => run(500000 + i, { display_title: `Redline review askalf/r#8 @ ${hd(900000 + i)}`, created_at: when(100000 + i) });
+    const others = (count) => Array.from({ length: count }, (_, i) => other(count - i));
+
+    {
+      const { ctx, calls } = worldOf(mine(4), others(100));
+      const r = await runReview(ctx);
+      check('four rounds behind a full page of other PRs\' newer runs are still counted: capped, no model call', r.outcome === 'capped' && r.rounds === 4 && calls.model.length === 0);
+      const q = new URLSearchParams(calls.lists[0]);
+      check('the list asks for finished dispatches on the default branch made since the PR opened, 100 a page, and the next page only after a full one',
+        q.get('event') === 'workflow_dispatch' && q.get('status') === 'completed' && q.get('branch') === 'main' && q.get('created') === '>=2026-11-08T00:00:00Z' && q.get('per_page') === '100'
+        && calls.lists.map((l) => new URLSearchParams(l).get('page')).join() === '1,2');
+    }
+    {
+      const { ctx, calls } = worldOf(mine(4));
+      await runReview(ctx);
+      check('a page that is not full is the last one read', calls.lists.length === 1);
+      const early = [...mine(4).map((x) => ({ ...x, at: '2026-11-07T23:00:00Z' }))];
+      const { ctx: c2, calls: k2 } = worldOf(early);
+      const r2 = await runReview(c2);
+      check('a run made before the PR opened is not one of its rounds', r2.outcome === 'posted' && k2.model.length === 1 && k2.artifactLists === 0);
+    }
+    {
+      // Six heads, each read twice (a re-read): twelve runs, six rounds. The newest eight of those
+      // runs hold only four heads.
+      const { ctx, calls } = worldOf(mine(6, 2));
+      const r = await runReview({ ...ctx, roundCap: 6 });
+      check('six heads read twice each, against a cap of six: all six counted, capped', r.outcome === 'capped' && r.rounds === 6 && calls.model.length === 0);
+      const { ctx: c10, calls: k10 } = worldOf(mine(10));
+      const r10 = await runReview({ ...c10, roundCap: 10 });
+      check('ten rounds against a cap of ten: capped', r10.outcome === 'capped' && r10.rounds === 10 && k10.model.length === 0);
+    }
+    {
+      // A full first page of this PR's runs: the newest LIMITS.earlierRuns are read, and no second page is listed.
+      const { ctx, calls } = worldOf(mine(100 + W));
+      const r = await runReview({ ...ctx, roundCap: W + 2 });
+      check('the newest LIMITS.earlierRuns of the PR\'s runs are read, no more: rounds past them are not counted',
+        r.outcome === 'posted' && calls.model.length === 1 && calls.artifactLists === W);
+      check('and the list stops at the page that found them', calls.lists.length === 1);
+    }
+    {
+      const lines = [];
+      const { ctx, calls } = worldOf(mine(4), others(LIMITS.runPages * 100));
+      ctx.log = (l) => lines.push(l);
+      const r = await runReview(ctx);
+      check('runs past LIMITS.runPages full pages are not listed, and the log says so',
+        r.outcome === 'posted' && calls.model.length === 1 && calls.lists.length === LIMITS.runPages && calls.artifactLists === 0
+        && lines.some((l) => l.includes(`listed ${LIMITS.runPages} full pages of runs`)));
+      const { ctx: c2, calls: k2 } = worldOf(mine(4), others(LIMITS.runPages * 100 - 4));
+      const r2 = await runReview(c2);
+      check('the PR\'s runs on the last page are read', r2.outcome === 'capped' && r2.rounds === 4 && k2.lists.length === LIMITS.runPages);
+    }
+    {
+      let fetched = 0;
+      const got = await reviewModule.earlierVerdicts({ repo: 'askalf/r', pr: 7, readToken: 'read', fetch: async () => { fetched++; throw new Error('nothing is to be fetched'); } },
+        { pr: { created_at: '2026-11-08T00:00:00Z', base: { repo: { full_name: 'askalf/r' } } } });
+      check('with no default branch known, no run is listed or read', Array.isArray(got) && got.length === 0 && fetched === 0);
+    }
   }
   {
     // The trust line: a PR that changes redline.yml could upload an APPROVE of its own head from its

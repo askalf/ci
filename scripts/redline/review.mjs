@@ -223,9 +223,10 @@ export const SUBMIT_REQUIRED = 'The read budget is spent. Your next response mus
   + 'with verdict, summary and findings, based on what you have read. Do not call any other tool and do not answer in text.';
 export const LIMITS = {
   diffChars: 180_000, bodyChars: 8_000, commitChars: 600, commits: 100, contextChars: 60_000, earlierReviews: 3, earlierReviewChars: 6_000,
-  // earlierRuns caps the PR's earlier Redline runs whose verdict artifacts are read (two reads
-  // each); artifactBytes caps one artifact.
-  earlierRuns: 8, artifactBytes: 1_000_000,
+  // earlierRuns caps the PR's earlier Redline runs whose verdict artifacts are read, newest first
+  // (two reads each, on the job's token); runPages caps the pages of 100 runs listed to find them,
+  // which is as far as GitHub lists a filtered list of runs; artifactBytes caps one artifact.
+  earlierRuns: 40, runPages: 10, artifactBytes: 1_000_000,
   // filesChars caps the changed files sent in full with the brief; readLines and readBytes cap one
   // redline_read. Each read is a model round trip, so a larger range means fewer turns.
   filesChars: 120_000, readLines: 1_000, readBytes: 120_000, listEntries: 400,
@@ -728,17 +729,36 @@ export async function ghBytes(ctx, path, maxBytes = LIMITS.artifactBytes) {
  * oldest first, as review rows. On a private repository nothing is ever posted (the post runs on
  * public repositories only), so without this each round began with no memory of the last and a
  * request-changes round could not be counted. Only a run the PR could not have shaped is read
- * (reviewRunsOf); the newest LIMITS.earlierRuns of them are; an artifact that is missing,
- * expired, malformed, or for another PR or head is passed over; a read that fails leaves the rest
- * unread and is logged, never a failed review.
+ * (reviewRunsOf), and the newest LIMITS.earlierRuns of them are.
+ *
+ * The runs are found in the repository's finished dispatches of redline.yml on the default branch
+ * made since the PR opened, listed newest first a page of 100 at a time, until a page is not full,
+ * LIMITS.earlierRuns of this PR's runs are found, or LIMITS.runPages pages are read. The PR's runs
+ * are among many: every PR's dispatches share the one list, so a single page of it can be newer
+ * than all of them. A round is a head, and a head can have more than one run (a re-read, a second
+ * dispatch), so a window of N runs can hold fewer than N rounds.
+ *
+ * An artifact that is missing, expired, malformed, or for another PR or head is passed over; a
+ * read that fails leaves the rest unread and is logged, never a failed review.
  */
 export async function earlierVerdicts(ctx, { pr }) {
   const { repo, pr: n } = ctx;
+  const defaultBranch = pr?.base?.repo?.default_branch;
   const out = [];
+  // reviewRunsOf trusts no run when the default branch is not known.
+  if (!defaultBranch) return out;
   try {
-    const listed = await gh(ctx, `/repos/${repo}/actions/workflows/redline.yml/runs?event=workflow_dispatch&per_page=100`);
-    const runs = reviewRunsOf(listed?.workflow_runs, { repo, pr: n, defaultBranch: pr?.base?.repo?.default_branch }).slice(0, LIMITS.earlierRuns);
-    for (const run of runs) {
+    const q = new URLSearchParams({ event: 'workflow_dispatch', status: 'completed', branch: defaultBranch, per_page: '100' });
+    if (pr?.created_at) q.set('created', `>=${pr.created_at}`);
+    const runs = [];
+    for (let page = 1; page <= LIMITS.runPages && runs.length < LIMITS.earlierRuns; page++) {
+      const listed = await gh(ctx, `/repos/${repo}/actions/workflows/redline.yml/runs?${q}&page=${page}`);
+      const rows = Array.isArray(listed?.workflow_runs) ? listed.workflow_runs : [];
+      runs.push(...reviewRunsOf(rows, { repo, pr: n, defaultBranch }));
+      if (rows.length < 100) break;
+      if (page === LIMITS.runPages && runs.length < LIMITS.earlierRuns) ctx.log?.(`earlier verdicts: listed ${LIMITS.runPages} full pages of runs, as many as are read; this PR's runs older than those, if any, are not read`);
+    }
+    for (const run of runs.slice(0, LIMITS.earlierRuns)) {
       const arts = await gh(ctx, `/repos/${repo}/actions/runs/${run.id}/artifacts`);
       const a = (arts?.artifacts ?? []).find((x) => x?.name === VERDICT_ARTIFACT && x.expired !== true && Number.isInteger(x.id));
       if (!a) continue;

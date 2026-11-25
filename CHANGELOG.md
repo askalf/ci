@@ -13,6 +13,20 @@ names the commit's date and the pull request it came from.
 
 ## November 2026
 
+- Redline finds a pull request's earlier rounds however busy the repository is. On a private
+  repository its earlier verdicts are only in its dispatched runs' artifacts, and the runs were
+  looked for in one page: the repository's newest 100 dispatches of `redline.yml`, of which the
+  newest 8 for the pull request were read. On one repository that uses Redline those 100 reached
+  back about four days, and a pull request's runs older than that page were not read: one with no
+  run in it was read from zero, with no earlier findings in the brief, no delta and no round
+  count. And 8 runs hold fewer than 8 heads whenever two of them are at one head (a re-read, or a
+  second dispatch), so a cap of 8 was reached only when each of the 8 was a request at a head of
+  its own; one pull request there had 32 runs over 18 heads. The runs are now listed from the
+  repository's finished dispatches on the default branch made since the pull request opened, a
+  page of 100 at a time and ten pages at most (as far as GitHub lists a filtered list of runs),
+  and the newest 40 of the pull request's are read. A verdict artifact is still kept seven days,
+  so on a private repository a round older than that is still not counted.
+
 - The file `REDLINE_MODELS_FILE` names may set `REDLINE_ROUND_CAP`. The models file could not set
   the cap: it took only the four model pins, so a host whose pins come from a reviewed repository
   still kept its cap in its env file or in the runner's environment, where no review sees it. A
