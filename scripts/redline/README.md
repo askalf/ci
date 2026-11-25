@@ -378,16 +378,23 @@ commit as askalf. What differs:
 - The result is verified by a second job, `verify`, on a runner job of its own. The build job's
   gate runs in the job where the model's commands ran, and a file a command left at a fixed path in
   that job's temporary directories could make it pass. The build job uploads what it made as the
-  `redline-build-candidate` artifact. The verify job runs the same checks of the ref and the base,
-  fetches the candidate with the job's token (`candidate.mjs`, the one step that holds it), checks
-  out the base, and runs `build.mjs` with `BUILD_CANDIDATE`: the candidate must name this
-  repository, ticket, base, run and attempt, and a fixed one's bundle must hold its commit, one
-  commit on the base. A record that is not a fixed build with a commit is passed on as it is. A
-  fixed one is built again with no model: its tree is written into the checkout as the model's
-  edits were, the test gate runs once (installing, running the build script when the model ran it,
-  as `replay.json` says, and the suite), and the commit is made again; the tree it commits must be
-  the candidate's. Only the verify job uploads `redline-build`, the artifact the ops tick reads, so
-  a build is fixed only when its tests pass in a job that never ran the model's commands.
+  `redline-build-candidate` artifact and gives its artifact id and the attempt it ran in as job
+  outputs. The verify job runs the same checks of the ref and the base, fetches that artifact by
+  its id with the job's token (`candidate.mjs`, the one step that holds it), checks out the base,
+  and runs `build.mjs` with `BUILD_CANDIDATE` and the build job's attempt, so a re-run of `verify`
+  alone reads the same candidate. The candidate must name this repository, ticket, base, run and
+  the build job's attempt. A record whose outcome is not `fixed` is passed on as it is, its
+  `diff.patch` byte for byte. A `fixed` one is built again with no model: a build's tree from its
+  bundle, which must hold its commit, one commit on the base, and a dry run's from its
+  `diff.patch`, applied to the index alone. Either must be the tree the build job's gate tested,
+  which `replay.json` names, and its description must pass the lane's rule for one. The tree is
+  written into the checkout as the model's edits were and the test gate runs once (installing,
+  running the build script when the model ran it, as `replay.json` says, and the suite). A build's
+  commit is made again, and the tree it commits must be the candidate's; a dry run makes none, and
+  its result carries the same diff and this job's own tests. The verify job writes and uploads its
+  own output directory (`verify-out-<run id>-<attempt>`), never the build job's, and only it
+  uploads `redline-build`, the artifact the ops tick reads, so a build is fixed only when its tests
+  pass in a job that never ran the model's commands.
 
 The artifact is `redline-build`, uploaded by the verify job:
 
@@ -399,16 +406,18 @@ The artifact is `redline-build`, uploaded by the verify job:
 - `description.md`, when the outcome is `fixed` (`description: true`);
 - `build.bundle`, for a `fixed` build that is not a dry run: `<base>..HEAD`, exactly one commit,
   authored and committed as askalf, a subject and no body;
-- `diff.patch`, for a dry run or `tests_failed`.
+- `diff.patch`, for a dry run or `tests_failed`: the staged diff as git writes it, byte for byte.
 
 The candidate the build job uploads (`redline-build-candidate`) holds the same files, and for a
-fixed build `replay.json` as well: the summary, `tests_run`, and whether the model ran the build
-script. Each job exits 0 for `fixed` and 1 for any other outcome. A run whose `BUILD_` inputs are missing or
+`fixed` result, a dry run's included, `replay.json` as well: `summary`, `ran_build` (whether the
+model ran the build script) and `tree` (the tree its gate tested). Every field passes the same
+credential check as the record and the description before anything is uploaded. Each job exits 0 for `fixed` and 1 for any other outcome. A run whose `BUILD_` inputs are missing or
 malformed, whose checkout is not at the base or is not clean, or whose run account fails a check of
 the host setup below, is `refused`, and its notes say which. What the lane never does: it pushes
 nothing, opens no pull request and comments nowhere, and its commit carries nothing under
-`.github/`. The output directory is named for the run and its attempt, so a run never uploads
-what another left behind. Verifying the
+`.github/`. Each job's output directory is named for the job, the run and its attempt
+(`build-out-<run id>-<attempt>`, `verify-out-<run id>-<attempt>`), so a job never uploads what
+another left behind. Verifying the
 artifact, pushing the commit as a new branch and opening the pull request are the ops tick's, with
 its own token, as pushing a fix is. The title and the brief are in the build step's environment,
 which the run's log prints, so on a public repository they are public.

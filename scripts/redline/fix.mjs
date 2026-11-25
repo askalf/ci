@@ -1145,6 +1145,13 @@ function git(cwd, env, args, { allowFail = false } = {}) {
   return r.status === 0 ? String(r.stdout ?? '').replace(/\n$/, '') : null;
 }
 
+/** git's output as the bytes it wrote, for what is written out as it is (a diff a file's own bytes are in). Throws on a failure. */
+function gitBytes(cwd, env, args) {
+  const r = spawnSync('git', args, { cwd, env, maxBuffer: 256 * 1024 * 1024 });
+  if (r.status !== 0) throw new Error(`git ${args[0]} failed: ${String(r.stderr || r.stdout || r.error?.message || '').trim().slice(0, 300)}`);
+  return Buffer.from(r.stdout ?? []);
+}
+
 /**
  * The reviewed head's .gitattributes files as { path: text }, read from its tree, not from the
  * checkout. Taken before the install runs; every redline-protected decision after that is made
@@ -1773,7 +1780,11 @@ export async function workCheckout(ctx, job) {
       git(root, genv, ['reset', '-q', start]);
       for (const p of changedPaths(root, genv)) written.add(p);
       ranBuild = r.ranBuild === true;
-      description = typeof r.description === 'string' ? r.description : null;
+      // The description is held to the lane's own rule, as fix_describe would hold it: a candidate
+      // is never trusted to carry one the lane refuses.
+      const why = typeof r.description === 'string' ? job.describe.problem(r.description) : 'there is none';
+      if (why) return refuse(`the candidate's description cannot be used: ${why}`, { turns: r.turns });
+      description = r.description;
       bounces = LIMITS.testBounces;
       const f = await finalize({ outcome: 'fixed', subject: r.subject, summary: r.summary });
       if (f.error) return refuse(`the candidate could not be finished: ${f.error}`, { turns: r.turns });
@@ -1817,10 +1828,15 @@ export async function workCheckout(ctx, job) {
     git(root, genv, ['--literal-pathspecs', 'add', '-A', '--', ...st.keep]);
     // The commit is the tree the gate tested: nothing runs between the gate and here, so a tree
     // that differs is a fault, never a change to carry untested.
-    if (tests && git(root, genv, ['write-tree']) !== tests.tree) throw new Error('the change is not the tree its tests ran on');
-    if (job.replay && git(root, genv, ['write-tree']) !== job.replay.tree) throw new Error('the change this verify run would commit is not the candidate\'s tree');
-    const diff = git(root, genv, ['diff', '--cached', '--binary', start]) ?? '';
-    const diffBytes = Buffer.byteLength(diff);
+    const tree = git(root, genv, ['write-tree']);
+    if (tests && tree !== tests.tree) throw new Error('the change is not the tree its tests ran on');
+    if (job.replay && tree !== job.replay.tree) throw new Error('the change this verify run would commit is not the candidate\'s tree');
+    // The diff as git wrote it: a file's bytes that are not UTF-8 are in a text hunk as they are,
+    // and diff.patch is written with them, never decoded and encoded again.
+    const patch = gitBytes(root, genv, ['diff', '--cached', '--binary', start]);
+    const diff = patch.toString('utf8');
+    const diffBytes = patch.length;
+    const patchFile = patch.length && patch[patch.length - 1] === 0x0a ? patch : Buffer.concat([patch, Buffer.from('\n')]);
     if (diffBytes > LIMITS.diffBytes) return refuse(`the diff is ${diffBytes} bytes; the limit is ${LIMITS.diffBytes}`, { turns, tests: testsRecord });
     // The index is what the bundle carries: a clean filter (a .gitattributes rule and a .git/config
     // entry a command can write) can stage bytes the working tree does not have.
@@ -1833,13 +1849,15 @@ export async function workCheckout(ctx, job) {
     const notes = (outcome) => renderNotes({ outcome, summary: sub.summary, files: st.keep, skipped, tests: testsRecord, described: described && job.describe.replaces === true && outcome === 'fixed' });
 
     if (testsRecord && testsRecord.exit_code !== 0) {
-      writeFileSync(join(out, 'diff.patch'), `${diff}\n`);
+      writeFileSync(join(out, 'diff.patch'), patchFile);
       return { record: job.record({ ...common, outcome: 'tests_failed', notes: notes('tests_failed') }) };
     }
+    // What a verify run needs to build the result again: the summary, whether the build script ran,
+    // and the tree the gate tested, which the verify run's change must be byte for byte.
+    const replay = { summary: sub.summary, ran_build: ranBuild, tree };
     if (ctx.dryRun) {
-      writeFileSync(join(out, 'diff.patch'), `${diff}\n`);
-      return { record: job.record({ ...common, outcome: 'fixed', subject: sub.subject, description: described, notes: notes('fixed') }), description,
-        replay: { summary: sub.summary, ran_build: ranBuild } };
+      writeFileSync(join(out, 'diff.patch'), patchFile);
+      return { record: job.record({ ...common, outcome: 'fixed', subject: sub.subject, description: described, notes: notes('fixed') }), description, replay };
     }
 
     // One commit as askalf, hooks off, then the message is checked and the bundle written.
@@ -1868,8 +1886,7 @@ export async function workCheckout(ctx, job) {
     const bundle = join(out, job.bundle);
     git(root, genv, ['bundle', 'create', bundle, `${start}..HEAD`]);
     git(root, genv, ['bundle', 'verify', bundle]);
-    return { record: job.record({ ...common, outcome: 'fixed', subject: sub.subject, newHead, commits, description: described, notes: notes('fixed') }), description,
-      replay: { summary: sub.summary, ran_build: ranBuild } };
+    return { record: job.record({ ...common, outcome: 'fixed', subject: sub.subject, newHead, commits, description: described, notes: notes('fixed') }), description, replay };
   } finally {
     // Cleanup never replaces the result: a failure here is a warning.
     try { settle(); } catch (e) { ctx.log?.(`::warning::${e.message}`); }

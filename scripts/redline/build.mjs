@@ -282,7 +282,7 @@ export function saveBuild(dir, record, description = null, replay = null) {
   if (replay && record.outcome === 'fixed') writeFileSync(join(dir, CANDIDATE_REPLAY), `${JSON.stringify(replay, null, 2)}\n`);
 }
 
-/** The file a build job's candidate carries for the verify job: { summary, ran_build }. */
+/** The file a build job's candidate carries for the verify job: { summary, ran_build, tree }, tree the one its gate tested. */
 export const CANDIDATE_REPLAY = 'replay.json';
 
 /**
@@ -292,11 +292,14 @@ export const CANDIDATE_REPLAY = 'replay.json';
  * build job's own output, which a verify job re-run alone still reads). Returns { through } for a
  * record that is passed on as it is (anything but a fixed build), { replay } for a fixed one, or
  * { problem }. A fixed build's tree comes from its bundle, one commit on the base, fetched into the
- * checkout; a dry run's from its diff, applied to the index alone and put back. `git(args, input)`
- * runs git in the checkout. Never reads the model's output as instructions.
+ * checkout; a dry run's from its diff, applied to the index alone and put back. Either must be the
+ * tree the build job's gate tested, byte for byte, and a fixed build's description must pass the
+ * lane's own rule for one. `git(args, input)` runs git in the checkout. Never reads the model's
+ * output as instructions.
  */
 export function readCandidate(dir, ctx, git) {
   const file = (name) => (existsSync(join(dir, name)) ? readFileSync(join(dir, name), 'utf8') : null);
+  const bytes = (name) => (existsSync(join(dir, name)) ? readFileSync(join(dir, name)) : null);
   const raw = file('build.json');
   if (raw === null) return { problem: 'the build job left no build.json, so there is nothing to verify' };
   let record;
@@ -307,17 +310,20 @@ export function readCandidate(dir, ctx, git) {
   if (!record.run || !ctx.run || record.run.id !== ctx.run.id || record.run.attempt !== ctx.buildAttempt) return { problem: 'the build job\'s build.json names another run or attempt' };
   const description = file('description.md');
   if (record.outcome !== 'fixed') {
-    return { through: { record, description: description === null ? null : description.replace(/\n$/, ''), diff: file('diff.patch') } };
+    return { through: { record, description: description === null ? null : description.replace(/\n$/, ''), diff: bytes('diff.patch') } };
   }
   let extra;
   try { extra = JSON.parse(file(CANDIDATE_REPLAY) ?? ''); } catch { return { problem: `the build job's fixed build has no readable ${CANDIDATE_REPLAY}` }; }
-  if (typeof extra?.summary !== 'string' || typeof extra?.ran_build !== 'boolean') return { problem: `the build job's ${CANDIDATE_REPLAY} is not { summary, ran_build }` };
-  if (record.description === true && description === null) return { problem: 'the build job\'s fixed build says it has a description and carries none' };
+  if (typeof extra?.summary !== 'string' || typeof extra?.ran_build !== 'boolean' || !SHA.test(String(extra?.tree ?? ''))) return { problem: `the build job's ${CANDIDATE_REPLAY} is not { summary, ran_build, tree }` };
+  if (record.description !== true || description === null) return { problem: 'the build job\'s fixed build carries no description' };
+  const why = descriptionProblem(description, '') ?? descriptionCreditProblem(description);
+  if (why) return { problem: `the build job's description cannot be used: ${why}` };
   if ((record.new_head === null) !== ctx.dryRun) return { problem: 'the build job\'s build.json is a dry run where this run is not, or the other way round' };
   let tree;
   if (record.new_head === null) {
     if (!existsSync(join(dir, 'diff.patch'))) return { problem: 'the build job\'s dry run has no diff.patch' };
-    const applied = git(['apply', '--cached', '--binary', join(dir, 'diff.patch')]) !== null;
+    // Applied to the base's own tree, whatever the checkout's index holds, and put back after.
+    const applied = git(['read-tree', ctx.base]) !== null && git(['apply', '--cached', '--binary', join(dir, 'diff.patch')]) !== null;
     tree = applied ? git(['write-tree']) : null;
     git(['reset', '-q', ctx.base]);
     if (!tree) return { problem: 'the build job\'s diff.patch does not apply to the base' };
@@ -329,6 +335,7 @@ export function readCandidate(dir, ctx, git) {
     tree = git(['rev-parse', `${record.new_head}^{tree}`]);
     if (!tree) return { problem: 'the build job\'s commit has no tree' };
   }
+  if (tree !== extra.tree) return { problem: `the build job's ${record.new_head === null ? 'diff.patch' : 'commit'} does not give the tree its tests ran on` };
   return { replay: {
     tree, subject: record.title, summary: extra.summary, ranBuild: extra.ran_build,
     description: description === null ? null : description.replace(/\n$/, ''), turns: record.turns,

@@ -102,7 +102,9 @@ names the commit's date and the pull request it came from.
   (`redline-build-candidate`, fetched by `candidate.mjs` with the job's token by the id the build
   job gave as an output, with the attempt it ran in, so a re-run of `verify` alone reads the same
   one) and nothing else: it builds a fixed candidate, a dry run's too, again on a fresh checkout
-  of the base with no model, runs the test gate there, and alone uploads `redline-build`, so a build is fixed only when its tests pass in a
+  of the base with no model, from the tree the build job's gate tested (a dry run's diff is kept
+  as git wrote it, byte for byte), runs the test gate there, and alone uploads `redline-build`,
+  from an output directory of its own, so a build is fixed only when its tests pass in a
   job that never ran the model's commands; a record that is not a fixed build is passed on as it
   is. The fix lane's gate still runs in the job that edited, as before. Its
   tools are pinned as `build-tools.json`. No repository calls the workflow yet: a caller pins a

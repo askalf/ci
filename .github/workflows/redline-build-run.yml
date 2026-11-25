@@ -5,10 +5,11 @@
 # it, and uploads what it made as the redline-build-candidate artifact. A second job, verify, on a
 # runner job of its own that shares no scratch state with the first, takes the candidate alone: it
 # checks out the base, writes the candidate's tree into it with no model, runs the test gate there
-# and commits the change again, and uploads the result as the redline-build artifact, the one the
-# ops tick reads: build.json, notes.md and, when there is a change, description.md and
-# build.bundle (one commit on top of the base). A record that is not a fixed build is passed on
-# from the candidate as it is. Each job's status is the outcome: 0 for fixed, 1 for anything else.
+# and commits the change again (a dry run makes no commit), and uploads the result from its own
+# output directory as the redline-build artifact, the one the ops tick reads: build.json, notes.md
+# and, when there is a change, description.md and build.bundle (one commit on top of the base). A
+# record whose outcome is not fixed is passed on from the candidate as it is. Each job's status is
+# the outcome: 0 for fixed, 1 for anything else.
 # Nothing here pushes, opens a pull request or comments, and no token that could is on the runner:
 # the ops tick verifies the artifact, pushes the commit as a new branch and opens the pull request
 # with the token it already holds. Nothing under .github/ is in the commit, whatever the ticket
@@ -433,17 +434,20 @@ jobs:
           REDLINE_CI_REPO: ${{ inputs.ci-repo }}
           FIX_ENV_FILE: ${{ inputs.env-file }}
           FIX_PROMPT_FILE: ${{ inputs.prompt-file }}
-          FIX_OUT: ${{ github.workspace }}/build-out-${{ github.run_id }}-${{ github.run_attempt }}
+          # This job's own output, never the build job's: a workspace the two share, with the build
+          # job's directory left behind, uploads nothing this job did not verify.
+          FIX_OUT: ${{ github.workspace }}/verify-out-${{ github.run_id }}-${{ github.run_attempt }}
           DRY_RUN: ${{ inputs.dry_run && '1' || '0' }}
         run: node .redline/scripts/redline/build.mjs
 
       # build.json goes up whatever the outcome; the ops tick reads it to know why there is no bundle.
+      # Only this job's output: a verify that never started leaves nothing here to upload.
       - name: Upload the build
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: redline-build
-          path: build-out-${{ github.run_id }}-${{ github.run_attempt }}
+          path: verify-out-${{ github.run_id }}-${{ github.run_attempt }}
           if-no-files-found: ignore
           retention-days: 7
           overwrite: true
@@ -451,6 +455,6 @@ jobs:
       - name: Remove the checkouts
         if: always()
         env:
-          OUT: build-out-${{ github.run_id }}-${{ github.run_attempt }}
+          OUT: verify-out-${{ github.run_id }}-${{ github.run_attempt }}
           CANDIDATE: candidate-${{ github.run_id }}-${{ github.run_attempt }}
         run: rm -rf work .redline "$OUT" "$CANDIDATE"
