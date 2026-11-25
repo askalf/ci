@@ -13,6 +13,46 @@ names the commit's date and the pull request it came from.
 
 ## November 2026
 
+- The file `REDLINE_MODELS_FILE` names may set `REDLINE_ROUND_CAP`. The models file could not set
+  the cap: it took only the four model pins, so a host whose pins come from a reviewed repository
+  still kept its cap in its env file or in the runner's environment, where no review sees it. A
+  cap in the models file replaces the env file's, and the log says so when the two are not the
+  same count, giving the env file's value only when it is one: that file holds the host's
+  secrets. Both are read trimmed. There
+  it must be a whole number from 0 to 999 (0 turns the cap off), and anything else ends the run, as
+  a family with no `*` does. The env file's own value is read as before, one that is not such a
+  number counts as the default, and the process environment's is still read when neither file
+  sets the key.
+- A run that `main` ends on the env file, the models file, the prompt or the context file leaves
+  no file of an earlier run to upload. `review.mjs` removed an earlier run's `verdict.json` only
+  after it had read those four, and its `models.json` later still. A run that ended on one of
+  them (a file that cannot be read, a family with no `*`) left both in the runner's workspace, and
+  the workflow uploads a verdict or a models record whenever the file is there. `main` now removes
+  both before it reads any of the four. A run that fails before `main` starts, on a setting read
+  while the module loads (a reviewer login that is not a login), still leaves them.
+- A review that asks for changes only through findings that do not block, a claim in the pull
+  request description among them, is asked once which side is wrong. Such a review approves,
+  because a claim the code does not back is corrected in the description with no commit, and the
+  approval kept the summary the reviewer had written for a request for changes. A defect in the
+  code that the reviewer wrote up as "the description promises this" was approved with it: on
+  2026-11-24, of five reviews before the push of one pull request's heads, two were approvals
+  whose summary asked for changes, and one of those listed under the description a failed
+  download that stops every later one. The reviewer is now told that such a claim does not block
+  and asked to give a defect in the code at its code line, with the severity the review rules
+  give it there, or to keep the claim as a note; every finding is then weighed as before, so a
+  secret in the description still blocks. It is asked once, and only with a turn left; a review
+  that answers the same way approves as before, and its body now says that it asked for changes
+  only for findings that do not block. A review held only by wording is not asked.
+- Redline reads a Dependabot pull request's description without the text Dependabot copies in
+  from the dependencies' repositories. Read from the top, a `<details>` block in exactly the
+  form Dependabot writes, under its Release notes, Changelog or Commits summary line, is one line
+  in the brief that names it; at the first line that is neither such a block nor plain text, the
+  filter stops and the rest is read as written. Markdown is not interpreted. That text is another project's and does not ship; it could use up the 8,000
+  characters the brief gives a description before Dependabot's own lines, and a credit line in a
+  dependency's release notes blocked a dependency pull request as attribution. Dependabot's own
+  lines and anything outside those blocks are read as before, so attribution or a secret there
+  still blocks. A block of that shape is left out whoever wrote it. `local.mjs pack --pr` carries
+  the author's account type, so a local review reads the description as CI does.
 - A build lane turns a ticket into a change. `redline-build-run.yml` and `scripts/redline/build.mjs`
   start from a ticket's id, title and brief and a commit of the default branch, and leave one commit
   on top of that commit, as the fix lane leaves one on a pull request's head. The work in the

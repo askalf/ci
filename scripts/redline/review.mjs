@@ -102,7 +102,8 @@
 // models.json goes (modelsRecord: the pins, the model list dario served, the newest of each tracked
 // family, the model the review was read on). The env file's REDLINE_MODELS_FILE, when set, names a
 // file of model pins with no secret in it (withModelsFile) whose settings replace the env file's
-// own; a set name whose file cannot be read ends the run. REDLINE_CONTEXT_FILE, when set,
+// own, REDLINE_ROUND_CAP among them when the file sets it; a set name whose file cannot be read
+// ends the run. REDLINE_CONTEXT_FILE, when set,
 // names facts a workflow gathered before the review (files at another ref, search results, a rule
 // list) that the checkout and the PR cannot show; they go into the brief after the diff, as data, and
 // a set variable whose file cannot be read ends the run.
@@ -408,6 +409,27 @@ export const DESCRIPTION_FILE = /^(?:pr|pull[ -]request) (?:description|body|tex
 export const isDescriptionFinding = (f) => DESCRIPTION_FILE.test(String(f?.file ?? '').trim()) && f?.rule === 'misleading-text';
 
 /**
+ * What the reviewer is told, once, when it asked for changes and every finding it asked with is
+ * eased, a claim in the description among them. Such a review approves, and a defect in the code
+ * that was written up as "the description promises this" would be approved with it. The reviewer
+ * decides which side is wrong; a defect in the code goes to its code line. It is told about the
+ * claims only: every finding, a secret in the description included, is then weighed by the
+ * review's rules as before, and those give the verdict.
+ */
+export const DESCRIPTION_ONLY_NUDGE = 'Every finding that asks for changes here is of a kind that does not block, and at least one of them is a claim in '
+  + 'the pull request description that the code does not back. Such a claim does not block: the author corrects it with no commit, so this '
+  + 'review would be posted as an approval. For each such claim, decide which side is wrong. If the code would be a defect whatever the '
+  + 'description said, give the finding at its code line, quoted as any finding is (from the diff, or from a changed file the diff could not '
+  + 'show), with the severity the review rules give it there. '
+  + 'If the code is acceptable as it stands and the description says more than it does, keep the finding on the description with severity '
+  + 'minor. Then weigh every finding by the review rules as before and call redline_submit again, with the verdict they give and a summary '
+  + 'that matches it.';
+
+/** The line an approval carries when the review asked for changes and every finding it asked with was eased, a description claim among them. */
+export const DESCRIPTION_ONLY_NOTE = 'The review asked for changes only for findings that do not block: a claim in the pull request description '
+  + 'that the code does not back, which is corrected with no commit, or the wording of a sentence. This is an approval.';
+
+/**
  * The root .gitattributes of the pull request's base commit, '' when the base has none. The marks
  * come from the base, never from the head: a pull request cannot mark the files it adds or changes
  * as captured for its own review. The mark lands first, in a reviewed change of its own.
@@ -456,7 +478,11 @@ export function capturedFindings(review, protectedSet, { unlabeled = false } = {
   return review.findings.filter((f) => protectedSet.has(f.file) && (PROSE_RULES.has(f.rule) || (unlabeled && !f.rule)));
 }
 
-/** Validate redline_submit input; returns { review } or { error }. */
+/**
+ * Validate redline_submit input; returns { review, descriptionOnly } or { error }. descriptionOnly
+ * is true when the review asked for changes, every finding it asked with was eased, and at least
+ * one of them is a claim in the description: the review loop asks the reviewer about that once.
+ */
 export function checkSubmission(input) {
   if (!input || typeof input !== 'object') return { error: 'redline_submit needs an object' };
   if (input.verdict !== 'APPROVE' && input.verdict !== 'REQUEST_CHANGES') return { error: 'verdict must be APPROVE or REQUEST_CHANGES' };
@@ -483,7 +509,8 @@ export function checkSubmission(input) {
   const graded = findings.map((f) => ((ADVISORY_RULES.has(f.rule) || isDescriptionFinding(f)) && f.severity === 'blocking' ? { ...f, severity: 'minor' } : f));
   const eased = input.verdict === 'REQUEST_CHANGES' && blocked && !graded.some((f) => f.severity === 'blocking');
   const rule = !eased && typeof input.rule === 'string' && /^[a-z0-9-]{1,40}$/.test(input.rule) ? input.rule : 'none';
-  return { review: { verdict: eased ? 'APPROVE' : input.verdict, summary: input.summary.trim(), findings: graded, rule } };
+  const descriptionOnly = eased && findings.some((f) => f.severity === 'blocking' && isDescriptionFinding(f));
+  return { review: { verdict: eased ? 'APPROVE' : input.verdict, summary: input.summary.trim(), findings: graded, rule }, descriptionOnly };
 }
 
 /** Findings the corpus does not back. */
@@ -626,10 +653,13 @@ export function capNoticeQuote(r) {
   return body ? { commit_id: CAP_LAST_AT.exec(parts[0])?.[1] ?? '', body } : null;
 }
 
+/** A round cap as it is written: a whole number from 0 to 999. */
+const ROUND_CAP_VALUE = /^\d{1,3}$/;
+
 /** REDLINE_ROUND_CAP as a count: a non-negative integer, 0 for no cap; anything else is the default. */
 export function roundCapOf(value) {
   const s = String(value ?? '').trim();
-  return /^\d{1,3}$/.test(s) ? Number(s) : DEFAULT_ROUND_CAP;
+  return ROUND_CAP_VALUE.test(s) ? Number(s) : DEFAULT_ROUND_CAP;
 }
 
 /**
@@ -1094,8 +1124,142 @@ export function askForSubmit(messages) {
   }
 }
 
+/** The login GitHub gives Dependabot's pull requests. No user account can hold a name that ends in `[bot]`. */
+export const DEPENDABOT_LOGIN = 'dependabot[bot]';
+/**
+ * The second line of each block Dependabot fills with other projects' text, as Dependabot writes
+ * it, and the name the brief gives the block. Its own commands block is not one.
+ */
+export const COPIED_SUMMARIES = new Map([
+  ['<summary>Release notes</summary>', 'Release notes'], ['<summary>Changelog</summary>', 'Changelog'], ['<summary>Commits</summary>', 'Commits'],
+]);
+/** The one comment Dependabot's renderer writes into copied text, where the notes held HTML of their own. */
+const RENDERED_COMMENT = '<!-- raw HTML omitted -->';
+/** The elements that renderer writes for Markdown. None of them holds raw text, so inside them a tag is a tag. */
+const RENDERED_TAGS = new Set(['p', 'em', 'strong', 'del', 'a', 'img', 'code', 'pre', 'blockquote', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'ul', 'ol', 'li', 'table', 'thead', 'tbody', 'tr', 'th', 'td', 'br', 'hr']);
+export const isDependabot = (pr) => pr?.user?.login === DEPENDABOT_LOGIN && pr?.user?.type === 'Bot';
+
+const BROKEN = Symbol('broken');
+
+/**
+ * The tag that starts at `line[p]`, a `<`: { end, name, closing } for a complete tag (quoted
+ * attribute values read whole, the name read whole and lowercased), null when the `<` is text,
+ * and BROKEN for markup this line does not finish or that is no tag: one that runs past the line,
+ * an unclosed quote, a comment or declaration, a closing tag with anything after its name. Pure.
+ */
+export function htmlToken(line, p) {
+  if (line[p + 1] === '!' || line[p + 1] === '?') return BROKEN;
+  const closing = line[p + 1] === '/';
+  let q = p + (closing ? 2 : 1);
+  if (!/[A-Za-z]/.test(line[q] ?? '')) return closing ? BROKEN : null;
+  const from = q;
+  while (/[A-Za-z0-9-]/.test(line[q] ?? '')) q++;
+  const name = line.slice(from, q).toLowerCase();
+  const space = () => { const at = q; while (line[q] === ' ' || line[q] === '\t') q++; return q > at; };
+  if (closing) {
+    space();
+    return line[q] === '>' ? { end: q + 1, name, closing } : BROKEN;
+  }
+  for (;;) {
+    const spaced = space();
+    if (line[q] === '>') return { end: q + 1, name, closing };
+    if (line.startsWith('/>', q)) return { end: q + 2, name, closing };
+    if (!spaced || q >= line.length) return BROKEN;
+    const attr = q;
+    while (q < line.length && !/[\s"'<>/=`]/.test(line[q])) q++;
+    if (q === attr) return BROKEN;
+    const back = q;
+    space();
+    if (line[q] !== '=') { q = back; continue; }
+    q++;
+    space();
+    if (line[q] === '"' || line[q] === "'") {
+      const e = line.indexOf(line[q], q + 1);
+      if (e < 0) return BROKEN;
+      q = e + 1;
+    } else {
+      const value = q;
+      while (q < line.length && !/[\s"'<>=`]/.test(line[q])) q++;
+      if (q === value) return BROKEN;
+    }
+  }
+}
+
+/**
+ * The index of the line that closes a copied block, reading from the line after its summary, or
+ * -1 when the text is not what Dependabot's renderer writes. That text is one HTML block: no
+ * blank line (after one Markdown is read again, and a tag could be literal), and on every line
+ * each `<` starts either the renderer's one comment or a complete tag, with no `<` inside it, for an element in
+ * RENDERED_TAGS. The block closes at the first line that is `</details>` and nothing else. A
+ * details tag's text anywhere before that line, in a tag, an attribute value or prose, is not
+ * that form. So the closing line found is the first closing details tag there is: nothing is
+ * read past, and nothing that could be literal is taken for it. Pure.
+ */
+function copiedBlockEnd(lines, from) {
+  for (let l = from; l < lines.length; l++) {
+    const line = lines[l].replace(/\r$/, '');
+    if (line === '</details>') return l;
+    // A carriage return inside a line is a line end to some readers: two of them hide a blank line.
+    if (!line.trim() || line.includes('\r') || /<\/?details/i.test(line)) return -1;
+    for (let p = line.indexOf('<'); p >= 0; p = line.indexOf('<', p)) {
+      if (line.startsWith(RENDERED_COMMENT, p)) { p += RENDERED_COMMENT.length; continue; }
+      const tok = htmlToken(line, p);
+      if (!tok || tok === BROKEN || !RENDERED_TAGS.has(tok.name)) return -1;
+      // The renderer escapes a literal less-than sign wherever it stands, an attribute value included.
+      if (line.slice(p + 1, tok.end).includes('<')) return -1;
+      p = tok.end;
+    }
+  }
+  return -1;
+}
+
+/** Whether a line outside the copied blocks is plain: it opens no code fence and holds no markup but `<br />`. A `<` that starts no tag, comment or declaration is text. Pure. */
+const plainLine = (line) => !/^ {0,3}(?:`{3,}|~{3,})/.test(line) && !/<[A-Za-z/!?]/.test(line.replaceAll('<br />', ''));
+
+/**
+ * A Dependabot description without the text Dependabot copies in from the dependencies' own
+ * repositories. Nobody in the reviewed repository writes that text and it does not ship, so its
+ * wording is not this repository's to answer for, and a reviewer that reads it takes a third
+ * party's words into its brief.
+ *
+ * The description is read from the top as the form Dependabot writes, and nothing is guessed:
+ * - a copied block: the line `<details>`, a line that is one of COPIED_SUMMARIES, then text as
+ *   copiedBlockEnd knows it, up to the line `</details>`. It becomes one line that names it;
+ * - a plain line (plainLine), which is kept.
+ * At the first line that is neither, the filter stops: that line and everything after it is kept
+ * as written. So a block under any other summary line and all it holds, a block whose text is not
+ * the renderer's (another block inside it, a blank line, other markup, text after its closing
+ * tag), a fenced example, a comment, a tag named in a code span, and Dependabot's own commands
+ * block at the end are read as any description is. Markdown is not interpreted at all: where the
+ * form is in doubt the text is read, not left out.
+ *
+ * The blocks are known by their shape, not by who wrote them: someone who edits a Dependabot
+ * description and writes a block of that shape has it left out like Dependabot's. Pure.
+ */
+export function withoutCopiedNotes(body) {
+  const lines = String(body ?? '').split('\n'); // a line keeps its \r, when it has one
+  const bare = (i) => (lines[i] ?? '').replace(/\r$/, '');
+  const out = [];
+  let i = 0;
+  for (; i < lines.length; i++) {
+    const line = bare(i);
+    const title = line === '<details>' ? COPIED_SUMMARIES.get(bare(i + 1)) : undefined;
+    if (title) {
+      const end = copiedBlockEnd(lines, i + 2);
+      if (end < 0) break;
+      out.push(`[${title}: copied in by Dependabot from the dependency's repository, not shown]${lines[end].endsWith('\r') ? '\r' : ''}`);
+      i = end;
+      continue;
+    }
+    if (!plainLine(line)) break;
+    out.push(lines[i]);
+  }
+  return [...out, ...lines.slice(i)].join('\n');
+}
+
 export function buildBrief(pr, files, commits, diff, protectedFiles = [], since = null) {
-  const body = (pr.body ?? '').slice(0, LIMITS.bodyChars);
+  // The cut comes after the copied text is left out, so Dependabot's own lines are what fill it.
+  const body = (isDependabot(pr) ? withoutCopiedNotes(pr.body) : (pr.body ?? '')).slice(0, LIMITS.bodyChars);
   // A message past LIMITS.commitChars is cut with the cut stated, as context and earlier reviews
   // are: a bare cut reads as a message that ends mid-sentence, and is reviewed as one.
   const commitLines = commits.slice(0, LIMITS.commits).map((c) => {
@@ -1416,6 +1580,7 @@ export async function reviewChange(ctx, { pr, files, commits, reviews = [], prot
   let review = null;
   let repaired = false;
   let repairedCaptured = false;
+  let repairedDescription = false;
   let textOnly = 0;
   const notes = [];
   // A text answer is not a review: nothing in prose is graded, grounded or posted. Five of eight
@@ -1485,6 +1650,14 @@ export async function reviewChange(ctx, { pr, files, commits, reviews = [], prot
         results.push({ type: 'tool_result', tool_use_id: u.id, is_error: true, content: checked.error });
         continue;
       }
+      // Asked before the findings are grounded: what the reviewer gives at a code line in answer
+      // is grounded with its next submission, like any other finding.
+      if (checked.descriptionOnly && !repairedDescription && turn < LIMITS.turns) {
+        repairedDescription = true;
+        ctx.log?.('  changes asked for only through findings that do not block, a description claim among them: one repair round offered');
+        results.push({ type: 'tool_result', tool_use_id: u.id, is_error: true, content: DESCRIPTION_ONLY_NUDGE });
+        continue;
+      }
       const bad = ungrounded(checked.review, corpus);
       if (bad.length && !repaired && turn < LIMITS.turns) {
         repaired = true;
@@ -1518,6 +1691,8 @@ export async function reviewChange(ctx, { pr, files, commits, reviews = [], prot
           notes.push('The review asked for changes but every blocking finding was about the wording of captured data. Re-run the check.');
         }
       }
+      // Its summary was written for a request for changes, so the approval says why it is one.
+      if (checked.descriptionOnly) notes.push(DESCRIPTION_ONLY_NOTE);
       review = checked.review;
       break;
     }
@@ -1643,6 +1818,8 @@ export function modelContext(secrets, dario) {
 
 /** The model settings REDLINE_MODELS_FILE may set, each replacing the env file's own. */
 export const MODEL_KEYS = ['REDLINE_MODEL', 'REDLINE_DEEP_MODEL', 'REDLINE_PIN_MODEL', 'REDLINE_FALLBACK_MODEL'];
+/** The one setting REDLINE_MODELS_FILE may set that is not a model: the round cap (roundCapOf). */
+export const ROUND_CAP_KEY = 'REDLINE_ROUND_CAP';
 
 /**
  * The matcher for a `<KEY>_TRACKS` value: a model id with one `*` where its version goes
@@ -1703,7 +1880,13 @@ export function compareVersions(a, b) {
  * The env file's settings with REDLINE_MODELS_FILE's model pins laid over them. That file holds
  * no secret: the host installs it from a reviewed repository, and the model bump moves its pins.
  * A key of MODEL_KEYS it sets replaces the env file's (said in notes when the two differ), and
- * `<KEY>_TRACKS` names the family the pin follows. Returns { secrets, tracks, notes } or { error }.
+ * `<KEY>_TRACKS` names the family the pin follows. ROUND_CAP_KEY, when the file sets it, replaces
+ * the env file's the same way. There it must be a whole number from 0 to 999 and anything else is
+ * an error, where the env file's own value that is not one counts as the default (roundCapOf).
+ * Both values are read trimmed, as roundCapOf reads the env file's, and there is a note only when
+ * they are not the same count. The note gives the env file's value only when it is a count: that
+ * file holds the host's secrets, and whatever else was typed on that line stays out of the log.
+ * Returns { secrets, tracks, notes } or { error }.
  */
 export function withModelsFile(secrets, readFile = (p) => readFileSync(p, 'utf8')) {
   const file = secrets.REDLINE_MODELS_FILE || '';
@@ -1726,6 +1909,18 @@ export function withModelsFile(secrets, readFile = (p) => readFileSync(p, 'utf8'
       if (!trackMatcher(t)) return { error: `${k}_TRACKS in ${file} must be a model id with one * for its version, such as gpt-*-sol; got ${t}` };
       tracks[k] = t;
     }
+  }
+  if (Object.hasOwn(pins, ROUND_CAP_KEY)) {
+    const cap = String(pins[ROUND_CAP_KEY]).trim();
+    if (!ROUND_CAP_VALUE.test(cap)) return { error: `${ROUND_CAP_KEY} in ${file} must be a whole number from 0 to 999 (0 is no cap); got ${cap || 'nothing'}` };
+    if (Object.hasOwn(secrets, ROUND_CAP_KEY)) {
+      const old = String(secrets[ROUND_CAP_KEY]).trim();
+      const oldIsCount = ROUND_CAP_VALUE.test(old);
+      if (!oldIsCount || Number(old) !== Number(cap)) {
+        notes.push(`${ROUND_CAP_KEY} in the env file (${oldIsCount ? old : 'not a count, so the default'}) is replaced by the models file (${cap})`);
+      }
+    }
+    out[ROUND_CAP_KEY] = cap;
   }
   return { secrets: out, tracks, notes };
 }
@@ -1770,6 +1965,15 @@ export function modelsRecord({ repo, pr, headSha, lens, at, pins, tracks, catalo
 
 async function main() {
   const env = process.env;
+  // The runner's workspace outlives the job, and the workflow uploads a verdict or a models record
+  // whenever the file is there. So what an earlier run left is removed before main reads the env
+  // file, the models file, the prompt or the context file: a run that main ends on one of them
+  // leaves nothing of another run's to upload. A run that fails before main starts, on a setting
+  // read while the module loads, does not get here and still leaves them.
+  const verdictFile = env.REDLINE_VERDICT_FILE || '';
+  if (verdictFile) rmSync(verdictFile, { force: true });
+  const modelsFile = env.REDLINE_MODELS_OUT || '';
+  if (modelsFile) rmSync(modelsFile, { force: true });
   const need = (k, src = env) => { if (!src[k]) { console.error(`::error::${k} is not set`); process.exit(2); } return src[k]; };
   let secrets;
   try { secrets = parseEnvFile(readFileSync(need('REDLINE_ENV_FILE'), 'utf8')); } catch (e) {
@@ -1787,10 +1991,6 @@ async function main() {
       console.error(`::error::REDLINE_CONTEXT_FILE: cannot read ${env.REDLINE_CONTEXT_FILE} (${e.code ?? e.message})`); process.exit(2);
     }
   }
-  // The runner's workspace outlives the job, so a file from an earlier run is removed before this
-  // one can leave it to be uploaded.
-  const verdictFile = env.REDLINE_VERDICT_FILE || '';
-  if (verdictFile) rmSync(verdictFile, { force: true });
   const dario = darioAccess(secrets);
   if (dario.error) { console.error(`::error::${dario.error}`); process.exit(2); }
   if (dario.warning) console.log(`::warning::${dario.warning}`);
@@ -1815,8 +2015,6 @@ async function main() {
   if (catalog.ids) console.log(`dario lists ${catalog.ids.length} models: ${catalog.ids.join(', ')}`);
   else console.log(`::warning::${catalog.why}; the review goes on without the list`);
   // Written whatever the review's outcome, so a run that fails still says what it was given.
-  const modelsFile = env.REDLINE_MODELS_OUT || '';
-  if (modelsFile) rmSync(modelsFile, { force: true });
   const writeModels = () => {
     const rec = modelsRecord({
       repo: ctx.repo, pr: ctx.pr, headSha: ctx.headSha, lens: LENS || 'first', at: new Date().toISOString(),

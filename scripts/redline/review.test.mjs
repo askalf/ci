@@ -10,7 +10,7 @@ import {
   parseEnvFile, readPrompt, safePath, buildDiff, planDiff, unshownFiles, checkoutCorpus, quoteIsGrounded, corpusOf, checkSubmission, finalVerdict,
   renderBody, verdictAtHead, isDeterministicApproval, runTool, runReview, buildBrief, contextSection, changedFilesSection, earlierReviewsSection, REVIEWER_LOGIN, LIMITS, metaPhrase,
   verdictRecord, verdictProblem, saveVerdict, VERDICT_VERSION,
-  reviewRunsOf, verdictAsReview, mergeVerdicts, roundsAsked, isCapNotice, capNoticeRounds, capNoticeQuote, lastRequest, renderCapBody, roundCapOf, DEFAULT_ROUND_CAP, ROUND_CAP_RULE, VERDICT_ARTIFACT, stripComments, DISPATCH_ACTOR, deltaSince, COMPARE_FILES_MAX,
+  DESCRIPTION_ONLY_NOTE, reviewRunsOf, verdictAsReview, mergeVerdicts, roundsAsked, isCapNotice, capNoticeRounds, capNoticeQuote, lastRequest, renderCapBody, roundCapOf, DEFAULT_ROUND_CAP, ROUND_CAP_RULE, VERDICT_ARTIFACT, stripComments, DISPATCH_ACTOR, deltaSince, COMPARE_FILES_MAX,
 } from './review.mjs';
 import { deflateRawSync } from 'node:zlib';
 import * as reviewModule from './review.mjs';
@@ -231,6 +231,16 @@ console.log('\n  submission, verdict and body');
   check('the description goes by its whole label, with an optional line; a commit message, a doc, or a file whose name begins the same way does not',
     ['PR description', 'pr description:12', 'Pull request body', 'pull-request text', ' PR text '].every((file) => checkSubmission({ verdict: 'REQUEST_CHANGES', summary: 's', findings: [{ ...onBody, file }] }).review.findings[0].severity === 'minor')
     && ['commit message', 'docs/README.md', 'src/pr-description.js', 'prbody.md', 'PR description.md', 'prbody/README.md', 'PR descriptions', 'PR description:12:3', 'PRdescription'].every((file) => checkSubmission({ verdict: 'REQUEST_CHANGES', summary: 's', findings: [{ ...onBody, file }] }).review.findings[0].severity === 'blocking'));
+  check('a review that asked for changes only on the description says so, for the loop to ask about once',
+    checkSubmission({ verdict: 'REQUEST_CHANGES', summary: 's', findings: [onBody], rule: 'misleading-text' }).descriptionOnly === true
+    && checkSubmission({ verdict: 'REQUEST_CHANGES', summary: 's', findings: [onBody, wording] }).descriptionOnly === true
+    // Wording alone is eased too, and there is no code behind it to ask about.
+    && checkSubmission({ verdict: 'REQUEST_CHANGES', summary: 's', findings: [wording], rule: 'reads-as-generated' }).descriptionOnly === false
+    // A finding that still blocks keeps the request for changes: nothing was lost.
+    && checkSubmission({ verdict: 'REQUEST_CHANGES', summary: 's', findings: [onBody, blocking] }).descriptionOnly === false
+    && checkSubmission({ verdict: 'APPROVE', summary: 's', findings: [{ ...onBody, severity: 'minor' }] }).descriptionOnly === false
+    // A request for changes that names no blocking finding at all still asks, and is not this case.
+    && checkSubmission({ verdict: 'REQUEST_CHANGES', summary: 's', findings: [{ ...onBody, severity: 'minor' }] }).descriptionOnly === false);
   check('attribution or a secret in the description still blocks',
     ['ai-attribution', 'secret-exposure', undefined].every((rule) => finalVerdict(checkSubmission({ verdict: 'REQUEST_CHANGES', summary: 's', findings: [{ ...onBody, rule }] }).review) === 'REQUEST_CHANGES'));
   const withSecret = checkSubmission({ verdict: 'REQUEST_CHANGES', summary: 's', findings: [wording, { ...blocking, rule: 'secret-exposure' }], rule: 'secret-exposure' }).review;
@@ -565,6 +575,67 @@ console.log('\n  earlier reviews on the PR');
   const { ctx, calls } = world({ turns: [submit({ ...APPROVE, findings: [GOOD] })] });
   const r = await runReview(ctx);
   check('APPROVE with a blocking finding posts REQUEST_CHANGES', r.verdict === 'REQUEST_CHANGES' && calls.posted[0].event === 'REQUEST_CHANGES');
+}
+{
+  // The description of the pull request in this world is "Adds it.".
+  const claim = { severity: 'blocking', file: 'PR description', quote: 'Adds it.', problem: 'The description says the token is added safely, and the code exports a secret.', rule: 'misleading-text' };
+  const asksOnDescription = { verdict: 'REQUEST_CHANGES', summary: 'Request changes: the description promises what the code does not do.', findings: [claim], rule: 'misleading-text' };
+  {
+    const { ctx, calls } = world({ turns: [submit(asksOnDescription), submit({ verdict: 'REQUEST_CHANGES', summary: 'The export leaks a secret.', findings: [GOOD, { ...claim, severity: 'minor' }], rule: 'secret-exposure' })] });
+    const r = await runReview(ctx);
+    check('a review that asks for changes only on the description is asked once which side is wrong, and the defect it then gives at the code line blocks',
+      r.verdict === 'REQUEST_CHANGES' && calls.model.length === 2 && JSON.stringify(calls.model[1].messages.at(-1)).includes('decide which side is wrong')
+        && calls.posted[0].event === 'REQUEST_CHANGES' && calls.posted[0].body.includes('Exports a secret from the environment.') && !calls.posted[0].body.includes(DESCRIPTION_ONLY_NOTE));
+  }
+  {
+    const { ctx, calls } = world({ turns: [submit(asksOnDescription), submit({ verdict: 'APPROVE', summary: 'The code holds; the description says more than it does.', findings: [{ ...claim, severity: 'minor' }] })] });
+    const r = await runReview(ctx);
+    check('when the reviewer answers that the code is acceptable, the review approves with the claim as a note and a summary of its own',
+      r.verdict === 'APPROVE' && calls.model.length === 2 && calls.posted[0].event === 'APPROVE' && calls.posted[0].body.includes('The code holds')
+        && !calls.posted[0].body.includes(DESCRIPTION_ONLY_NOTE));
+  }
+  {
+    const { ctx, calls } = world({ turns: [submit(asksOnDescription)] });
+    const r = await runReview(ctx);
+    check('asked once, not again: the same answer approves, and the approval says why a review that asked for changes is one',
+      r.verdict === 'APPROVE' && calls.model.length === 2 && calls.posted[0].event === 'APPROVE' && calls.posted[0].body.includes(DESCRIPTION_ONLY_NOTE));
+  }
+  {
+    // Every turn before the last is spent reading, and the claim comes first on the last turn: there is
+    // no turn left to answer a question in, so none is asked and the review approves with the line.
+    const lastTurnOnly = (b) => (b.messages.length > 2 * (LIMITS.turns - 1) ? submit(asksOnDescription) : use('redline_read', { path: 'src/b.js' }));
+    const { ctx, calls } = world({ turns: [lastTurnOnly] });
+    const r = await runReview(ctx);
+    check('a claim first submitted on the last turn is not sent back: the review approves there, with the line',
+      r.verdict === 'APPROVE' && calls.model.length === LIMITS.turns && calls.posted.length === 1 && calls.posted[0].event === 'APPROVE'
+        && calls.posted[0].body.includes(DESCRIPTION_ONLY_NOTE));
+  }
+  {
+    // A claim in the description and, beside it, a wording finding on a source file: both are eased.
+    const wordingInSource = { ...GOOD, rule: 'reads-as-generated', problem: 'The comment narrates the patch.' };
+    const mixed = { verdict: 'REQUEST_CHANGES', summary: 'Request changes: the description overstates the change and a comment narrates it.', findings: [claim, wordingInSource], rule: 'misleading-text' };
+    const { ctx, calls } = world({ turns: [submit(mixed)] });
+    const r = await runReview(ctx);
+    const asked = JSON.stringify(calls.model[1].messages.at(-1));
+    check('a claim in the description beside a wording finding elsewhere is asked about too, in words that hold for both, and the same answer approves with the line',
+      r.verdict === 'APPROVE' && calls.model.length === 2 && asked.includes('at least one of them is a claim in the pull request description') && !asked.includes('is on the pull request description')
+        && calls.posted[0].event === 'APPROVE' && calls.posted[0].body.includes(DESCRIPTION_ONLY_NOTE) && calls.posted[0].body.includes('The comment narrates the patch.'));
+  }
+  {
+    // Asked about the claim, the reviewer finds a secret in the description itself: that blocks where it is.
+    const secret = { severity: 'blocking', file: 'PR description', quote: 'Adds it.', problem: 'The description carries a live token.', rule: 'secret-exposure' };
+    const { ctx, calls } = world({ turns: [submit(asksOnDescription), submit({ verdict: 'REQUEST_CHANGES', summary: 'The description carries a token.', findings: [secret], rule: 'secret-exposure' })] });
+    const r = await runReview(ctx);
+    check('what the reviewer answers is weighed by the usual rules: a secret in the description still blocks, at the description',
+      r.verdict === 'REQUEST_CHANGES' && calls.model.length === 2 && calls.posted[0].event === 'REQUEST_CHANGES' && calls.posted[0].body.includes('The description carries a live token.')
+        && !calls.posted[0].body.includes(DESCRIPTION_ONLY_NOTE));
+  }
+  {
+    const { ctx, calls } = world({ turns: [submit({ verdict: 'REQUEST_CHANGES', summary: 'The comment narrates the patch.', findings: [{ ...GOOD, rule: 'reads-as-generated', problem: 'The comment narrates the patch.' }], rule: 'reads-as-generated' })] });
+    const r = await runReview(ctx);
+    check('a review held only by wording approves as before, with no question and no note',
+      r.verdict === 'APPROVE' && calls.model.length === 1 && !calls.posted[0].body.includes(DESCRIPTION_ONLY_NOTE));
+  }
 }
 
 console.log('\n  captured data (redline-protected)');
@@ -1020,6 +1091,29 @@ console.log('\n  CLI');
   let staleLeft = true;
   try { readFileSync(stale); } catch { staleLeft = false; }
   check('a verdict file left by an earlier run is removed before the review starts', !staleLeft);
+
+  // A run that main ends on a setting it reads leaves neither file of an earlier run: the workflow
+  // uploads a verdict or a models record whenever the file is there.
+  const staleModels = join(dir, 'earlier-models', 'models.json');
+  mkdirSync(join(dir, 'earlier-models'));
+  const leave = () => { writeFileSync(stale, '{"stale":true}\n'); writeFileSync(staleModels, '{"stale":true}\n'); };
+  const left = () => [stale, staleModels].filter((f) => existsSync(f)).length;
+  leave();
+  const noEnvName = spawnSync(process.execPath, [script], { env: { PATH: process.env.PATH, REDLINE_VERDICT_FILE: stale, REDLINE_MODELS_OUT: staleModels }, encoding: 'utf8' });
+  check('no REDLINE_ENV_FILE: exit 2, and neither file of an earlier run is left', noEnvName.status === 2 && noEnvName.stderr.includes('::error::REDLINE_ENV_FILE is not set') && left() === 0);
+  leave();
+  const noEnv = run({ ...base, REDLINE_MODELS_OUT: staleModels, REDLINE_ENV_FILE: join(dir, 'gone.env') });
+  check('an env file that cannot be read: exit 2, and neither file of an earlier run is left', noEnv.status === 2 && /::error::REDLINE_ENV_FILE: cannot read .*gone\.env/.test(noEnv.stderr) && left() === 0);
+  leave();
+  const capModels = join(dir, 'models.env');
+  writeFileSync(capModels, 'REDLINE_ROUND_CAP=eight\n');
+  const capEnv = join(dir, 'capped.env');
+  writeFileSync(capEnv, `DARIO_URL=http://127.0.0.1:9\nREDLINE_MODELS_FILE=${capModels}\n`);
+  const badCap = run({ ...base, REDLINE_MODELS_OUT: staleModels, REDLINE_ENV_FILE: capEnv, REDLINE_PROMPT_FILE: PROMPT_FIXTURE });
+  check('a round cap in the models file that is not a count: exit 2, the error names the key, and neither file of an earlier run is left',
+    badCap.status === 2 && badCap.stderr.includes('::error::REDLINE_ROUND_CAP in ') && badCap.stderr.includes('must be a whole number from 0 to 999 (0 is no cap); got eight') && left() === 0);
+  leave();
+  check('a prompt file that is not there leaves neither file either', run({ ...base, REDLINE_MODELS_OUT: staleModels, REDLINE_PROMPT_FILE: join(dir, 'gone.md') }).status === 2 && left() === 0);
 
   // A whole run of the CLI against a stub fetch loaded before review.mjs: every request is logged,
   // GitHub answers for one open PR and the model submits an approval.
@@ -1783,6 +1877,87 @@ console.log('\n  the delta since the last verdict');
   const prOf = (since) => buildBrief({ number: 7, title: 't', body: '', user: { login: 'a' }, head: { ref: 'h', sha: HEAD }, base: { ref: 'main', repo: { full_name: 'askalf/r' } } }, [], [], 'THE DIFF', [], since);
   check('buildBrief: a first review heads the diff plainly; a round with a delta says since when, and where the whole change is',
     prOf(null).includes('\nDiff:\nTHE DIFF') && prOf({ head: OLD, files: DELTA }).includes('Diff since the last review, at aaaaaaa (the whole change against main is one redline_diff call away') && prOf({ head: OLD, files: DELTA }).includes('THE DIFF'));
+  {
+    const { withoutCopiedNotes, htmlToken, DEPENDABOT_LOGIN, corpusOf, quoteIsGrounded } = reviewModule;
+    const block = (summary, ...inner) => ['<details>', `<summary>${summary}</summary>`, ...inner, '</details>'];
+    const NOTE = 'UPSTREAM-NOTE fix the parser, by a contributor and a tool';
+    const MARK = (s) => `[${s}: copied in by Dependabot from the dependency's repository, not shown]`;
+    const COMMANDS = block('Dependabot commands and options', '<br />', '', 'You can trigger Dependabot actions by commenting on this PR:');
+    const bodyOf = (...notes) => [
+      'Bumps the minor-and-patch group with 2 updates:', '', '| Package | From | To |', '| --- | --- | --- |', '| [alpha](https://example.com/alpha) | `1.0.0` | `1.0.1` |', '',
+      'Updates `alpha` from 1.0.0 to 1.0.1',
+      ...block('Release notes', '<p><em>Sourced from <a href="https://example.com/alpha/releases">alpha\'s releases</a>.</em></p>', '<blockquote>', '<h2>v1.0.1</h2>', '<ul>', `<li>${NOTE} <!-- raw HTML omitted --></li>`, ...notes, '</ul>', '</blockquote>'),
+      ...block('Changelog', '<blockquote>', '<p>UPSTREAM-CHANGELOG</p>', '</blockquote>'),
+      ...block('Commits', '<ul>', '<li><a href="https://example.com/c/1"><code>abc1234</code></a> UPSTREAM-COMMIT</li>', '</ul>'),
+      '<br />', '', 'Updates `beta` from 2.0.0 to 2.1.0', 'A NOTE A PERSON ADDED, on a requirement <2.0 and `code`', '', '---', '',
+      ...COMMANDS,
+    ];
+    const BODY = bodyOf().join('\n');
+    const own = withoutCopiedNotes(BODY);
+    const KEPT = ['| [alpha](https://example.com/alpha) | `1.0.0` | `1.0.1` |', 'Updates `alpha` from 1.0.0 to 1.0.1', '<br />', 'Updates `beta` from 2.0.0 to 2.1.0', 'A NOTE A PERSON ADDED, on a requirement <2.0 and `code`'];
+    check('withoutCopiedNotes: the three copied blocks go, each leaving one line that names it',
+      !own.includes('UPSTREAM-') && ['Release notes', 'Changelog', 'Commits'].every((s) => own.split('\n').filter((l) => l === MARK(s)).length === 1));
+    check('...Dependabot\'s own lines and a line a person added stay, and the commands block is kept as written',
+      KEPT.every((l) => own.split('\n').includes(l)) && own.endsWith(COMMANDS.join('\n')));
+    const crlf = withoutCopiedNotes(bodyOf().join('\r\n'));
+    check('...the same with CRLF line ends', !crlf.includes('UPSTREAM-') && KEPT.every((l) => crlf.split('\r\n').includes(l)) && crlf.split('\r\n').includes(MARK('Changelog')) && crlf.endsWith(COMMANDS.join('\r\n')));
+    const same = (...lines) => withoutCopiedNotes(lines.join('\n')) === lines.join('\n');
+    const LATER = block('Commits', 'A LATER BLOCK');
+    check('...a summary line that is not one of the three exact lines is not a copied block: it and a block after it are kept',
+      ['<summary>  COMMITS  </summary>', '<summary>commits</summary>', '<summary>Commits </summary>', '<summary> Commits</summary>', '<summary>Commits</summary> x', '<summary>Maintainer changes</summary>', '<summary>Notes from the team</summary>']
+        .every((s) => same('<details>', s, 'A MAINTAINER\'S TEXT', '</details>', ...LATER)));
+    check('...a block under another summary is kept whole, a block of a copied title inside it and all after it too',
+      same(...block('Notes from the team', 'BEFORE', ...block('Commits', 'THE TEAM\'S OWN LIST'), 'AFTER'), 'TAIL', ...LATER));
+    check('...a block that never closes is kept as written with all after it, a closed block of a copied title inside it too',
+      same('Updates `alpha` from 1.0.0 to 1.0.1', '<details>', '<summary>Release notes</summary>', 'UPSTREAM-OPEN')
+      && same('<details>', '<summary>Release notes</summary>', 'UPSTREAM-OPEN', ...block('Changelog', 'INNER'), 'AFTER'));
+    check('...a copied-title block that holds a block of its own, or a details tag\'s text anywhere (an attribute value, a longer element name, prose), is kept whole with all after it',
+      same(...block('Release notes', 'OUTER', ...block('More', 'NESTED'), 'OUTER AGAIN'), ...LATER) && same(...block('Release notes', '<a title="</details>">X</a>', 'Y'), ...LATER)
+      && same(...block('Release notes', "<a title='<details>'>X</a>"), ...LATER) && same(...block('Changelog', '<details-panel>X</details-panel>'), ...LATER) && same(...block('Changelog', 'the &lt;/details&gt; tag, written </DETAILS here'), ...LATER));
+    check('...a comment that is not the renderer\'s one comment keeps the block: an ending HTML also takes, a tag inside it, one that runs past its line',
+      same(...block('Release notes', '<!-- note --!> </details> A MAINTAINER\'S NOTE <!-- end -->', 'MORE'), 'TAIL', ...LATER) && same(...block('Release notes', '<!-- note --!> A MAINTAINER\'S NOTE <!-- end -->', 'MORE'), ...LATER)
+      && same(...block('Release notes', '<!-- a closing tag: x -->', 'Y'), ...LATER) && same(...block('Release notes', 'X', '<!-- never closed', 'Y'), ...LATER) && same(...block('Release notes', '<!--raw HTML omitted-->'), ...LATER));
+    check('...a blank line inside a block keeps it, so a tag that Markdown would read as code is never taken for the block\'s end, with a real closing tag after it or none',
+      same(...block('Release notes', '<p>X</p>', '', 'A paragraph that names `</details>` in code, then more.', 'MORE UPSTREAM TEXT'), ...LATER)
+      && same('<details>', '<summary>Release notes</summary>', '<p>X</p>', '', 'A paragraph that names `</details>` in code, then more.', 'MORE UPSTREAM TEXT')
+      && same(...block('Release notes', '<pre><code>a', '', 'b', '</code></pre>'), ...LATER)
+      && same(...block('Release notes', 'first\r\rsecond'), ...LATER) && same(...block('Release notes', 'first\rsecond'), ...LATER));
+    check('...markup that is not the renderer\'s keeps the block: an element outside its set, a tag or a quote that runs past its line, a declaration, a bare <, a closing tag with more after its name',
+      same(...block('Release notes', '<span>X</span>'), ...LATER) && same(...block('Release notes', '<textarea>'), ...LATER) && same(...block('Release notes', '<a title="x', '">'), ...LATER) && same(...block('Release notes', '<a title="x>'), ...LATER)
+      && same(...block('Release notes', '<![CDATA[ x ]]>'), ...LATER) && same(...block('Release notes', 'a < b'), ...LATER) && same(...block('Release notes', 'X', '</p x>'), ...LATER));
+    check('...a less-than sign inside a quoted attribute value is not the renderer\'s, which escapes it: the block and what follows are kept; the escaped form in the same place is left out',
+      same(...block('Release notes', '<a title="size < 2">limit</a>', 'A MAINTAINER\'S TEXT'), 'A SUFFIX', ...LATER) && same(...block('Release notes', "<a title='<b'>x</a>"), ...LATER)
+      && withoutCopiedNotes([...block('Release notes', '<a title="size &lt; 2">limit</a>', 'UPSTREAM-TEXT'), 'A SUFFIX'].join('\n')) === [MARK('Release notes'), 'A SUFFIX'].join('\n'));
+    check('...text after the closing tag on its line, or before it, keeps the block, so a note there is read',
+      same('<details>', '<summary>Changelog</summary>', 'X', '</details> A NOTE RIGHT AFTER', 'NEXT', ...LATER) && same('<details>', '<summary>Changelog</summary>', 'X', 'Y</details>', ...LATER) && same('<details>', '<summary>Changelog</summary>', 'X', ' </details>', ...LATER));
+    check('...an opening that is not the bare tag alone on its line is not the shape, and stops the filter',
+      same('See <details>', '<summary>Changelog</summary>', 'X', '</details>', ...LATER) && same('<details open>', '<summary>Changelog</summary>', 'X', '</details>', ...LATER) && same('<details>', '', '<summary>Changelog</summary>', 'X', '</details>', ...LATER)
+      && same('<details><summary>Changelog</summary>', 'X', '</details>', ...LATER) && same(' <details>', '<summary>Changelog</summary>', 'X', '</details>', ...LATER) && same('<DETAILS>', '<summary>Changelog</summary>', 'X', '</details>', ...LATER));
+    check('...a fenced example of the shape survives byte for byte, with a tilde fence, an indented fence and indented code too',
+      same('An example:', '```html', ...block('Commits', 'A MAINTAINER\'S EXAMPLE'), '```', 'after it', ...LATER) && same('~~~', ...block('Commits', 'EXAMPLE'), '~~~') && same('   ```', ...block('Commits', 'EXAMPLE'), '   ```')
+      && same(...block('Changelog', 'X').map((l) => `    ${l}`), ...LATER));
+    check('...Markdown is not interpreted: a tag named in a code span, in a link, or after an escaped backtick stops the filter like any markup, and the block after it is kept',
+      same('The `<details>` tag is named here.', '', ...LATER) && same('[docs](https://example.org/`v) <details> then `', '<summary>Team notes</summary>', ...block('Commits', 'THE TEAM\'S SUBSECTION'), '</details>')
+      && same('An escaped \\`<details>\\` here', ...LATER) && same('An autolink <https://example.com>', ...LATER));
+    check('...other markup outside the blocks stops the filter: a closing tag with nothing open, another element, a comment, a line break written another way',
+      same('a stray </details> in a sentence', ...LATER) && same('<div>', ...LATER, '</div>') && same('<!-- a note', ...LATER, '-->') && same('<!-- a note -->', ...LATER) && same('<br>', ...LATER) && same('<br/>', ...LATER));
+    const afterStop = withoutCopiedNotes([...block('Changelog', '<p>UPSTREAM-A</p>'), '<span>a person\'s markup</span>', ...LATER].join('\n'));
+    check('...a block before the line that stops the filter is still left out', afterStop === [MARK('Changelog'), '<span>a person\'s markup</span>', ...LATER].join('\n'));
+    check('...an empty or missing description is an empty one', withoutCopiedNotes('') === '' && withoutCopiedNotes(null) === '' && withoutCopiedNotes(undefined) === '');
+    check('htmlToken: a complete tag with its whole name and its quoted values, text, and markup the line does not finish',
+      htmlToken('<a href="x>y">', 0).end === 14 && htmlToken('x</DETAILS >', 1).name === 'details' && htmlToken('x</DETAILS >', 1).closing && htmlToken('<details-panel>', 0).name === 'details-panel'
+      && htmlToken('<br/>', 0).end === 5 && htmlToken('<a href=x data-k = "v" hidden>', 0).end === 30 && htmlToken('a < b', 2) === null && htmlToken('<2.0', 0) === null
+      && [['<!-- c -->', 0], ['<a href="x', 0], ['<a', 0], ['<a b=>', 0], ['</a b>', 0], ['</>', 0], ['<!doctype x>', 0], ['<?x?>', 0], ['<a"b">', 0], ['<a/b>', 0]].every(([l, p]) => typeof htmlToken(l, p) === 'symbol'));
+    const prBy = (user, body = BODY) => buildBrief({ number: 7, title: 'build(deps): bump the group', body, user, head: { ref: 'dependabot/npm_and_yarn/group', sha: HEAD }, base: { ref: 'main', repo: { full_name: 'askalf/r' } } }, [], [], 'THE DIFF');
+    const bot = prBy({ login: DEPENDABOT_LOGIN, type: 'Bot' });
+    check('buildBrief: a Dependabot pull request is read without the copied text, so a finding cannot quote it; what a person added can still be quoted',
+      !bot.includes('UPSTREAM-') && !quoteIsGrounded(NOTE, corpusOf(bot)) && quoteIsGrounded('A NOTE A PERSON ADDED, on a requirement <2.0 and `code`', corpusOf(bot)) && bot.includes(MARK('Release notes')));
+    check('...the same description is not filtered for a person, for an account that only carries the name, for a bot under another name, or with no author type',
+      [{ login: 'a', type: 'User' }, { login: DEPENDABOT_LOGIN, type: 'User' }, { login: 'dependabot', type: 'Bot' }, { login: DEPENDABOT_LOGIN }].every((u) => quoteIsGrounded(NOTE, corpusOf(prBy(u)))));
+    const LONG = bodyOf(`<li>${'UPSTREAM-LONG '.repeat(700)}</li>`).join('\n');
+    check('...the description\'s cut comes after the copied text is left out: a second update below a long block is still shown',
+      LONG.indexOf('Updates `beta`') > LIMITS.bodyChars && prBy({ login: DEPENDABOT_LOGIN, type: 'Bot' }, LONG).includes('Updates `beta` from 2.0.0 to 2.1.0') && !prBy({ login: 'a', type: 'User' }, LONG).includes('Updates `beta` from 2.0.0 to 2.1.0'));
+  }
   check('runTool redline_diff: the whole change, one path, an unknown path, nothing without files',
     runTool(root, 'redline_diff', {}, { diffFiles: [{ filename: 'src/b.js', status: 'modified', patch: PATCH }] }).includes('+export const token')
     && runTool(root, 'redline_diff', { path: 'src/b.js' }, { diffFiles: [{ filename: 'src/b.js', patch: PATCH }, { filename: 'src/c.js', patch: '+c' }] }).includes('+export const token')
@@ -2027,7 +2202,7 @@ console.log('\n  earlier verdicts from the runs, and the round cap');
 
 console.log('\n  model pins: the models file, the newest of a family, the list dario serves');
 {
-  const { trackMatcher, newestMatching, compareVersions, withModelsFile, readCatalog, modelsRecord, MODEL_KEYS } = reviewModule;
+  const { trackMatcher, newestMatching, compareVersions, withModelsFile, readCatalog, modelsRecord, MODEL_KEYS, ROUND_CAP_KEY } = reviewModule;
   check('a family is a model id with one * for its version', !!trackMatcher('gpt-*-sol') && !!trackMatcher('claude-opus-*') && !!trackMatcher('GPT-*-Astra'));
   check('no *, two *, a space or other characters is not a family',
     !trackMatcher('gpt-6-sol') && !trackMatcher('gpt-*-*') && !trackMatcher('gpt *-sol') && !trackMatcher('gpt-(*)-sol') && !trackMatcher('') && !trackMatcher(undefined));
@@ -2063,6 +2238,40 @@ console.log('\n  model pins: the models file, the newest of a family, the list d
   const badTrack = withModelsFile({ REDLINE_MODELS_FILE: '/m.env' }, () => 'REDLINE_MODEL_TRACKS=gpt-6.2-sol');
   check('a family with no * is an error', /REDLINE_MODEL_TRACKS .* one \*/.test(badTrack.error ?? ''));
   check('MODEL_KEYS are the four model settings', MODEL_KEYS.join() === 'REDLINE_MODEL,REDLINE_DEEP_MODEL,REDLINE_PIN_MODEL,REDLINE_FALLBACK_MODEL');
+
+  // The round cap is the one other setting the models file may set.
+  const capFrom = (envFile, text) => withModelsFile({ ...envFile, REDLINE_MODELS_FILE: '/m.env' }, () => text);
+  check('ROUND_CAP_KEY is the env file\'s own name for the cap', ROUND_CAP_KEY === 'REDLINE_ROUND_CAP');
+  check('the models file left the cap alone until it sets one', laid.secrets.REDLINE_ROUND_CAP === undefined && capFrom({ REDLINE_ROUND_CAP: '6' }, 'REDLINE_MODEL=m').secrets.REDLINE_ROUND_CAP === '6');
+  const capOver = capFrom({ REDLINE_ROUND_CAP: '4' }, 'REDLINE_ROUND_CAP=8\n');
+  check('a cap in the models file replaces the env file\'s, and the note gives both', capOver.secrets.REDLINE_ROUND_CAP === '8' && roundCapOf(capOver.secrets.REDLINE_ROUND_CAP) === 8
+    && capOver.notes.length === 1 && capOver.notes[0] === 'REDLINE_ROUND_CAP in the env file (4) is replaced by the models file (8)');
+  const capAlone = capFrom({}, 'REDLINE_ROUND_CAP=8\n');
+  check('a cap only the models file sets is taken, with no note', capAlone.secrets.REDLINE_ROUND_CAP === '8' && capAlone.notes.length === 0);
+  check('the same cap in both files is no note', capFrom({ REDLINE_ROUND_CAP: '8' }, 'REDLINE_ROUND_CAP=8\n').notes.length === 0);
+  const capOff = capFrom({ REDLINE_ROUND_CAP: '8' }, 'REDLINE_ROUND_CAP=0\n');
+  check('a cap of 0 in the models file turns the cap off', capOff.secrets.REDLINE_ROUND_CAP === '0' && roundCapOf(capOff.secrets.REDLINE_ROUND_CAP) === 0);
+  check('a cap in the models file that is not a whole number from 0 to 999 is an error naming the file',
+    ['', 'eight', '-1', '1000', '8 rounds', '8.0', '+8'].every((v) => /^REDLINE_ROUND_CAP in \/m\.env must be a whole number from 0 to 999/.test(capFrom({ REDLINE_ROUND_CAP: '4' }, `REDLINE_ROUND_CAP=${v}\n`).error ?? '')));
+  check('an empty cap in the models file is said as nothing', / got nothing$/.test(capFrom({}, 'REDLINE_ROUND_CAP=\n').error ?? ''));
+  // The env file's own cap, with a models file that sets none: taken as it is written, never an
+  // error, and read as a count afterwards as it always was.
+  const envCap = (v) => capFrom({ REDLINE_ROUND_CAP: v }, 'REDLINE_MODEL=m');
+  check('the env file\'s own cap that is not a count is no error and counts as the default',
+    ['eight', '', '-1', '1000'].every((v) => envCap(v).error === undefined && envCap(v).secrets.REDLINE_ROUND_CAP === v && roundCapOf(envCap(v).secrets.REDLINE_ROUND_CAP) === DEFAULT_ROUND_CAP));
+  check('the env file\'s own cap that is a count is read as that count', envCap('12').error === undefined && roundCapOf(envCap('12').secrets.REDLINE_ROUND_CAP) === 12);
+  // The env file holds the host's secrets: what was typed on its cap line reaches the log only when it is a count.
+  const pasted = capFrom({ REDLINE_ROUND_CAP: 'pasted-by-mistake' }, 'REDLINE_ROUND_CAP=8\n');
+  check('an env file cap that is not a count is replaced without being printed', pasted.secrets.REDLINE_ROUND_CAP === '8' && pasted.notes.length === 1
+    && pasted.notes[0] === 'REDLINE_ROUND_CAP in the env file (not a count, so the default) is replaced by the models file (8)' && !pasted.notes.join().includes('pasted'));
+  check('an empty env file cap is said the same way', capFrom({ REDLINE_ROUND_CAP: '' }, 'REDLINE_ROUND_CAP=8\n').notes[0] === 'REDLINE_ROUND_CAP in the env file (not a count, so the default) is replaced by the models file (8)');
+  // A quoted count with spaces in it: the env parser keeps the spaces and roundCapOf trims them, so it is a count, and 0 is no cap.
+  const padded = parseEnvFile('REDLINE_ROUND_CAP=" 0 "\n');
+  check('a quoted, space-padded count in the env file is said as the count it is read as', padded.REDLINE_ROUND_CAP === ' 0 ' && roundCapOf(padded.REDLINE_ROUND_CAP) === 0
+    && capFrom(padded, 'REDLINE_ROUND_CAP=8\n').notes[0] === 'REDLINE_ROUND_CAP in the env file (0) is replaced by the models file (8)');
+  check('the same count written another way in the two files is no note', capFrom({ REDLINE_ROUND_CAP: ' 8 ' }, 'REDLINE_ROUND_CAP=8\n').notes.length === 0 && capFrom({ REDLINE_ROUND_CAP: '08' }, 'REDLINE_ROUND_CAP=8\n').notes.length === 0);
+  const paddedPin = capFrom({ REDLINE_ROUND_CAP: '4' }, 'REDLINE_ROUND_CAP=" 8 "\n');
+  check('a quoted, space-padded count in the models file is taken trimmed', paddedPin.error === undefined && paddedPin.secrets.REDLINE_ROUND_CAP === '8' && paddedPin.notes[0] === 'REDLINE_ROUND_CAP in the env file (4) is replaced by the models file (8)');
 
   let seen = null;
   const listing = async (url, init) => { seen = { url, key: init.headers['x-api-key'] }; return new Response(JSON.stringify({ data: [{ id: 'gpt-6.2-sol' }, { id: 'claude-opus-5-5' }, { id: 'gpt-6.2-sol' }, { id: 7 }, {}] }), { status: 200 }); };

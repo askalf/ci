@@ -55,6 +55,8 @@ console.log('\n  bumpPins: each tracked pin to its family\'s newest');
   check('only the pin lines change: comments, families and blank lines stay',
     text.split('\n').length === FIRST.split('\n').length && text.includes('# pins\n') && text.includes('REDLINE_MODEL_TRACKS=gpt-*-sol\n') && text.includes('REDLINE_MODEL=gpt-6.2-sol\n'));
   check('a file already at the newest moves nothing', bumpPins(text, SEAT).changes.length === 0 && bumpPins(text, SEAT).text === text);
+  const capped = bumpPins(`${FIRST}REDLINE_ROUND_CAP=8\n`, SEAT);
+  check('a round cap in the file is left as it is while the pins move', capped.text === `${text}REDLINE_ROUND_CAP=8\n` && capped.changes.length === changes.length);
   check('a pin with no family, or an empty untracked pin, stays', bumpPins(SECOND, SEAT).changes.map((c) => c.key).join() === '' && bumpPins(SECOND, SEAT).text === SECOND);
   check('a family nothing in the list matches leaves its pin', bumpPins('REDLINE_MODEL_TRACKS=gpt-*-nova\nREDLINE_MODEL=gpt-6-sol\n', SEAT).changes.length === 0);
   check('an empty pin with a family is filled', bumpPins('REDLINE_PIN_MODEL_TRACKS=gpt-*-terra\nREDLINE_PIN_MODEL=\n', SEAT).text === 'REDLINE_PIN_MODEL_TRACKS=gpt-*-terra\nREDLINE_PIN_MODEL=gpt-6.1-terra\n');

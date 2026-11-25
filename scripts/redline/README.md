@@ -25,11 +25,29 @@ as captured data: a wording finding on it (its own rule `reads-as-generated`, `a
 `misleading-text`; each finding carries a rule) is sent back once and then dropped, since nobody
 writes that text by hand. A correctness or security finding, or a secret, stands there as anywhere, a finding there
 with no rule is asked about once and then stands, and a mark the pull request itself adds counts
-for nothing until it has merged. A `reads-as-generated` finding (how a sentence reads) is minor
+for nothing until it has merged. A pull request Dependabot opened (author `dependabot[bot]`, an
+account of type Bot) has its description read without the text Dependabot copies in from the
+dependencies' repositories. The description is read from the top as the form Dependabot writes,
+and Markdown is not interpreted. A copied block is the line `<details>`, then the exact line
+`<summary>Release notes</summary>`, `<summary>Changelog</summary>` or `<summary>Commits</summary>`,
+then the text Dependabot's renderer writes (no blank line, no markup but that renderer's elements
+and its one comment, no details tag's text) up to the line `</details>`. It becomes one line in
+the brief that names it, so a finding cannot quote it. A line with no markup but `<br />` that
+opens no code fence is kept. At the first line that is neither, the filter stops, and the rest is
+read as any description is: where the form is in doubt the text is read, not left out. The blocks are known by their shape, not by who wrote them:
+a block of that shape someone adds to a Dependabot description is left out too. `local.mjs` packs the author's account
+type with `--pr`, so a local review reads such a description the same way. A `reads-as-generated` finding (how a sentence reads) is minor
 wherever it is, whatever severity the model gave it, and so is a `misleading-text` finding on the
 pull request's description (the file the model names `PR description`): the description is not
 what ships and an author edits it in seconds. A review that asked for changes only for such
-findings approves; attribution and a secret in the description still block. `redline_search` runs in a child process killed
+findings approves; attribution and a secret in the description still block. When at least one
+of the findings eased that way is a claim in the description, and the reviewer has a turn left,
+it is asked once which side is wrong before the review approves: a defect the code would have
+whatever the description said can be given at its code line instead, where it is weighed like any
+other finding and can block. The question gives the reviewer that one chance; it does not move
+the finding itself. A review held only by wording is not asked. A review that gives the same
+answer again approves, and its body says that it asked for changes only for findings that do not
+block. `redline_search` runs in a child process killed
 after 10 seconds, so a pattern that backtracks without end cannot stall the review.
 
 Hosted mode. A caller with no runner host passes `hosted-runner` (a GitHub-hosted runner label)
@@ -108,6 +126,14 @@ deploy instead of being typed into the env file. Its `REDLINE_MODEL`, `REDLINE_D
 `REDLINE_PIN_MODEL` and `REDLINE_FALLBACK_MODEL` replace the env file's (the log says so when the
 two differ), and a set name whose file cannot be read ends the run. `<KEY>_TRACKS` names the
 family a pin follows, as a model id with one `*` for its version: `gpt-*-sol`, `claude-opus-*`.
+
+The same file may set `REDLINE_ROUND_CAP`, the one setting in it that is not a model, so a
+host's round cap can come from a reviewed repository too. It replaces the env file's, and the
+log says so when the two are not the same count, giving the env file's value only when it is
+one. Both are read trimmed.
+There it must be a whole number from 0 to 999 (0 turns the cap
+off): anything else ends the run. The env file's own `REDLINE_ROUND_CAP` is read as before, and a
+value there that is not such a number counts as the default.
 
 Every run lists the models dario serves on `GET /v1/models` (its Claude catalog and the ChatGPT
 seat's models, whatever the key), prints them in the log, and writes `models.json`: the pins, their
