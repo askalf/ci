@@ -937,8 +937,11 @@ const NONBLOCK = fsConstants.O_NONBLOCK ?? 0;
 
 /**
  * Open the file at abs for reading, without blocking, and only when it is a regular file: the
- * descriptor, or a throw (code EISDIR for a directory, ENOTREG for a FIFO, socket or device) with
- * nothing left open. `rel` names it in the message.
+ * descriptor, or a throw with nothing left open. An error of the open itself propagates as it is
+ * (ENOENT, or ENXIO for a Unix socket on Linux); a path that opens is then refused with code
+ * EISDIR when it is a directory and ENOTREG when it is another kind of file that is not regular (a
+ * FIFO, a device). It does not look at the link count: reads need a regular file, and writes
+ * (writeWhole) need one with one name as well. `rel` names it in the message.
  */
 export function openRegular(abs, rel) {
   const fd = openSync(abs, fsConstants.O_RDONLY | NONBLOCK);
@@ -959,21 +962,24 @@ export function openRegular(abs, rel) {
  * descriptor shows a regular file with one name: another name for the same file (a hard link a
  * command made) would change with it, unchecked and uncounted, so such a file, a FIFO, a socket or a
  * device is an ordinary tool error with nothing changed. An absent one is created exclusively. Once
- * the file is truncated, a write or close that fails leaves it in a state nobody chose: that is
+ * the file is truncated, or created, a failure leaves it in a state nobody chose: that is
  * WriteFailed, which the tools do not catch, so the run ends as one that could not finish, no bundle
  * is made, and the dispatcher tries the head once more on a fresh checkout. `io` is for the tests.
  */
 export const WRITE_IO = { openSync, fstatSync, ftruncateSync, writeFileSync, closeSync };
 export function writeWhole(abs, rel, bytes, io = WRITE_IO) {
   let fd;
+  // From the moment a file is truncated, or created, the checkout differs from what any tool
+  // reported: a failure after that is WriteFailed, so the run ends and nothing is committed.
+  let changing = false;
   try {
     fd = io.openSync(abs, fsConstants.O_RDWR | NONBLOCK);
   } catch (e) {
     if (e?.code !== 'ENOENT') throw e;
     fd = io.openSync(abs, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | NONBLOCK, 0o666);
+    changing = true;
   }
   let open = true;
-  let changing = false;
   try {
     const st = io.fstatSync(fd);
     if (!st.isFile()) throw Object.assign(new Error(`${rel} is not a regular file; it is not changed here`), { code: 'ENOTREG' });
@@ -1681,8 +1687,9 @@ async function answerReview(ctx) {
           const st = fstatSync(fd);
           if (st.size > LIMITS.fileBytes) return `error: ${t.rel} is larger than ${LIMITS.fileBytes} bytes`;
           const buf = readFileSync(fd);
-          closeSync(fd);
+          const readFd = fd;
           fd = null;
+          closeSync(readFd);
           if (buf.includes(0)) return `error: ${t.rel} is a binary file`;
           const text = buf.toString('utf8');
           // Bytes that are not UTF-8 would come back as U+FFFD: such a file is not edited at all.

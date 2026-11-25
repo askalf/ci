@@ -486,6 +486,13 @@ console.log('\n  what the model is shown');
     const created = join(d2, 'created.txt');
     writeWhole(created, 'created.txt', Buffer.from('new'));
     check('an absent file is created', readFileSync(created, 'utf8') === 'new');
+    // A failure right after the exclusive open created the file is WriteFailed: the new file is a
+    // change already. The same failure on an existing file, before it is truncated, is not.
+    const fstatFails = { ...WRITE_IO, fstatSync: () => { throw Object.assign(new Error('EIO: i/o error, fstat'), { code: 'EIO' }); } };
+    const afterCreate = await throws(() => writeWhole(join(d2, 'made.txt'), 'made.txt', Buffer.from('x'), fstatFails));
+    check('a failure after the file was created is WriteFailed', afterCreate instanceof WriteFailed && /writing made\.txt failed partway \(EIO\)/.test(afterCreate.message), String(afterCreate));
+    const beforeTruncate = await throws(() => writeWhole(created, 'created.txt', Buffer.from('y'), fstatFails));
+    check('the same failure on an existing file before truncation is an ordinary error, the file unchanged', beforeTruncate?.code === 'EIO' && !(beforeTruncate instanceof WriteFailed) && readFileSync(created, 'utf8') === 'new', String(beforeTruncate));
     // A FIFO with no writer would block a plain open forever; it is refused at once.
     if (process.platform !== 'win32' && spawnSync('mkfifo', [join(d2, 'pipe')]).status === 0) {
       check('fix_read refuses a FIFO without blocking', fixRead(d2, { path: 'pipe' }) === 'error: pipe is not a regular file');
@@ -986,6 +993,19 @@ if (!gitOk) {
     const { record: r } = await runFix(w.ctx);
     check('the run could not finish, says which file and why, and nothing is committed', r.outcome === 'refused'
       && r.notes === `${UNFINISHED_PREFIX} writing src/b.js failed partway (ENOSPC), so the file may be damaged` && r.new_head === null && !existsSync(join(w.out, 'fix.bundle')) && w.calls.model.length === 1, r.notes);
+    rmSync(w.out, { recursive: true, force: true });
+    rmSync(repo.dir, { recursive: true, force: true });
+  }
+
+  {
+    // fix_write of a new file whose descriptor check fails after the exclusive open made it: the run
+    // ends as one that could not finish and nothing is committed, the empty file with it.
+    const repo = makeRepo();
+    const w = world(repo, { turns: [tool('fix_write', { path: 'src/new.js', content: 'export const n = 1;\n' }), finish()] });
+    w.ctx.writeIo = { ...WRITE_IO, fstatSync: () => { throw Object.assign(new Error('EIO: i/o error, fstat'), { code: 'EIO' }); } };
+    const { record: r } = await runFix(w.ctx);
+    check('a failure after fix_write created the file ends the run, no commit, no bundle', r.outcome === 'refused'
+      && r.notes === `${UNFINISHED_PREFIX} writing src/new.js failed partway (EIO), so the file may be damaged` && r.new_head === null && !existsSync(join(w.out, 'fix.bundle')), r.notes);
     rmSync(w.out, { recursive: true, force: true });
     rmSync(repo.dir, { recursive: true, force: true });
   }
