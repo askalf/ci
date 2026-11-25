@@ -2,7 +2,7 @@
 // The model and GitHub are stubbed through ctx.fetch; git is real, on throwaway repositories under
 // the temp directory. Nothing leaves the machine.
 
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, symlinkSync, chmodSync, statSync, readdirSync, fstatSync, closeSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, symlinkSync, chmodSync, statSync, readdirSync, fstatSync, closeSync, openSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer as createNetServer } from 'node:net';
@@ -17,7 +17,7 @@ import {
   LIMITS, OUTCOMES, AUTHOR, FIX_VERSION, DEFAULT_MODEL, SUBJECT_BANNED, EFFORT_LEVELS, fixEffort, priorRounds, REVIEW_PAGES_MAX,
   HISTORY, FIX_POSTER, appliedFixComments, fixVerdicts, historyFinding, allReviews, repoFixHistory, formatHistory,
   LESSONS, lessonsAccess, lessonQuery, fetchLessons,
-  runIdentity, alteredInTransit, alteredLines, fixRead, fixSearch, UNFINISHED_PREFIX, unfinished, CONNECTION_CUT_CHARS, occurrences, shownText, shownView, replaceFile, REPLACE_IO,
+  runIdentity, alteredInTransit, alteredLines, fixRead, fixSearch, UNFINISHED_PREFIX, unfinished, CONNECTION_CUT_CHARS, occurrences, shownText, shownView, writeWhole, WRITE_IO, WriteFailed,
 } from './fix.mjs';
 import { bumpCaller, fixCallerYaml, REVIEW_WORKFLOW, FIX_WORKFLOW, PUBLIC_TEXT_WORKFLOW, POST_WORKFLOW, CALLERS } from './pin.mjs';
 
@@ -453,61 +453,28 @@ console.log('\n  what the model is shown');
     check('a large binary is refused from its first 8 KB', fixRead(d2, { path: 'blob.bin' }) === 'error: binary file, not readable as text');
     writeFileSync(join(d2, 'big.log'), Buffer.alloc(LIMITS.readFileBytes + 1_000, 'a'));
     check('a text file past readFileBytes is refused, and the error says the lane does not change it', /^error: the file is \d+ bytes, more than fix_read reads \(\d+\), and the fix lane does not change a file this large$/.test(fixRead(d2, { path: 'big.log' })));
-    // replaceFile: all or nothing. A rename onto a directory fails; the directory stays and no
-    // temporary file is left beside it.
-    mkdirSync(join(d2, 'dir'));
-    writeFileSync(join(d2, 'dir', 'keep.txt'), 'k');
-    const failed = await throws(() => replaceFile(join(d2, 'dir'), Buffer.from('x')));
-    check('a replace that cannot land throws and leaves no temporary file', failed !== null && readFileSync(join(d2, 'dir', 'keep.txt'), 'utf8') === 'k' && !readdirSync(d2).some((n) => n.includes('.fix-')), String(failed));
-    // The callers pass the old file's fstat mode: here the modes are written out.
+    // writeWhole: in place, the same file, so its mode stays; a file that cannot be opened is an
+    // ordinary error; a write or close that fails once the file is open is WriteFailed, closed once.
     const run = join(d2, 'run.sh');
     writeFileSync(run, '#!/bin/sh\necho a\n');
-    replaceFile(run, Buffer.from('#!/bin/sh\necho b\n'), 0o100755);
-    check('a replace lands whole, takes the mode, and leaves no temporary file', readFileSync(run, 'utf8') === '#!/bin/sh\necho b\n'
-      && (process.platform === 'win32' || (statSync(run).mode & 0o777) === 0o755) && !readdirSync(d2).some((n) => n.includes('.fix-')));
-    if (process.platform !== 'win32') {
-      // The mode of an old file the run account set user-ID on (0o4755; a CI account may not set
-      // that bit itself, so the mode is given): the new file gets the ordinary bits and not that one.
-      const suid = join(d2, 'suid.sh');
-      writeFileSync(suid, '#!/bin/sh\n');
-      replaceFile(suid, Buffer.from('#!/bin/sh\necho x\n'), 0o104755);
-      check('a replace keeps the ordinary bits and drops set-user-ID, set-group-ID and sticky', (statSync(suid).mode & 0o7777) === 0o755, (statSync(suid).mode & 0o7777).toString(8));
-      const all = join(d2, 'all.sh');
-      writeFileSync(all, '#!/bin/sh\n');
-      replaceFile(all, Buffer.from('#!/bin/sh\necho y\n'), 0o107775);
-      check('every special bit is dropped at once', (statSync(all).mode & 0o7777) === 0o775, (statSync(all).mode & 0o7777).toString(8));
-      // A name near the 255-byte component limit: the new file's own name is short, so it still fits.
-      const long = join(d2, 'n'.repeat(250));
-      writeFileSync(long, 'a');
-      replaceFile(long, Buffer.from('b'), 0o100644);
-      check('a file whose name is 250 bytes is replaced', readFileSync(long, 'utf8') === 'b' && !readdirSync(d2).some((n) => n.startsWith('.fix-')));
-      // While the bytes go in: the copy of an existing file is 0600, whatever the umask; a new file
-      // gets the mode writeFileSync gives one.
-      const sec = join(d2, 'secret.txt');
-      writeFileSync(sec, 'old');
-      const during = [];
-      replaceFile(sec, Buffer.from('new'), 0o100640, { ...REPLACE_IO, writeFileSync: (fd, b) => { during.push(fstatSync(fd).mode & 0o777); return writeFileSync(fd, b); } });
-      check('the copy of an existing file is 0600 while its bytes are written, then takes the old mode', during.join() === String(0o600) && readFileSync(sec, 'utf8') === 'new' && (statSync(sec).mode & 0o777) === 0o640, during.map((m) => m.toString(8)).join());
-      const ref = join(d2, 'ref.txt');
-      writeFileSync(ref, 'r');
-      const fresh = join(d2, 'fresh.txt');
-      replaceFile(fresh, Buffer.from('f'));
-      check('a new file gets the mode writeFileSync would give it', (statSync(fresh).mode & 0o777) === (statSync(ref).mode & 0o777));
-    }
-    // A close or a write that fails: the error is thrown, the file stays as it was, the copy is
-    // removed (a close that fails has still released its descriptor, so it is not retried).
-    const kept = join(d2, 'kept.txt');
-    writeFileSync(kept, 'original');
+    if (process.platform !== 'win32') chmodSync(run, 0o640);
+    // Through a descriptor, so no check by path comes before a use of the path.
+    const fstatOf = (p) => { const fd = openSync(p, 'r'); try { return fstatSync(fd); } finally { closeSync(fd); } };
+    const before = fstatOf(run);
+    writeWhole(run, 'run.sh', Buffer.from('#!/bin/sh\necho b\n'));
+    const after = fstatOf(run);
+    check('a write lands in the same file and keeps its mode', readFileSync(run, 'utf8') === '#!/bin/sh\necho b\n' && after.ino === before.ino
+      && (process.platform === 'win32' || (after.mode & 0o7777) === 0o640) && !readdirSync(d2).some((n) => n.startsWith('.fix-')), `${before.ino} ${after.ino} ${(after.mode & 0o7777).toString(8)}`);
+    mkdirSync(join(d2, 'dir'));
+    const notOpen = await throws(() => writeWhole(join(d2, 'dir'), 'dir', Buffer.from('x')));
+    check('a file that cannot be opened is an ordinary error, not WriteFailed', notOpen !== null && !(notOpen instanceof WriteFailed), String(notOpen));
     let closes = 0;
-    const closeFails = { ...REPLACE_IO, closeSync: (fd) => { closes++; closeSync(fd); throw Object.assign(new Error('EIO: i/o error, close'), { code: 'EIO' }); } };
-    const cErr = await throws(() => replaceFile(kept, Buffer.from('changed'), 0o100644, closeFails));
-    check('a close that fails: thrown once, the file as it was, no copy left', cErr?.code === 'EIO' && closes === 1 && readFileSync(kept, 'utf8') === 'original' && !readdirSync(d2).some((n) => n.startsWith('.fix-')), `${cErr} closes=${closes}`);
-    const writeFails = { ...REPLACE_IO, writeFileSync: () => { throw Object.assign(new Error('ENOSPC: no space left on device, write'), { code: 'ENOSPC' }); } };
-    const wErr = await throws(() => replaceFile(kept, Buffer.from('changed'), 0o100644, writeFails));
-    check('a write that fails: the same', wErr?.code === 'ENOSPC' && readFileSync(kept, 'utf8') === 'original' && !readdirSync(d2).some((n) => n.startsWith('.fix-')), String(wErr));
-    const renameFails = { ...REPLACE_IO, renameSync: () => { throw Object.assign(new Error('EXDEV: cross-device link not permitted, rename'), { code: 'EXDEV' }); } };
-    const rErr = await throws(() => replaceFile(kept, Buffer.from('changed'), 0o100644, renameFails));
-    check('a rename that fails: the same', rErr?.code === 'EXDEV' && readFileSync(kept, 'utf8') === 'original' && !readdirSync(d2).some((n) => n.startsWith('.fix-')), String(rErr));
+    const counted = (extra) => ({ ...WRITE_IO, closeSync: (fd) => { closes++; closeSync(fd); }, ...extra });
+    const wErr = await throws(() => writeWhole(run, 'run.sh', Buffer.from('x'), counted({ writeFileSync: () => { throw Object.assign(new Error('ENOSPC: no space left on device, write'), { code: 'ENOSPC' }); } })));
+    check('a write that fails is WriteFailed, names the file and the code, and closes once', wErr instanceof WriteFailed && wErr.message === 'writing run.sh failed partway (ENOSPC), so the file may be damaged' && closes === 1, `${wErr} closes=${closes}`);
+    closes = 0;
+    const cErr = await throws(() => writeWhole(run, 'run.sh', Buffer.from('y'), counted({ closeSync: (fd) => { closes++; closeSync(fd); throw Object.assign(new Error('EIO: i/o error, close'), { code: 'EIO' }); } })));
+    check('a close that fails is WriteFailed too, and is not retried', cErr instanceof WriteFailed && /\(EIO\)/.test(cErr.message) && closes === 1, `${cErr} closes=${closes}`);
     rmSync(d2, { recursive: true, force: true });
   }
   check('unfinished prefixes the reason the dispatcher reads', unfinished(' the budget ran out. ') === `${UNFINISHED_PREFIX} the budget ran out.` && UNFINISHED_PREFIX === 'The fix run could not finish:');
@@ -959,6 +926,21 @@ if (!gitOk) {
     check('old_text copied from the altered line does not match, and the error says why', /old_text is not in src\/names\.js.*line 1 of this file is shown with words removed/.test(res(3)), res(3));
     check('an edit beside it lands, and the altered line is whole in the commit', r.outcome === 'fixed'
       && sh(repo.dir, ['show', `${r.new_head}:src/names.js`]) === '// works with LibreChat and TypingMind\nexport const n = 2;');
+    rmSync(w.out, { recursive: true, force: true });
+    rmSync(repo.dir, { recursive: true, force: true });
+  }
+
+  console.log('\n  runFix: a write that fails partway ends the run');
+  {
+    const repo = makeRepo();
+    const w = world(repo, { turns: [
+      tool('fix_edit', { path: 'src/b.js', old_text: 'export const token = process.env.X;', new_text: 'export const token = read();' }),
+      finish(),
+    ] });
+    w.ctx.writeIo = { ...WRITE_IO, writeFileSync: () => { throw Object.assign(new Error('ENOSPC: no space left on device, write'), { code: 'ENOSPC' }); } };
+    const { record: r } = await runFix(w.ctx);
+    check('the run could not finish, says which file and why, and nothing is committed', r.outcome === 'refused'
+      && r.notes === `${UNFINISHED_PREFIX} writing src/b.js failed partway (ENOSPC), so the file may be damaged` && r.new_head === null && !existsSync(join(w.out, 'fix.bundle')) && w.calls.model.length === 1, r.notes);
     rmSync(w.out, { recursive: true, force: true });
     rmSync(repo.dir, { recursive: true, force: true });
   }

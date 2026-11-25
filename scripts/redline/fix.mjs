@@ -90,7 +90,7 @@
 // there is no bundled fallback, and a variable that is unset, a file that cannot be read or an empty
 // file ends the run.
 
-import { readFileSync, writeFileSync, mkdirSync, rmSync, existsSync, lstatSync, realpathSync, statSync, readdirSync, appendFileSync, mkdtempSync, readlinkSync, cpSync, openSync, fstatSync, closeSync, readSync, renameSync, fchmodSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, rmSync, existsSync, lstatSync, realpathSync, statSync, readdirSync, appendFileSync, mkdtempSync, readlinkSync, cpSync, openSync, fstatSync, closeSync, readSync } from 'node:fs';
 import { join, resolve, relative, dirname, basename, sep, posix } from 'node:path';
 import { tmpdir, userInfo } from 'node:os';
 import { createHash } from 'node:crypto';
@@ -928,36 +928,30 @@ const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[
 /** s cut to at most n UTF-16 units, never between the two halves of one character. */
 const cutWhole = (s, n) => { const part = s.slice(0, n); return /[\uD800-\uDBFF]$/.test(part) ? part.slice(0, -1) : part; };
 
+/** Thrown once a write has begun and failed: the file may be part written, so the run ends with nothing committed. */
+export class WriteFailed extends Error {}
+
 /**
- * Replace the file at abs with bytes, all or nothing: they go to a new file beside it, and that file
- * is renamed over abs only once every byte is written and it is closed. A failure anywhere leaves
- * abs as it was and removes the new file, and only a file this call created.
- *
- * `mode` is the old file's mode (null for a new file). The copy of an existing file is created 0600,
- * so no other account can open it while the bytes go in, and takes `mode & 0o777` through its
- * descriptor before it is closed and renamed: the copy belongs to the account this runs as, so a
- * set-user-ID, set-group-ID or sticky bit the run account left on the old file is never carried to a
- * file of this account. A new file is created as writeFileSync would create it. The copy's name is
- * short and its own, not abs's name with a suffix: abs's name may already be near the filesystem's
- * limit for one path component. `io` is the filesystem, for the tests.
+ * Write bytes to the file at abs in place, creating it when it is absent. It stays the same file, so
+ * an existing one keeps its owner, group, mode and access list, as fix_write always kept them; no
+ * copy is made, so no copy can be left in the checkout or be readable by anyone. A file that cannot
+ * be opened is an ordinary tool error the model can act on. Once it is open, and so truncated, a
+ * write or close that fails leaves the file in a state nobody chose: that is WriteFailed, which the
+ * tools do not catch, so the run ends there as one that could not finish, no bundle is made, and the
+ * dispatcher tries the head once more on a fresh checkout. `io` is the filesystem, for the tests.
  */
-export const REPLACE_IO = { openSync, writeFileSync, fchmodSync, closeSync, renameSync, rmSync };
-export function replaceFile(abs, bytes, mode = null, io = REPLACE_IO) {
-  const tmp = join(dirname(abs), `.fix-${process.pid}-${createHash('sha256').update(`${abs}|${Date.now()}|${Math.random()}`).digest('hex').slice(0, 12)}`);
-  // Exclusive: a name that is taken throws here, before anything is created to remove.
-  const fd = io.openSync(tmp, 'wx', mode === null ? 0o666 : 0o600);
+export const WRITE_IO = { openSync, writeFileSync, closeSync };
+export function writeWhole(abs, rel, bytes, io = WRITE_IO) {
+  const fd = io.openSync(abs, 'w');
   let open = true;
   try {
     io.writeFileSync(fd, bytes);
-    if (mode !== null) io.fchmodSync(fd, mode & 0o777);
     // Closed once: a close that fails has released the descriptor all the same.
     open = false;
     io.closeSync(fd);
-    io.renameSync(tmp, abs);
   } catch (e) {
     if (open) { try { io.closeSync(fd); } catch { /* released either way */ } }
-    try { io.rmSync(tmp, { force: true }); } catch { /* the first error is the one to report */ }
-    throw e;
+    throw new WriteFailed(`writing ${rel} failed partway (${e?.code ?? e?.message ?? e}), so the file may be damaged`);
   }
 }
 
@@ -1617,6 +1611,7 @@ async function answerReview(ctx) {
       return row;
     };
 
+    const writeIo = ctx.writeIo ?? WRITE_IO;
     const tool = (name, input) => {
       if (name === 'fix_list') return readTool(root, 'redline_list', input);
       if (name === 'fix_read') return fixRead(root, input);
@@ -1643,7 +1638,7 @@ async function answerReview(ctx) {
         try {
           const t = target(input.path);
           if (t.error) return t.error;
-          // One descriptor for the check and the read; the write replaces the file whole (replaceFile).
+          // One descriptor for the check and the read; the write goes in place (writeWhole).
           try { fd = openSync(t.abs, 'r'); } catch (e) {
             if (e?.code === 'ENOENT') return `error: ${t.rel} does not exist; write a new file with fix_write`;
             throw e;
@@ -1685,11 +1680,12 @@ async function answerReview(ctx) {
           const nextText = text.slice(0, at) + newText + text.slice(at + oldText.length);
           const next = Buffer.from(nextText, 'utf8');
           if (next.length > LIMITS.fileBytes) return `error: the file would be larger than ${LIMITS.fileBytes} bytes`;
-          replaceFile(t.abs, next, st.mode);
+          writeWhole(t.abs, t.rel, next, writeIo);
           written.add(t.rel);
           const from = text.slice(0, at).split('\n').length;
           return `edited ${t.rel}: lines ${from}-${from + oldText.split('\n').length - 1} replaced by ${newText.split('\n').length} line(s); the file has ${nextText.split('\n').length} lines`;
         } catch (e) {
+          if (e instanceof WriteFailed) throw e;
           return `error: ${e.message}`;
         } finally {
           if (fd !== null) closeSync(fd);
@@ -1705,22 +1701,22 @@ async function answerReview(ctx) {
           // A file that exists is read before it is replaced, through one descriptor: one too large
           // to read, or with lines that reach the model with words removed, is never written whole.
           let fd = null;
-          let mode = null;
           try { fd = openSync(t.abs, 'r'); } catch (e) { if (e?.code !== 'ENOENT') throw e; }
           if (fd !== null) {
             try {
-              const st = fstatSync(fd);
-              if (st.size > LIMITS.fileBytes) return `error: ${t.rel} is larger than ${LIMITS.fileBytes} bytes, too large to check before it is replaced; it is not changed here`;
+              if (fstatSync(fd).size > LIMITS.fileBytes) return `error: ${t.rel} is larger than ${LIMITS.fileBytes} bytes, too large to check before it is replaced; it is not changed here`;
               const shown = alteredLines(readFileSync(fd, 'utf8'));
               if (shown.length) return `error: ${namedLines(shown)} of ${t.rel} ${isAre(shown)} ${ALTERED_NOTE}, so writing the file whole would change ${shown.length > 1 ? 'them' : 'it'}; change the file with fix_edit`;
-              mode = st.mode;
             } finally { closeSync(fd); }
           }
           mkdirSync(dirname(t.abs), { recursive: true });
-          replaceFile(t.abs, content, mode);
+          writeWhole(t.abs, t.rel, content, writeIo);
           written.add(t.rel);
           return `wrote ${t.rel} (${content.split('\n').length} lines)`;
-        } catch (e) { return `error: ${e.message}`; }
+        } catch (e) {
+          if (e instanceof WriteFailed) throw e;
+          return `error: ${e.message}`;
+        }
       }
       if (name === 'fix_describe') {
         const why = descriptionProblem(input.body, pr.body);
@@ -1778,6 +1774,7 @@ async function answerReview(ctx) {
     } catch (e) {
       // Past hardMs no model call starts: nothing is reported as fixed without the model finishing.
       if (e instanceof OutOfTime) return refuse(unfinished(`the time budget was spent before the fix finished (${e.message}).`), { turns: calls });
+      if (e instanceof WriteFailed) return refuse(unfinished(e.message), { turns: calls });
       throw e;
     }
     const turns = loop.turns;

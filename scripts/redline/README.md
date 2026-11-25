@@ -275,10 +275,10 @@ checks that the checkout is exactly the reviewed head, then `fix.mjs`:
   model is shown it, overlapping matches counted, and the two matches must be the same characters
   of the file; half of a character in either text is refused; a file whose lines all end CRLF
   takes the replacement with CRLF; every byte outside the match is written back as it was.
-  `fix_write` writes a whole file, given as a string. Both replace a file all or nothing: a new
-  file beside it, 0600 while it is written, then given the old file's ordinary permission bits
-  (never set-user-ID, set-group-ID or sticky), closed and renamed over it; any failure leaves the
-  file as it was and removes the copy. The model is reached through dario, which cuts a tool
+  `fix_write` writes a whole file, given as a string. Both write in place, so a file keeps its
+  owner, group, mode and access list and no copy is made; a write or close that fails once the
+  file is open ends the run as one that could not finish, with nothing committed, and the
+  dispatcher tries the head once more on a fresh checkout. The model is reached through dario, which cuts a tool
   result over 30,000 characters and removes some product names from the text it carries
   (`shownText` follows its scrub), so `fix_read` returns at most 400 lines and its whole result,
   notes included, stays under 24,000 characters, saying where to read on, and `fix_read` and
