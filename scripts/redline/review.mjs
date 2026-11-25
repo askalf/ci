@@ -223,9 +223,10 @@ export const SUBMIT_REQUIRED = 'The read budget is spent. Your next response mus
   + 'with verdict, summary and findings, based on what you have read. Do not call any other tool and do not answer in text.';
 export const LIMITS = {
   diffChars: 180_000, bodyChars: 8_000, commitChars: 600, commits: 100, contextChars: 60_000, earlierReviews: 3, earlierReviewChars: 6_000,
-  // earlierRuns caps the PR's earlier Redline runs whose verdict artifacts are read (two reads
-  // each); artifactBytes caps one artifact.
-  earlierRuns: 8, artifactBytes: 1_000_000,
+  // earlierRuns caps the PR's earlier Redline runs whose verdict artifacts are read, newest first
+  // (two reads each, on the job's token); runPages caps the listings of 100 runs made to find them;
+  // artifactBytes caps one artifact.
+  earlierRuns: 40, runPages: 10, artifactBytes: 1_000_000,
   // filesChars caps the changed files sent in full with the brief; readLines and readBytes cap one
   // redline_read. Each read is a model round trip, so a larger range means fewer turns.
   filesChars: 120_000, readLines: 1_000, readBytes: 120_000, listEntries: 400,
@@ -728,17 +729,115 @@ export async function ghBytes(ctx, path, maxBytes = LIMITS.artifactBytes) {
  * oldest first, as review rows. On a private repository nothing is ever posted (the post runs on
  * public repositories only), so without this each round began with no memory of the last and a
  * request-changes round could not be counted. Only a run the PR could not have shaped is read
- * (reviewRunsOf); the newest LIMITS.earlierRuns of them are; an artifact that is missing,
- * expired, malformed, or for another PR or head is passed over; a read that fails leaves the rest
- * unread and is logged, never a failed review.
+ * (reviewRunsOf), and the newest LIMITS.earlierRuns of them are.
+ *
+ * The runs are found in the repository's finished dispatches of redline.yml on the default branch
+ * made since the PR opened, listed newest first 100 at a time, until a listing is not full,
+ * LIMITS.earlierRuns of this PR's runs are found, or LIMITS.runPages listings are made. The PR's
+ * runs are among many: every PR's dispatches share the one list, so a single listing of it can be
+ * newer than all of them, and runs older than the listings made are not found.
+ *
+ * Each listing after the first asks for the runs made at or before the oldest one the listing
+ * before it returned, not for its next page. A page number counts from the newest run, so a run
+ * that leaves the list between two listings (re-run, and so not finished, or deleted) would move
+ * the run after it past the page boundary unread. The bound is inclusive, so the runs made in
+ * that second are listed again, and a run is counted once, by its id.
+ *
+ * When every run of a full listing was made in one second, a bound at that second would list the
+ * same runs again. So that one second is paged through by number: the runs made at exactly that
+ * second, finished or not, from page 1 until a page is not full; the listing after it asks for the
+ * runs made before that second. Those pages ask for no status, so a run re-run meanwhile stays in
+ * its place and moves no other run across a page (reviewRunsOf still takes only finished runs).
+ * Only there, among 100 or more runs made in one second, does a page number decide what is listed,
+ * and only a run of that second deleted meanwhile can still move another run of it across a page.
+ * A full listing with no creation time on any run ends the search, logged.
+ *
+ * A listing that fails ends the search, logged, and the runs found before it are still read. A
+ * round is a head, and a head can have more than one run (a re-read, a second dispatch), so a
+ * window of N runs can hold fewer than N rounds.
+ *
+ * An artifact that is missing, expired, malformed, or for another PR or head is passed over; an
+ * artifact read that fails leaves the rest unread and is logged, never a failed review.
  */
 export async function earlierVerdicts(ctx, { pr }) {
   const { repo, pr: n } = ctx;
+  const defaultBranch = pr?.base?.repo?.default_branch;
   const out = [];
+  // reviewRunsOf trusts no run when the default branch is not known.
+  if (!defaultBranch) return out;
   try {
-    const listed = await gh(ctx, `/repos/${repo}/actions/workflows/redline.yml/runs?event=workflow_dispatch&per_page=100`);
-    const runs = reviewRunsOf(listed?.workflow_runs, { repo, pr: n, defaultBranch: pr?.base?.repo?.default_branch }).slice(0, LIMITS.earlierRuns);
-    for (const run of runs) {
+    const since = typeof pr?.created_at === 'string' ? pr.created_at : '';
+    const runs = [];
+    const listedIds = new Set();
+    // A creation time to the second, as GitHub writes one.
+    const isoSecond = (ms) => new Date(ms).toISOString().replace(/\.\d{3}Z$/, 'Z');
+    let before = '';
+    let second = '';
+    let page = 1;
+    let ended = false;
+    for (let listing = 1; listing <= LIMITS.runPages && runs.length < LIMITS.earlierRuns; listing++) {
+      const q = new URLSearchParams({ event: 'workflow_dispatch', branch: defaultBranch, per_page: '100' });
+      if (second) {
+        q.set('created', `${second}..${second}`);
+        q.set('page', String(page));
+      } else {
+        q.set('status', 'completed');
+        if (before) q.set('created', since ? `${since}..${before}` : `<=${before}`);
+        else if (since) q.set('created', `>=${since}`);
+      }
+      let listed;
+      try {
+        listed = await gh(ctx, `/repos/${repo}/actions/workflows/redline.yml/runs?${q}`);
+      } catch (e) {
+        ctx.log?.(`earlier verdicts: listing ${listing} of runs failed (${e.message}); the ${runs.length} run(s) of this PR found before it are read`);
+        ended = true;
+        break;
+      }
+      const rows = Array.isArray(listed?.workflow_runs) ? listed.workflow_runs : [];
+      const fresh = [];
+      for (const r of rows) {
+        if (!Number.isInteger(r?.id) || listedIds.has(r.id)) continue;
+        listedIds.add(r.id);
+        fresh.push(r);
+      }
+      runs.push(...reviewRunsOf(fresh, { repo, pr: n, defaultBranch }));
+      if (second) {
+        // A crowded second is paged until a page is not full; then the runs made before it.
+        if (rows.length < 100) {
+          const prior = Date.parse(second) - 1000;
+          second = '';
+          if (since && prior < Date.parse(since)) {
+            ended = true;
+            break;
+          }
+          before = isoSecond(prior);
+        } else {
+          page += 1;
+        }
+        continue;
+      }
+      if (rows.length < 100) {
+        ended = true;
+        break;
+      }
+      const times = rows.map((r) => Date.parse(r?.created_at)).filter(Number.isFinite);
+      if (!times.length) {
+        ctx.log?.(`earlier verdicts: listing ${listing} of runs gave no creation time to list older runs from; this PR's runs older than those, if any, are not read`);
+        ended = true;
+        break;
+      }
+      const oldestAt = Math.min(...times);
+      const newestAt = Math.max(...times);
+      const at = rows.find((r) => Date.parse(r?.created_at) === oldestAt).created_at;
+      if (oldestAt === newestAt) {
+        second = at;
+        page = 1;
+      } else {
+        before = at;
+      }
+    }
+    if (!ended && runs.length < LIMITS.earlierRuns) ctx.log?.(`earlier verdicts: listed runs ${LIMITS.runPages} times, as many as are made; this PR's runs older than those, if any, are not read`);
+    for (const run of runs.slice(0, LIMITS.earlierRuns)) {
       const arts = await gh(ctx, `/repos/${repo}/actions/runs/${run.id}/artifacts`);
       const a = (arts?.artifacts ?? []).find((x) => x?.name === VERDICT_ARTIFACT && x.expired !== true && Number.isInteger(x.id));
       if (!a) continue;
