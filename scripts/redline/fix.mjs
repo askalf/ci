@@ -1566,7 +1566,9 @@ export async function workCheckout(ctx, job) {
           parts = rest;
           continue;
         }
-        const [meta = ''] = (git(root, genv, ['ls-tree', '-z', at, '--', name]) ?? '').split('\t');
+        // The name is a file name, never a pathspec: one that begins with git's pathspec magic
+        // (`:x`) is looked up as it is spelled.
+        const [meta = ''] = (git(root, genv, ['--literal-pathspecs', 'ls-tree', '-z', at, '--', name]) ?? '').split('\t');
         const [mode, type, sha] = meta.split(' ');
         if (!sha) return { broken: `the change's package.json leads to ${[...done, name].join('/')}, which is not in it` };
         if (mode === '120000') {

@@ -945,6 +945,17 @@ if (!gitOk) {
       const { record: r } = await runBuild(w.ctx);
       check('a package.json that links, through a linked directory, to a manifest in the tree is read through both, and the suite runs', r.outcome === 'fixed' && r.tests?.command === 'npm test' && r.tests.exit_code === 0, `${r.outcome} ${r.notes}`);
       done(w, repo);
+      // A link through a directory whose name begins with git's pathspec magic is followed by that
+      // name as it is spelled.
+      const magic = makeRepo({ extra: (dir) => {
+        mkdirSync(join(dir, ':release'));
+        writeFileSync(join(dir, ':release', 'package.json'), `${JSON.stringify({ name: 'r', private: true, scripts: { test: 'node test.mjs' } }, null, 2)}\n`);
+        symlinkSync(':release/package.json', join(dir, 'package.json'));
+      } });
+      const wm = world(magic, { turns: [write, describe, finish()] });
+      const { record: rm } = await runBuild(wm.ctx);
+      check('a package.json that links into a directory named like pathspec magic (`:release`) is read through it, and the suite runs', rm.outcome === 'fixed' && rm.tests?.command === 'npm test' && rm.tests.exit_code === 0, `${rm.outcome} ${rm.notes}`);
+      done(wm, magic);
       // A change that points it out of the tree is refused, never read.
       const repo2 = withTests();
       const relink = "import { rmSync, symlinkSync } from 'node:fs';\nrmSync('package.json');\nsymlinkSync('../outside.json', 'package.json');\n";
