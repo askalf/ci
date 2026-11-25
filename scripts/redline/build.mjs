@@ -338,7 +338,7 @@ export function readCandidate(dir, ctx, git) {
   if (tree !== extra.tree) return { problem: `the build job's ${record.new_head === null ? 'diff.patch' : 'commit'} does not give the tree its tests ran on` };
   return { replay: {
     tree, subject: record.title, summary: extra.summary, ranBuild: extra.ran_build,
-    description: description === null ? null : description.replace(/\n$/, ''), turns: record.turns,
+    description: description.replace(/\n$/, ''), turns: record.turns,
   } };
 }
 
