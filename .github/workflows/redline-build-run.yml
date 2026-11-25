@@ -154,8 +154,9 @@ jobs:
         run: |
           node --input-type=module -e '
             const { BASE: base, REPO: repo, DEFAULT_BRANCH: branch } = process.env;
-            if (!/^[A-Za-z0-9._/-]+$/.test(branch ?? "") || /^[./]|[.]{2}|\/$/.test(branch)) { console.log(`::error::the default branch name could not be read: ${JSON.stringify(branch)}`); process.exit(1); }
-            const url = `https://api.github.com/repos/${repo}/compare/${base}...${branch}`;
+            if (!branch) { console.log("::error::the default branch name could not be read"); process.exit(1); }
+            // Any name git allows, encoded as one ref: a name holds no "..", so the separator is never in it.
+            const url = `https://api.github.com/repos/${repo}/compare/${base}...${encodeURIComponent(branch)}`;
             const headers = { authorization: `Bearer ${process.env.GH_READ_TOKEN}`, accept: "application/vnd.github+json" };
             let status = "";
             for (let attempt = 1; attempt <= 3 && !status; attempt++) {

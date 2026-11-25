@@ -58,7 +58,7 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import {
   TOOLS as FIX_TOOLS, LIMITS, OUTCOMES, LESSONS, PROTECTED_ATTR, DESCRIPTION_ATTRIBUTION,
-  cleanSubject, cleanNotes, descriptionProblem, fetchLessons, fixEffort, protectedPaths, renderNotes, runProblem, toolchainLines,
+  cleanSubject, cleanNotes, descriptionProblem, fetchLessons, fixEffort, protectedPaths, renderNotes, runAccount, runProblem, toolchainLines,
   workCheckout, sealResult, hostSetup, runToExit,
 } from './fix.mjs';
 
@@ -331,7 +331,7 @@ async function buildTicket(ctx, record) {
   // The run's start: the lessons read counts against the budget, as the install does.
   const started = ctx.now();
   mkdirSync(ctx.out, { recursive: true });
-  const why = inputProblem(ctx) ?? (ctx.requireRunAccount && !ctx.runAs ? NO_RUN_ACCOUNT : null);
+  const why = inputProblem(ctx) ?? (ctx.requireRunAccount ? runAccountProblem(ctx.runAs) : null);
   if (why) return { record: record({ outcome: 'refused', notes: renderNotes({ outcome: 'refused', reason: why }) }) };
   const { title, brief } = ticketText(ctx);
 
@@ -354,7 +354,9 @@ async function buildTicket(ctx, record) {
     effort: fixEffort(ctx.effort, 0),
     // Nothing under .github/ is in the commit, whatever the ticket asks.
     githubChanges: null,
-    tools: TOOLS, subject: buildSubject, bundle: 'build.bundle',
+    // The subject's own rule, on the commit: a title the rule lets through (`Claude support for
+    // offline builds`) is never refused once committed.
+    tools: TOOLS, subject: buildSubject, refusedMessage: (message) => BUILD_SUBJECT_BANNED.test(message), bundle: 'build.bundle',
     // fix_describe writes the new pull request's description. There is no current one to start
     // from, so the rules are the text's own: not empty, no attribution, no dashes, its ceiling.
     describe: {
@@ -380,6 +382,14 @@ async function buildTicket(ctx, record) {
  * refused once the work starts, as in the fix lane.
  */
 export const NO_RUN_ACCOUNT = 'a build runs commands a ticket asked for, so it needs a run account of its own: FIX_RUN_AS in the env file names none, and without one they would run as the account that reads the env file';
+
+/**
+ * Why the named run account cannot run a build, or null: judged on the name the commands would
+ * run as (runAccount), so a value that is blank once trimmed, `FIX_RUN_AS=" "`, is no account.
+ */
+export function runAccountProblem(name) {
+  try { return runAccount(name) ? null : NO_RUN_ACCOUNT; } catch (e) { return e.message; }
+}
 
 async function main() {
   const env = process.env;

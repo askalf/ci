@@ -53,12 +53,27 @@ names the commit's date and the pull request it came from.
   lines and anything outside those blocks are read as before, so attribution or a secret there
   still blocks. A block of that shape is left out whoever wrote it. `local.mjs pack --pr` carries
   the author's account type, so a local review reads the description as CI does.
-- The fix lane's test gate runs the suite on the tree the commit holds. A change the commit leaves
-  out (a `redline-protected` file, `.github/` the pull request does not change, a `.gitattributes`,
-  what the install dirtied, a file over the size limit) was still on disk when the suite ran, so a
-  command could edit a protected fixture and the code that reads it, and the tests passed on a tree
-  the commit did not hold. Before the gate runs the suite, such a change is now put back as the
-  start commit has it, and the bounce and the notes name it.
+- The fix lane's test gate runs the suite on the tree the commit holds, and on nothing else. It ran
+  the suite in the checkout the model worked in, or took the model's own last run there, and three
+  things that are not in the commit could make it pass: a change the commit leaves out (a
+  `redline-protected` file, `.github/` the pull request does not change, a `.gitattributes`, what
+  the install dirtied, a file over the size limit), a file the repository ignores that a command
+  left (a local config, a build's output), and a file in the commands' HOME. A suite that rewrote a
+  tracked file after its assertions also had those bytes committed untested. The kept paths are now
+  staged as one tree before the gate, and the suite runs on that tree alone: in a checkout of its
+  own made from the tree's objects, with a copy of `.git` at the start commit, the install run
+  there afresh and a HOME of its own, as the run account. What the suite writes there is removed
+  with it, and the commit must be the tree the gate tested. A change left out is also put back in
+  the model's checkout, and the bounce says the suite ran in a clean checkout and names what was put
+  back. The commit's message is checked by the lane's own rule: the fix lane's attribution check
+  read `Claude support for offline builds`, a title the build lane allows, as a credit line, and
+  refused the build after the commit was made.
+- A file a command made as the run account is committed with the mode it was made with. The
+  cleanup after every command reads `X` from a file's group bits, which on a file with an ACL are
+  its mask, and the mask it sets from the named entries carries the execute bit a directory's
+  default entry gives them: from the second command on, a file the run account had made gained its
+  owner's execute bit, and git committed it as 100755. The cleanup now clears group execute before
+  it reads `X`; a file a command made executable stays so.
 - A build lane turns a ticket into a change. `redline-build-run.yml` and `scripts/redline/build.mjs`
   start from a ticket's id, title and brief and a commit of the default branch, and leave one commit
   on top of that commit, as the fix lane leaves one on a pull request's head. The work in the

@@ -98,7 +98,6 @@
 import { readFileSync, writeFileSync, mkdirSync, rmSync, existsSync, lstatSync, realpathSync, statSync, readdirSync, appendFileSync, mkdtempSync, readlinkSync, cpSync } from 'node:fs';
 import { join, resolve, relative, dirname, basename, sep, posix } from 'node:path';
 import { tmpdir, userInfo } from 'node:os';
-import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 import { parseEnvFile, readPrompt, safePath, runTool as readTool, rejectsForcedToolChoice, metaPhrase, gh, ghAll, callModelWith, buildDiff, OutOfTime, darioAccess, withDarioSocket, PROTECTED_ATTR, protectedFromCheckAttr } from './review.mjs';
@@ -1314,7 +1313,7 @@ async function answerReview(ctx) {
     start: headSha, started, record, words: FIX_WORDS, effort,
     // Under .github/ only the pull request's own files, as the compare with the reviewed head has them.
     githubChanges: compared,
-    tools: TOOLS, subject: commitSubject, bundle: 'fix.bundle',
+    tools: TOOLS, subject: commitSubject, refusedMessage: hasAttributionTrailer, bundle: 'fix.bundle',
     // fix_describe replaces the pull request's description, whole: a result on its own when no
     // file changed, and never when the brief showed only part of the current one.
     describe: {
@@ -1343,6 +1342,8 @@ async function answerReview(ctx) {
  *   githubChanges    the compare whose files under .github/ may be written (editableGithub), or
  *                    null when nothing there may be
  *   tools, subject   the tools the model gets; the commit subject, made from the model's line
+ *   refusedMessage   whether the commit's message carries what the lane's subject rule refuses,
+ *                    checked on the commit itself before the bundle
  *   describe         fix_describe. problem(body) says why a text is refused and kept(lines) answers
  *                    the model. replaces: the text replaces an existing description, so it is a
  *                    result with no file changed and the notes say so. required: a change needs
@@ -1389,6 +1390,9 @@ export async function workCheckout(ctx, job) {
   // Off until the run account has passed every check below, so a refused account (root, this
   // account, one that can read the key) is never sent kill -1, not even by the cleanup in finally.
   let armed = false;
+  // The directories the run account works in: the checkout and its HOME, and while the test gate
+  // runs (gateTests), the gate's checkout and HOME as well.
+  const workDirs = [root, home];
   const settle = () => {
     if (!runAs || !armed) return;
     for (let round = 0; ; round++) {
@@ -1405,12 +1409,25 @@ export async function workCheckout(ctx, job) {
     // can strip the inherited ACL and set 700): as owner, it gives itself traversal first, then
     // this account an explicit ACL entry, recursively. Then this account must reach every path;
     // a path it cannot is a refusal, never a file git silently skips.
-    asRun(['chmod', '-R', 'u+rwX', root, home]);
-    asRun(['setfacl', '-R', '-m', `u:${me}:rwX,d:u:${me}:rwX`, root, home]);
-    const blocked = spawnSync('find', [root, home, '!', '-type', 'l', '(', '!', '-readable', '-o', '-type', 'd', '!', '-executable', ')', '-print', '-quit'],
+    // Group execute is cleared before X is read. On a file with an ACL the group bits are its mask,
+    // which the setfacl below sets from the named entries, and an entry inherited from a directory's
+    // default carries x: X would then read the file as executable and give its owner x on the next
+    // pass, and git would commit a file the run account made as 100755. Git reads the owner's bit
+    // alone, so what X sees is then the owner's and others' bits, and a script made executable stays so.
+    asRun(['chmod', '-R', 'g-x,u+rwX', ...workDirs]);
+    asRun(['setfacl', '-R', '-m', `u:${me}:rwX,d:u:${me}:rwX`, ...workDirs]);
+    const blocked = spawnSync('find', [...workDirs, '!', '-type', 'l', '(', '!', '-readable', '-o', '-type', 'd', '!', '-executable', ')', '-print', '-quit'],
       { env: sudoEnv, encoding: 'utf8' });
     const stuck = String(blocked.stdout ?? '').trim();
     if (stuck) throw new Error(`the run account left a path this account cannot reach: ${relative(root, stuck).slice(0, 200)}`);
+  };
+  const acl = (args) => { const r = spawnSync('setfacl', args, { env: sudoEnv, encoding: 'utf8' }); if (r.status !== 0) throw new Error(`setfacl failed: ${String(r.stderr || r.error?.message || '').trim().slice(0, 200)}`); };
+  // What the run account may do in a checkout and a HOME: write both, read the checkout's .git
+  // and never write it. Default ACLs keep what it creates manageable here.
+  const grant = (dir, dirHome) => {
+    acl(['-R', '-m', `u:${runAs}:rwX,d:u:${runAs}:rwX,d:u:${me}:rwX`, dir]);
+    acl(['-R', '-m', `u:${runAs}:rX,d:u:${runAs}:rX`, join(dir, '.git')]);
+    acl(['-m', `u:${runAs}:rwx,d:u:${runAs}:rwX,d:u:${me}:rwX`, dirHome]);
   };
   // Every command the checkout supplies goes through here.
   const exec = (argv, seconds, extraEnv = {}) => { const r = run(root, { ...cenv, ...extraEnv }, argv, seconds, runAs); settle(); return r; };
@@ -1445,12 +1462,7 @@ export async function workCheckout(ctx, job) {
         cpSync(git(root, genv, ['rev-parse', '--absolute-git-dir']), privateGit, { recursive: true });
         Object.assign(genv, { GIT_DIR: privateGit, GIT_WORK_TREE: realpathSync(root) });
       } catch (e) { return refuse(`the checkout's .git could not be copied aside: ${String(e.message).slice(0, 200)}`); }
-      const acl = (args) => { const r = spawnSync('setfacl', args, { env: sudoEnv, encoding: 'utf8' }); if (r.status !== 0) throw new Error(`setfacl failed: ${String(r.stderr || r.error?.message || '').trim().slice(0, 200)}`); };
-      try {
-        acl(['-R', '-m', `u:${runAs}:rwX,d:u:${runAs}:rwX,d:u:${me}:rwX`, root]);
-        acl(['-R', '-m', `u:${runAs}:rX,d:u:${runAs}:rX`, join(root, '.git')]);
-        acl(['-m', `u:${runAs}:rwx,d:u:${runAs}:rwX,d:u:${me}:rwX`, home]);
-      } catch (e) { return refuse(e.message); }
+      try { grant(root, home); } catch (e) { return refuse(e.message); }
       if (!runCan('-w', root)) return refuse('the run account cannot write the checkout (check that every directory above it is searchable)');
       if (runCan('-w', join(root, '.git'))) return refuse('the run account can write the checkout\'s .git');
       armed = true;
@@ -1489,36 +1501,56 @@ export async function workCheckout(ctx, job) {
       const changed = changedPaths(root, genv);
       return stageable(changed, { installDirty, written, sizeOf, protectedSet: protectedPaths(attrs, changed), github, work: words.work });
     };
-    const runs = [];
-    let seq = 0;
-    // The worktree's changed paths and their bytes, hashed: a test run counts for the fix only
-    // while the stamp it left is the current one, however the files changed since (fix_write, or
-    // a node <file> the model ran).
-    // Measured against the start commit, as staged() measures, so a command's own commit cannot
-    // hide a change from it.
-    const stamp = () => {
+    // The kept paths staged as one tree, the candidate the commit would be: its id, and the paths.
+    const candidate = () => {
+      const { keep } = staged();
+      // Literal pathspecs: a file a command named `*` must not stage everything.
+      if (keep.length) git(root, genv, ['--literal-pathspecs', 'add', '-A', '--', ...keep]);
+      const tree = git(root, genv, ['write-tree']);
       git(root, genv, ['reset', '-q', start]);
-      const h = createHash('sha256');
-      for (const p of changedPaths(root, genv).sort()) {
-        h.update(`${p}\0`);
-        try {
-          const abs = join(root, p);
-          const s = lstatSync(abs);
-          // The executable bit as git records it (100755 or 100644): a script that lost it fails
-          // the suite with the same bytes.
-          h.update(s.isSymbolicLink() ? `link:${readlinkSync(abs)}` : s.isFile() ? Buffer.concat([Buffer.from(s.mode & 0o100 ? 'x:' : '-:'), readFileSync(abs)]) : 'other');
-        } catch { h.update('gone'); }
-        h.update('\0');
-      }
-      return h.digest('hex');
+      return { tree, keep };
     };
     const testArgv = plan.pm && plan.scripts.includes('test') ? [plan.pm, 'test'] : null;
-    const isTest = (argv) => testArgv !== null && argv[0] === testArgv[0] && (argv[1] === 'test' || (argv[1] === 'run' && argv[2] === 'test'));
-    const record = (argv, r) => {
-      const row = { command: argv.join(' '), exit: r.exit, out: r.out, timedOut: r.timedOut, seq: ++seq, isTest: isTest(argv) };
-      if (row.isTest) row.stamp = stamp();
-      runs.push(row);
-      return row;
+    // The test gate. The suite runs on the candidate tree alone, in a checkout of its own made from
+    // the tree's objects, with the install run there afresh and a HOME of its own, and never in this
+    // checkout: an ignored file a command left here (a local config, a build's output), a file in
+    // the commands' HOME, or a change the commit leaves out can make a suite pass here that fails on
+    // the commit. What the suite writes there is thrown away with it, so the commit is the tree that
+    // was tested and nothing the suite did. The gate's checkout has a .git of its own, a copy of
+    // this process's, at the start commit, so a suite that asks git sees what it sees here.
+    // Returns { command, exit, out, timedOut, tree }.
+    const gateTests = (tree) => {
+      const dir = realpathSync(mkdtempSync(join(tmpdir(), 'redline-gate-')));
+      const gateHome = mkdtempSync(join(tmpdir(), 'redline-gate-home-'));
+      const genvGate = { ...genv, GIT_DIR: join(dir, '.git'), GIT_WORK_TREE: dir };
+      const result = (exit, out, timedOut = false) => ({ command: testArgv.join(' '), exit, out, timedOut, tree });
+      try {
+        cpSync(git(root, genv, ['rev-parse', '--absolute-git-dir']), join(dir, '.git'), { recursive: true });
+        git(dir, genvGate, ['read-tree', tree]);
+        git(dir, genvGate, ['checkout-index', '-a', '-f']);
+        git(dir, genvGate, ['reset', '-q', start]);
+        if (runAs) grant(dir, gateHome);
+        workDirs.push(dir, gateHome);
+        const env = childEnv(ctx.env ?? process.env, gateHome, ctx.proxy);
+        const gexec = (argv, seconds, extraEnv = {}) => { const r = run(dir, { ...env, ...extraEnv }, argv, seconds, runAs); settle(); return r; };
+        let installed = '';
+        if (plan.install) {
+          const s = secondsLeft(LIMITS.installS);
+          // No time to install is a failed suite: a change is never reported without its tests.
+          if (!s) return result(124, 'not run: the time budget was spent before the install in the clean checkout', true);
+          const i = gexec(plan.install, s, plan.installEnv);
+          if (i.exit !== 0) installed = `The install in the clean checkout, \`${plan.install.join(' ')}\`, exited ${i.exit}${i.timedOut ? ' (timed out)' : ''}:\n${capOutput(i.out, 3_000)}\n\n`;
+        }
+        const s = secondsLeft(LIMITS.runMaxS);
+        if (!s) return result(124, `${installed}not run: the time budget was spent`, true);
+        const t = gexec(testArgv, s);
+        return result(t.exit, `${installed}${t.out}`, t.timedOut);
+      } finally {
+        workDirs.splice(2);
+        for (const d of [dir, gateHome]) {
+          try { rmSync(d, { recursive: true, force: true }); } catch (e) { ctx.log?.(`::warning::could not remove ${d}: ${e.code ?? e.message}`); }
+        }
+      }
     };
 
     const tool = (name, input) => {
@@ -1553,7 +1585,7 @@ export async function workCheckout(ctx, job) {
         if (a.error) return `error: ${a.error}`;
         const s = secondsLeft(Math.min(LIMITS.runMaxS, Math.max(1, Number(input.timeout_seconds) || LIMITS.runDefaultS)));
         if (!s) return 'error: the time budget is spent; call finish_fix now';
-        const r = record(a.argv, exec(a.argv, s));
+        const r = exec(a.argv, s);
         return `exit ${r.exit}${r.timedOut ? ' (timed out)' : ''}\n${capOutput(r.out)}`;
       }
       return `error: unknown tool ${name}`;
@@ -1564,9 +1596,9 @@ export async function workCheckout(ctx, job) {
     let askedToDescribe = false;
     // Edits the commit will not carry (staged().skipped: a protected file, .github/ where nothing
     // there is written, a .gitattributes, an install's own change, a file over the size limit) are
-    // put back as the start commit has them, by this process's git, before the test gate runs: the
-    // suite then runs on the tree the bundle holds, and a pass never leans on a change that is
-    // dropped. What was put back is kept for the notes, which name every file left out.
+    // put back as the start commit has them, by this process's git, before the test gate runs, so
+    // the checkout the model goes on working in is the tree the gate tests. What was put back is
+    // kept for the notes, which name every file left out.
     const undone = new Map();
     const undoSkipped = () => {
       const { skipped } = staged();
@@ -1590,21 +1622,17 @@ export async function workCheckout(ctx, job) {
       }
       if (testArgv && staged().keep.length) {
         const putBack = undoSkipped();
-        // The suite runs on the files as they are now, by the model or, failing that, here.
-        const now = stamp();
-        let t = [...runs].reverse().find((r) => r.isTest && r.stamp === now);
-        if (!t) {
-          const s = secondsLeft(LIMITS.runMaxS);
-          ctx.log?.(s ? '  no test run after the last edit: running the test script' : '  no test run after the last edit, and no time left to run one');
-          // No time to run the suite is a failed suite: a fix is never reported without its tests.
-          t = record(testArgv, s ? exec(testArgv, s) : { exit: 124, out: 'not run: the time budget was spent', timedOut: true });
-        }
+        const { tree } = candidate();
+        ctx.log?.('  running the test script in a clean checkout of the change');
+        const t = gateTests(tree);
         tests = t;
         if (t.exit !== 0 && bounces < LIMITS.testBounces) {
           bounces++;
           const failed = failingTests(t.out);
           const named = failed.length ? `\nFailed: ${failed.join(', ')}` : '';
-          return { error: `The test script fails at your change (\`${t.command}\` exited ${t.exit}${t.timedOut ? ', timed out' : ''}):${named}\n${capOutput(t.out, 6_000)}${putBack.length ? `\n\nThese edits are not in the commit, so they were put back as the start commit has them before the run: ${putBack.join(', ')}.` : ''}\n\nFix it and run the tests again, then call finish_fix.` };
+          return { error: `The test script fails at your change (\`${t.command}\` exited ${t.exit}${t.timedOut ? ', timed out' : ''}):${named}\n${capOutput(t.out, 6_000)}`
+            + `\n\nThe suite ran in a clean checkout of the change, installed afresh with a HOME of its own: a file the commit does not carry (ignored, untracked and left out, or outside the checkout) was not there.`
+            + `${putBack.length ? `\n\nThese edits are not in the commit, so they were put back as the start commit has them before the run: ${putBack.join(', ')}.` : ''}\n\nFix it and run the tests again, then call finish_fix.` };
         }
       }
       return { sub: checked.sub };
@@ -1647,6 +1675,9 @@ export async function workCheckout(ctx, job) {
     if (st.keep.length > LIMITS.files) return refuse(`the ${words.work} changes ${st.keep.length} files; the limit is ${LIMITS.files}`, { turns, tests: testsRecord });
     // Literal pathspecs: a file a command named `*` must not stage everything.
     git(root, genv, ['--literal-pathspecs', 'add', '-A', '--', ...st.keep]);
+    // The commit is the tree the gate tested: nothing runs between the gate and here, so a tree
+    // that differs is a fault, never a change to carry untested.
+    if (tests && git(root, genv, ['write-tree']) !== tests.tree) throw new Error('the change is not the tree its tests ran on');
     const diff = git(root, genv, ['diff', '--cached', '--binary', start]) ?? '';
     const diffBytes = Buffer.byteLength(diff);
     if (diffBytes > LIMITS.diffBytes) return refuse(`the diff is ${diffBytes} bytes; the limit is ${LIMITS.diffBytes}`, { turns, tests: testsRecord });
@@ -1676,8 +1707,11 @@ export async function workCheckout(ctx, job) {
     mkdirSync(hooks, { recursive: true });
     git(root, genv, ['-c', `user.name=${AUTHOR.name}`, '-c', `user.email=${AUTHOR.email}`, '-c', `core.hooksPath=${hooks}`,
       'commit', '--quiet', '--no-verify', '-m', sub.subject]);
-    const message = git(root, genv, ['log', '-1', '--format=%B']) ?? '';
-    if (hasAttributionTrailer(message)) throw new Error('the commit message carries an attribution trailer');
+    // The message is the subject alone, and the lane's own check on a commit's message
+    // (job.refusedMessage) passes it.
+    const message = (git(root, genv, ['log', '-1', '--format=%B']) ?? '').replace(/\n+$/, '');
+    if (message !== sub.subject) throw new Error('the commit message is not the subject alone');
+    if (job.refusedMessage(message)) throw new Error('the commit message carries an attribution');
     const newHead = git(root, genv, ['rev-parse', 'HEAD']);
     // The commit holds the kept paths and nothing protected, checked on the commit itself. Under
     // .github/ it holds only the PR's own files, and removes none: a fix answers a finding in a

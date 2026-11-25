@@ -2,7 +2,7 @@
 // The model and GitHub are stubbed through ctx.fetch; git is real, on throwaway repositories under
 // the temp directory. Nothing leaves the machine.
 
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, symlinkSync, chmodSync, statSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, symlinkSync, chmodSync, statSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer as createNetServer } from 'node:net';
@@ -1233,7 +1233,7 @@ if (!gitOk) {
             && ran.every((l) => /^sudo -n -u redline-run -- env -i PATH=/.test(l) && !/GH_READ_TOKEN|DARIO_API_KEY/.test(l)));
         const killAfter = ran.every((l) => {
           const i = calls.indexOf(l);
-          return /^sudo -n -u redline-run -- bash -c kill -KILL -1$/.test(calls[i + 1]) && /^sudo -n -u redline-run -- chmod -R u\+rwX /.test(calls[i + 2])
+          return /^sudo -n -u redline-run -- bash -c kill -KILL -1$/.test(calls[i + 1]) && /^sudo -n -u redline-run -- chmod -R g-x,u\+rwX /.test(calls[i + 2])
             && /^sudo -n -u redline-run -- setfacl -R -m u:[^:]+:rwX,d:u:[^:]+:rwX /.test(calls[i + 3]);
         });
         check('after every command its processes are killed and what it made is readable again', killAfter);
@@ -1323,32 +1323,62 @@ if (!gitOk) {
       const secretDir = mkdtempSync(join(tmpdir(), 'redline-secret-'));
       const secret = join(secretDir, 'fix-exec.env');
       writeFileSync(secret, 'DARIO_API_KEY=dk_live_0123456789\n', { mode: 0o600 });
-      const realRun = async (testBody, inspect = () => {}, extra = {}) => {
-        const repo = makeRepo({ pkg: { name: 'r', private: true, scripts: { test: 'node test.mjs' } }, testBody });
-        const w = world(repo, { turns: [tool('fix_write', { path: 'src/b.js', content: FIXED_B }), finish()] });
+      // Each body runs twice as the run account: as a command the model runs in the checkout (node
+      // run.mjs), and as the suite the test gate runs in a checkout of its own, which is removed
+      // with it. A report goes to `outside`, named by the directory it ran in: not /tmp itself,
+      // which is sticky, so this account could not remove a file the run account made there.
+      const outside = mkdtempSync(join(tmpdir(), 'redline-outside-'));
+      chmodSync(outside, 0o777);
+      const reports = () => {
+        const out = {};
+        for (const f of readdirSync(outside).filter((n) => n.endsWith('.json'))) {
+          out[f.startsWith('redline-gate-') ? 'gate' : f.startsWith('redline-fix-repo-') ? 'checkout' : f] = JSON.parse(readFileSync(join(outside, f), 'utf8'));
+        }
+        return out;
+      };
+      const realRun = async (body, inspect = () => {}, extra = {}) => {
+        const repo = makeRepo({ pkg: { name: 'r', private: true, scripts: { test: 'node test.mjs' } }, testBody: body });
+        const w = world(repo, { turns: [tool('fix_write', { path: 'src/b.js', content: FIXED_B }), tool('fix_write', { path: 'run.mjs', content: body }), tool('fix_run', { command: 'node run.mjs' }), finish()] });
         // A throw is a refusal, as the CLI makes it.
         let r;
         try { ({ record: r } = await runFix({ ...w.ctx, runAs: realRunAs, guardFiles: [secret], ...extra })); } catch (e) { r = { outcome: 'refused', notes: e.message }; }
         inspect(repo.dir);
         return { r, repo, w };
       };
-      const done = ({ repo, w }) => { rmSync(w.out, { recursive: true, force: true }); rmSync(repo.dir, { recursive: true, force: true }); };
+      const done = ({ repo, w }) => {
+        rmSync(w.out, { recursive: true, force: true });
+        rmSync(repo.dir, { recursive: true, force: true });
+        for (const f of readdirSync(outside)) rmSync(join(outside, f), { recursive: true, force: true });
+      };
       {
-        // The report goes into the checkout: /tmp is sticky, and this account could not remove a
-        // file the run account made there.
         const body = [
           "import { readFileSync, writeFileSync, appendFileSync } from 'node:fs';",
-          'const r = { uid: process.getuid(), env: Object.keys(process.env) };',
+          "import { basename, join } from 'node:path';",
+          'const r = { uid: process.getuid(), env: Object.keys(process.env), home: process.env.HOME };',
           `try { readFileSync(${JSON.stringify(secret)}); r.key = 'read'; } catch (e) { r.key = e.code; }`,
           "try { appendFileSync('.git/config', '#'); r.git = 'written'; } catch (e) { r.git = e.code; }",
           "try { writeFileSync('scratch.txt', 'x'); r.checkout = 'written'; } catch (e) { r.checkout = e.code; }",
-          "writeFileSync('report.json', JSON.stringify(r));", '',
+          `writeFileSync(join(${JSON.stringify(outside)}, basename(process.cwd()) + '.json'), JSON.stringify(r));`, '',
         ].join('\n');
-        let seen = {};
-        const run = await realRun(body, (dir) => { try { seen = JSON.parse(readFileSync(join(dir, 'report.json'), 'utf8')); } catch { /* no report */ } });
-        check('the tests run as the run account and cannot read the key file or write .git, but can write the checkout',
-          seen.uid !== process.getuid() && seen.key === 'EACCES' && seen.git === 'EACCES' && seen.checkout === 'written' && !seen.env.includes('GH_READ_TOKEN'));
+        const run = await realRun(body);
+        const seen = reports();
+        const confined = (x) => x !== undefined && x.uid !== process.getuid() && x.key === 'EACCES' && x.git === 'EACCES' && x.checkout === 'written' && !x.env.includes('GH_READ_TOKEN');
+        check('a command runs as the run account and cannot read the key file or write .git, but can write the checkout', confined(seen.checkout), JSON.stringify(seen.checkout));
+        check('the test gate\'s suite runs as the run account too, in a checkout of its own whose .git it cannot write, with a HOME of its own', confined(seen.gate) && seen.gate.home !== seen.checkout?.home, JSON.stringify(seen.gate));
         check('and the fix goes through', run.r.outcome === 'fixed' && fixProblem(run.r) === null, run.r.notes);
+        // The files the run account made, read from the bundle (the commit was made in a private
+        // copy of .git): every cleanup pass after a command leaves them as they were made, so none
+        // is committed executable.
+        const verifier = mkdtempSync(join(tmpdir(), 'redline-verify-'));
+        let modes = '';
+        if (existsSync(join(run.w.out, 'fix.bundle'))) {
+          sh(verifier, ['init', '-q']);
+          sh(verifier, ['fetch', '-q', run.repo.dir, run.repo.head]);
+          sh(verifier, ['fetch', '-q', join(run.w.out, 'fix.bundle'), 'HEAD']);
+          modes = sh(verifier, ['ls-tree', 'FETCH_HEAD', '--', 'scratch.txt', 'run.mjs', 'src/b.js']).split('\n').map((l) => `${l.split(' ')[0]} ${l.split('\t')[1]}`).join(', ');
+        }
+        check('a file a command made is committed as it was made, not executable', modes === '100644 run.mjs, 100644 scratch.txt, 100644 src/b.js', modes);
+        rmSync(verifier, { recursive: true, force: true });
         done(run);
       }
       for (const [name, body] of [
@@ -1372,14 +1402,18 @@ if (!gitOk) {
         done(run);
       }
       {
-        // The test strips the inherited ACL from a directory and a file it made and locks them to
-        // itself (700, 600, and a 000 directory inside). This account still reaches and commits them.
-        const lock = "import { mkdirSync, writeFileSync, chmodSync } from 'node:fs';\nimport { spawnSync } from 'node:child_process';\n"
-          + "mkdirSync('locked/inner', { recursive: true });\nwriteFileSync('locked/f.txt', 'x\\n');\nwriteFileSync('locked/inner/g.txt', 'y\\n');\n"
-          + "spawnSync('setfacl', ['-R', '-b', 'locked']);\nchmodSync('locked/f.txt', 0o600);\nchmodSync('locked/inner/g.txt', 0o600);\nchmodSync('locked/inner', 0o000);\nchmodSync('locked', 0o700);\n";
+        // The command strips the inherited ACL from a directory and a file it made and locks them to
+        // itself (700, 600, and a 000 directory inside). This account still reaches and commits them,
+        // and removes the gate's checkout, where the suite did the same.
+        // The gate's suite locks a directory of its own: the committed locked/ is checked out there
+        // by this account, and only a file's owner may change its mode.
+        const lock = "import { mkdirSync, writeFileSync, chmodSync } from 'node:fs';\nimport { basename } from 'node:path';\nimport { spawnSync } from 'node:child_process';\n"
+          + "const d = basename(process.cwd()).startsWith('redline-gate-') ? 'gate-locked' : 'locked';\n"
+          + "mkdirSync(d + '/inner', { recursive: true });\nwriteFileSync(d + '/f.txt', 'x\\n');\nwriteFileSync(d + '/inner/g.txt', 'y\\n');\n"
+          + "spawnSync('setfacl', ['-R', '-b', d]);\nchmodSync(d + '/f.txt', 0o600);\nchmodSync(d + '/inner/g.txt', 0o600);\nchmodSync(d + '/inner', 0o000);\nchmodSync(d, 0o700);\n";
         const run = await realRun(lock);
         check('files the run account locked to itself are reached and committed, and nothing is left this account cannot remove',
-          run.r.outcome === 'fixed' && ['locked/f.txt', 'locked/inner/g.txt'].every((f) => run.r.files.includes(f)), run.r.notes);
+          run.r.outcome === 'fixed' && ['locked/f.txt', 'locked/inner/g.txt'].every((f) => run.r.files.includes(f)) && !readdirSync(tmpdir()).some((d) => d.startsWith('redline-gate-')), run.r.notes);
         done(run);
       }
       {
@@ -1430,6 +1464,7 @@ if (!gitOk) {
         rmSync(sockDir, { recursive: true, force: true });
       }
       rmSync(secretDir, { recursive: true, force: true });
+      rmSync(outside, { recursive: true, force: true });
     }
     console.log('\n  runFix: the test script');
     {

@@ -3,7 +3,7 @@
 // throwaway repositories under the temp directory. Nothing leaves the machine, and nothing here
 // asks GitHub anything: the build lane reads the checkout alone.
 
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, symlinkSync, readdirSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, symlinkSync, readdirSync, chmodSync, copyFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer } from 'node:http';
@@ -367,6 +367,17 @@ if (!gitOk) {
     rmSync(clone, { recursive: true, force: true });
     done(w, repo);
   }
+  {
+    // A title the build's rule lets through but whose first word the fix lane's trailer check
+    // reads as an attribution line: the commit carries it, and the bundle is written.
+    const repo = makeRepo();
+    const w = world(repo, { turns: [write, describe, finish({ subject: 'Claude support for offline builds' })] });
+    const { record: r } = await runBuild(w.ctx);
+    const message = r.new_head ? spawnSync('git', ['log', '-1', '--format=%B', r.new_head], { cwd: repo.dir, encoding: 'utf8' }).stdout : '';
+    check('a title that begins with a word the fix lane refuses is built: the commit\'s message is that title alone, and the bundle is written',
+      r.outcome === 'fixed' && r.title === 'Claude support for offline builds' && message === 'Claude support for offline builds\n\n' && existsSync(join(w.out, 'build.bundle')) && buildProblem(r) === null, `${r.outcome} ${r.notes}`);
+    done(w, repo);
+  }
 
   console.log('\n  runBuild: fix_describe is required');
   {
@@ -637,6 +648,42 @@ if (!gitOk) {
       check('the suite runs once, after the description has come', r.outcome === 'fixed' && lines.filter((l) => /running the test script/.test(l)).length === 1 && /no pull request description yet/.test(result(w, 2)));
       done(w, repo);
     }
+    {
+      // A command leaves a local config the repository ignores, and the suite passes only with it:
+      // the model's own run passes here, and the gate, in a clean checkout of the change, fails.
+      const testBody = "import { existsSync } from 'node:fs';\nprocess.exit(existsSync('local.json') ? 0 : 1);\n";
+      const repo = makeRepo({ pkg: { name: 'r', private: true, scripts: { test: 'node test.mjs' } }, extra: (dir) => { writeFileSync(join(dir, 'test.mjs'), testBody); writeFileSync(join(dir, '.gitignore'), 'node_modules/\nlocal.json\n'); } });
+      const make = "import { writeFileSync } from 'node:fs';\nwriteFileSync('local.json', '{}\\n');\n";
+      const w = world(repo, { turns: [write, tool('fix_write', { path: 'make-config.mjs', content: make }), tool('fix_run', { command: 'node make-config.mjs' }), tool('fix_run', { command: 'npm test' }), describe, finish(), finish()] });
+      const { record: r } = await runBuild(w.ctx);
+      check('the model\'s own run passed with the ignored file there', /exit 0/.test(result(w, 4)), result(w, 4).slice(0, 200));
+      check('an ignored file a command left in the checkout is not in the gate\'s checkout: the suite fails there, the model is told so, and the build is tests_failed',
+        r.outcome === 'tests_failed' && r.tests?.exit_code === 1 && /test script fails/.test(result(w, 6)) && /clean checkout of the change/.test(result(w, 6)) && !existsSync(join(w.out, 'build.bundle')) && buildProblem(r) === null, `${r.outcome} ${result(w, 6).slice(0, 300)}`);
+      done(w, repo);
+    }
+    {
+      // A file in the commands' HOME that the suite reads: the gate runs with a HOME of its own.
+      const testBody = "import { existsSync } from 'node:fs';\nimport { join } from 'node:path';\nprocess.exit(existsSync(join(process.env.HOME, 'flag')) ? 0 : 1);\n";
+      const repo = makeRepo({ pkg: { name: 'r', private: true, scripts: { test: 'node test.mjs' } }, extra: (dir) => writeFileSync(join(dir, 'test.mjs'), testBody) });
+      const make = "import { writeFileSync } from 'node:fs';\nimport { join } from 'node:path';\nwriteFileSync(join(process.env.HOME, 'flag'), 'x');\n";
+      const w = world(repo, { turns: [write, tool('fix_write', { path: 'make-flag.mjs', content: make }), tool('fix_run', { command: 'node make-flag.mjs' }), tool('fix_run', { command: 'npm test' }), describe, finish(), finish()] });
+      const { record: r } = await runBuild(w.ctx);
+      check('a file a command left in the commands\' HOME is not in the gate\'s HOME: the suite fails there', /exit 0/.test(result(w, 4)) && r.outcome === 'tests_failed' && r.tests?.exit_code === 1 && buildProblem(r) === null, `${r.outcome} ${result(w, 4).slice(0, 120)}`);
+      done(w, repo);
+    }
+    {
+      // A suite that rewrites a tracked file after its assertions pass: what it wrote stays in the
+      // gate's checkout, and the commit is the tree the suite was handed.
+      const testBody = "import { writeFileSync } from 'node:fs';\nwriteFileSync('src/pager.js', 'export const cursor = { at: 99 };\\n');\nprocess.exit(0);\n";
+      const repo = makeRepo({ pkg: { name: 'r', private: true, scripts: { test: 'node test.mjs' } }, extra: (dir) => writeFileSync(join(dir, 'test.mjs'), testBody) });
+      const w = world(repo, { turns: [write, describe, finish()] });
+      const { record: r } = await runBuild(w.ctx);
+      const committed = r.new_head ? spawnSync('git', ['show', `${r.new_head}:src/pager.js`], { cwd: repo.dir, encoding: 'utf8' }).stdout : '';
+      check('what the suite wrote is not committed: the commit holds the tree the gate tested, and the checkout is as the model left it',
+        r.outcome === 'fixed' && r.tests?.exit_code === 0 && committed === NEW_PAGER && readFileSync(join(repo.dir, 'src', 'pager.js'), 'utf8') === NEW_PAGER && r.files.join() === 'src/pager.js', `${r.outcome} ${JSON.stringify(committed)}`);
+      check('and the gate\'s checkout and HOME are gone', !readdirSync(tmpdir()).some((d) => d.startsWith('redline-gate-')));
+      done(w, repo);
+    }
     if (process.platform !== 'win32') {
       console.log('\n  runBuild: commands as the run account');
       // The stand-in sudo and setfacl of the fix tests: sudo runs the command as this account,
@@ -692,22 +739,29 @@ if (!gitOk) {
       const secretDir = mkdtempSync(join(tmpdir(), 'redline-build-secret-'));
       const secret = join(secretDir, 'fix-exec.env');
       writeFileSync(secret, 'DARIO_API_KEY=dk_live_0123456789\n', { mode: 0o600 });
-      const body = ["import { readFileSync, writeFileSync, appendFileSync } from 'node:fs';", 'const r = { uid: process.getuid() };',
+      // The suite runs in the test gate's checkout, which is removed with it, so its report goes to
+      // a directory outside both: not /tmp itself, which is sticky, so this account can remove it.
+      const outside = mkdtempSync(join(tmpdir(), 'redline-build-outside-'));
+      chmodSync(outside, 0o777);
+      const report = join(outside, 'report.json');
+      const body = ["import { readFileSync, writeFileSync, appendFileSync } from 'node:fs';", 'const r = { uid: process.getuid(), cwd: process.cwd() };',
         `try { readFileSync(${JSON.stringify(secret)}); r.key = 'read'; } catch (e) { r.key = e.code; }`,
         "try { appendFileSync('.git/config', '#'); r.git = 'written'; } catch (e) { r.git = e.code; }",
-        "writeFileSync('report.json', JSON.stringify(r));", ''].join('\n');
+        `writeFileSync(${JSON.stringify(report)}, JSON.stringify(r));`, ''].join('\n');
       const repo = makeRepo({ pkg: { name: 'r', private: true, scripts: { test: 'node test.mjs' } }, extra: (dir) => writeFileSync(join(dir, 'test.mjs'), body) });
       const w = world(repo, { turns: [write, describe, finish()] });
       let r;
       try { ({ record: r } = await runBuild({ ...w.ctx, runAs: realRunAs, guardFiles: [secret] })); } catch (e) { r = { outcome: 'refused', notes: e.message, files: [] }; }
       let seen = {};
-      try { seen = JSON.parse(readFileSync(join(repo.dir, 'report.json'), 'utf8')); } catch { /* no report */ }
-      check('the tests run as the run account and can read neither the key file nor write .git', seen.uid !== undefined && seen.uid !== process.getuid() && seen.key === 'EACCES' && seen.git === 'EACCES', JSON.stringify(seen));
+      try { seen = JSON.parse(readFileSync(report, 'utf8')); } catch { /* no report */ }
+      check('the tests run as the run account, in the gate\'s own checkout, and can read neither the key file nor write its .git',
+        seen.uid !== undefined && seen.uid !== process.getuid() && seen.key === 'EACCES' && seen.git === 'EACCES' && /redline-gate-/.test(seen.cwd ?? '') && !String(seen.cwd).startsWith(repo.dir), JSON.stringify(seen));
       // The commit is made in this account's private copy of .git, so it is read from the bundle.
       check('and the build goes through, one commit in the bundle', r.outcome === 'fixed' && r.files.includes('src/pager.js') && r.commits?.length === 1
         && spawnSync('git', ['bundle', 'list-heads', join(w.out, 'build.bundle')], { encoding: 'utf8' }).stdout.trim() === `${r.new_head} HEAD`, r.notes);
       done(w, repo);
       rmSync(secretDir, { recursive: true, force: true });
+      rmSync(outside, { recursive: true, force: true });
     }
   }
 }
@@ -726,6 +780,12 @@ console.log('\n  CLI');
   const r = run(env0);
   check('missing configuration exits 2 with an annotation', r.status === 2 && r.stderr.includes('::error::FIX_ENV_FILE is not set'));
   const dir = mkdtempSync(join(tmpdir(), 'redline-build-cli-'));
+  // The CLI is handed a copy of the fixture, private to this account as the host's prompt is: the
+  // tracked fixture is readable by any account that can traverse the checkout, and the build
+  // refuses a run account that can read its prompt.
+  const PROMPT = join(dir, 'build-prompt.md');
+  copyFileSync(PROMPT_FIXTURE, PROMPT);
+  chmodSync(PROMPT, 0o600);
   const envFile = join(dir, 'fix.env');
   writeFileSync(envFile, 'DARIO_URL=http://127.0.0.1:9\n');
   const outDir = join(dir, 'build-out');
@@ -738,11 +798,11 @@ console.log('\n  CLI');
   writeFileSync(join(dir, 'empty.md'), '\n');
   const empty = run({ ...base, FIX_PROMPT_FILE: join(dir, 'empty.md') });
   check('an empty prompt file: exit 2, the error names the variable', empty.status === 2 && /::error::FIX_PROMPT_FILE: .*empty\.md is empty/.test(empty.stderr));
-  const noKey = run({ ...base, FIX_PROMPT_FILE: PROMPT_FIXTURE });
+  const noKey = run({ ...base, FIX_PROMPT_FILE: PROMPT });
   check('the model key is required from the env file, unless there is a key socket', noKey.status === 2 && noKey.stderr.includes('::error::DARIO_API_KEY is not set (or set DARIO_SOCKET'));
   check('an earlier run\'s output is removed before anything starts', !existsSync(join(outDir, 'build.json')) && !existsSync(join(outDir, 'build.bundle')));
   writeFileSync(envFile, 'DARIO_API_KEY=dk_test_0123456789\nDARIO_URL=http://127.0.0.1:9\nFIX_EFFORT=turbo\n');
-  const withPrompt = { ...base, FIX_PROMPT_FILE: PROMPT_FIXTURE };
+  const withPrompt = { ...base, FIX_PROMPT_FILE: PROMPT };
   const noRepo = run({ ...withPrompt, REPO: '' });
   check('no REPO: exit 2, a setup error', noRepo.status === 2 && noRepo.stderr.includes('::error::REPO is not set'));
   check('a FIX_EFFORT that is no level is a warning in this lane\'s name', noRepo.stdout.includes('::warning::FIX_EFFORT is not one of low, medium, high, xhigh, max; the build runs with no effort field'));
@@ -768,6 +828,14 @@ console.log('\n  CLI');
     const refusedRec = read();
     check('no FIX_RUN_AS: refused before anything runs, exit 1, the record says why', noAccount.status === 1 && refusedRec.outcome === 'refused' && refusedRec.notes === NO_RUN_ACCOUNT
       && buildProblem(refusedRec) === null && sh(repo.dir, ['status', '--porcelain']) === '' && readdirSync(outDir).sort().join() === 'build.json,notes.md', `${noAccount.status} ${noAccount.stdout}${noAccount.stderr}`);
+    // A quoted blank: the env file's parser keeps the space, and the commands would run as the
+    // account the trimmed name leaves, this one. It is no account, so the same refusal.
+    for (const blank of ['FIX_RUN_AS=" "', 'FIX_RUN_AS=\'\t\'', 'FIX_RUN_AS=']) {
+      writeFileSync(envFile, `DARIO_API_KEY=dk_test_0123456789\nDARIO_URL=http://127.0.0.1:9\n${blank}\n`);
+      const x = run({ ...withPrompt, CHECKOUT: repo.dir, BUILD_BASE: repo.head, GITHUB_RUN_ID: '45405973359', GITHUB_RUN_ATTEMPT: '2' });
+      const rec = read();
+      check(`${blank}: no account, refused before anything runs`, x.status === 1 && rec.outcome === 'refused' && rec.notes === NO_RUN_ACCOUNT && sh(repo.dir, ['status', '--porcelain']) === '', `${x.status} ${rec.notes}`);
+    }
     // A run account named: the checks before the work starts come first.
     writeFileSync(envFile, 'DARIO_API_KEY=dk_test_0123456789\nDARIO_URL=http://127.0.0.1:9\nFIX_RUN_AS=redline-run\n');
     const moved = run({ ...withPrompt, CHECKOUT: repo.dir, BUILD_BASE: OTHER, GITHUB_RUN_ID: '45405973359', GITHUB_RUN_ATTEMPT: '2' });
@@ -807,12 +875,25 @@ console.log('\n  CLI');
       status === 0 && rec.outcome === 'fixed' && buildProblem(rec) === null && readdirSync(outDir).sort().join() === 'build.bundle,build.json,description.md,notes.md', `${status} ${printed}`);
     check('the record is the contract: the ticket, the base, one commit, its subject as the title, the run',
       rec.ticket === ULID && rec.base_head === repo.head && rec.commits?.length === 1 && rec.title === 'ops: reset the cursor on an empty page' && rec.model === 'm' && rec.description === true && JSON.stringify(rec.run) === '{"id":45405973359,"attempt":2}');
-    check('description.md is the text fix_describe gave, notes.md the notes', readFileSync(join(outDir, 'description.md'), 'utf8') === `${DESCRIPTION}\n` && readFileSync(join(outDir, 'notes.md'), 'utf8') === `${rec.notes}\n`);
+    const text = (f) => (existsSync(join(outDir, f)) ? readFileSync(join(outDir, f), 'utf8') : null);
+    check('description.md is the text fix_describe gave, notes.md the notes', text('description.md') === `${DESCRIPTION}\n` && text('notes.md') === `${rec.notes}\n`);
     check('the model was sent the prompt file\'s text, this lane\'s tools and the key, and the log and the summary name the outcome',
-      seen.length === 3 && seen.every((s) => s.url === '/v1/messages' && s.key === 'dk_test_0123456789' && s.body.system === readFileSync(PROMPT_FIXTURE, 'utf8') && JSON.stringify(s.body.tools) === JSON.stringify(TOOLS) && s.body.model === 'm')
+      seen.length === 3 && seen.every((s) => s.url === '/v1/messages' && s.key === 'dk_test_0123456789' && s.body.system === readFileSync(PROMPT, 'utf8') && JSON.stringify(s.body.tools) === JSON.stringify(TOOLS) && s.body.model === 'm')
       && printed.includes(`Redline build: fixed at ${rec.new_head} (1 file)`) && readFileSync(summary, 'utf8').startsWith(`Redline build: fixed at ${rec.new_head} (1 file)\n\n`) && !/dk_test_0123456789/.test(printed));
-    check('the bundle in the output directory is one commit by askalf on the base', sh(repo.dir, ['bundle', 'list-heads', join(outDir, 'build.bundle')]) === `${rec.new_head} HEAD`
-      && sh(repo.dir, ['rev-list', '--count', `${repo.head}..${rec.new_head}`]) === '1' && sh(repo.dir, ['log', '-1', '--format=%an <%ae>|%cn <%ce>|%P|%B', rec.new_head]) === `${AUTHOR.name} <${AUTHOR.email}>|${AUTHOR.name} <${AUTHOR.email}>|${repo.head}|ops: reset the cursor on an empty page`);
+    // The commit was made in the run's private copy of .git, which is gone: it is read from the
+    // bundle, fetched into a repository that has the base.
+    const verifier = mkdtempSync(join(tmpdir(), 'redline-build-verify-'));
+    let verified = false;
+    if (existsSync(join(outDir, 'build.bundle'))) {
+      sh(verifier, ['init', '-q']);
+      sh(verifier, ['fetch', '-q', repo.dir, repo.head]);
+      sh(verifier, ['fetch', '-q', join(outDir, 'build.bundle'), 'HEAD']);
+      verified = sh(verifier, ['rev-parse', 'FETCH_HEAD']) === rec.new_head
+        && sh(verifier, ['rev-list', '--count', `${repo.head}..${rec.new_head}`]) === '1'
+        && sh(verifier, ['log', '-1', '--format=%an <%ae>|%cn <%ce>|%P|%B', rec.new_head]) === `${AUTHOR.name} <${AUTHOR.email}>|${AUTHOR.name} <${AUTHOR.email}>|${repo.head}|ops: reset the cursor on an empty page`;
+    }
+    check('the bundle in the output directory is one commit by askalf on the base, its message the subject alone', verified);
+    rmSync(verifier, { recursive: true, force: true });
     }
     rmSync(repo.dir, { recursive: true, force: true });
   }
@@ -909,7 +990,23 @@ console.log('\n  the reusable workflow');
   const onDefault = steps[onDefaultAt] ?? '';
   check('the base is compared with the repository\'s own default branch, through env, and only ahead or identical passes',
     onDefault.includes('BASE: ${{ inputs.base }}\n') && onDefault.includes('REPO: ${{ github.repository }}\n') && onDefault.includes('DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}\n')
-    && onDefault.includes('compare/${base}...${branch}') && onDefault.includes('status === "ahead" || status === "identical"') && !/\$\{\{/.test(onDefault.slice(onDefault.indexOf('run:'))));
+    && onDefault.includes('compare/${base}...${encodeURIComponent(branch)}') && onDefault.includes('if (!branch) {') && !/A-Za-z0-9/.test(onDefault)
+    && onDefault.includes('status === "ahead" || status === "identical"') && !/\$\{\{/.test(onDefault.slice(onDefault.indexOf('run:'))));
+  {
+    // The step's own script, with GitHub's answer stubbed: any branch name git allows is asked for
+    // as one encoded ref, and a name that could not be read fails the job.
+    const script = onDefault.slice(onDefault.indexOf("-e '") + 4, onDefault.lastIndexOf("'"));
+    const stub = `data:text/javascript,${encodeURIComponent("globalThis.fetch = async (u) => { console.log('URL ' + u); return { ok: true, json: async () => ({ status: 'ahead' }) }; };")}`;
+    const step = (branch) => spawnSync(process.execPath, ['--import', stub, '--input-type=module', '-e', script],
+      { env: { PATH: process.env.PATH, BASE, REPO: 'askalf/r', DEFAULT_BRANCH: branch, GH_READ_TOKEN: 't' }, encoding: 'utf8' });
+    const plus = step('release+stable');
+    const nested = step('team/main');
+    const none = step('');
+    check('the base step asks for a default branch git allows, `release+stable` or `team/main`, as one encoded ref, and passes on ahead',
+      plus.status === 0 && plus.stdout.includes(`URL https://api.github.com/repos/askalf/r/compare/${BASE}...release%2Bstable\n`)
+      && nested.status === 0 && nested.stdout.includes(`/compare/${BASE}...team%2Fmain\n`), `${plus.status} ${plus.stdout}${plus.stderr}`);
+    check('a default branch name that could not be read fails the step, and nothing is asked', none.status === 1 && none.stdout.includes('::error::the default branch name could not be read') && !none.stdout.includes('URL '));
+  }
   const upload = steps[uploadAt] ?? '';
   check('the upload runs whatever the outcome, as redline-build from this run\'s own output, short-lived, overwriting',
     upload.includes('if: always()\n') && upload.includes('name: redline-build\n') && upload.includes(`path: ${OUT}\n`) && /retention-days: [1-7]\n/.test(upload) && upload.includes('overwrite: true'));
