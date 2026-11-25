@@ -24,8 +24,8 @@
     "redline-fix": {
       "source": "scripts/redline/fix-tools.json",
       "kind": "mcp",
-      "hash": "f161af1e6c7126df1ce9bdf11a01ed63629f2f1abee6193fabd58c671d73f379",
-      "scannedAt": "2026-11-25T09:04:46.292Z",
+      "hash": "44ee96af3c72c6a73addc9ef05b0ec10bc631ee7b9f796c1edbc715415741b4c",
+      "scannedAt": "2026-11-25T09:22:48.779Z",
       "verdict": "clean",
       "findings": 0,
       "detection": {
@@ -35,7 +35,7 @@
       "parts": {
         "finish_fix": "357c0bf960a754dcc84170895ab64f17f815c50afdda37a04450901008b1dab5",
         "fix_describe": "e789caa7ca79be689b2105ca3976acdbd1aa8fca03d3c623766bfb04cf7a41ca",
-        "fix_edit": "5dd380004d0885562eae91f2464794a3e20926887b086adb7e68b17297431ca6",
+        "fix_edit": "85efde0b60f5619dee714e2a41a8bc720506803b34c262d5a74635b75a190fb5",
         "fix_list": "265160c0dedba110cf715301f353474129227d07d7a851f4ae80087053b9cdfd",
         "fix_read": "6602780842c664ad906d6594066b42ac5190731898931c5cc98d6ec61a233bcc",
         "fix_run": "cef3d4dda0e99c49b9bbcb9f0645ab8040f2abba41b3306205e26963d5e81ecf",

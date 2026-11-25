@@ -271,12 +271,16 @@ checks that the checkout is exactly the reviewed head, then `fix.mjs`:
   and this lane's own workflows; never a `.gitattributes`, never a file the reviewed head marks `redline-protected`
   in `.gitattributes`, such as captured payloads and vendored code; the marks are read from that
   commit, so nothing the run does to `.gitattributes` lifts them). `fix_edit` replaces one exact
-  piece of a file that exists (the text must occur once, as it is on disk); `fix_write` writes a
-  whole file. The model is reached through dario, which cuts a tool result over 30,000 characters
-  and removes some product names from the text it carries, so `fix_read` returns at most 400
-  lines and 24,000 characters and says where to read on, and `fix_read` and `fix_search` name the
-  lines they show with words removed. `fix_write` never rewrites a file with such a line, and
-  `fix_edit` cannot match one, so text the model never saw is never written back. And
+  piece of a UTF-8 file that exists: the text must occur once on disk and once in the file as the
+  model is shown it, overlapping matches counted; a file whose lines all end CRLF takes the
+  replacement with CRLF; every byte outside the match is written back as it was. `fix_write`
+  writes a whole file, given as a string. The model is reached through dario, which cuts a tool
+  result over 30,000 characters and removes some product names from the text it carries
+  (`shownText` follows its scrub), so `fix_read` returns at most 400 lines and its whole result,
+  notes included, stays under 24,000 characters, saying where to read on, and `fix_read` and
+  `fix_search` name the lines they show with words removed. `fix_write` never replaces a file
+  with such a line, or one over 1 MB it cannot check, and `fix_edit` cannot match one, so text
+  the model never saw is never written back. And
   `fix_run` an allowlist only: the package.json `test`, `lint`, `typecheck`
   and `build` scripts and `node <file>`, without a shell, in a scrubbed environment, and
   `fix_describe` replace the PR description for a finding on it (whole text, no attribution, no

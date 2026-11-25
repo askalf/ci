@@ -90,7 +90,7 @@
 // there is no bundled fallback, and a variable that is unset, a file that cannot be read or an empty
 // file ends the run.
 
-import { readFileSync, writeFileSync, mkdirSync, rmSync, existsSync, lstatSync, realpathSync, statSync, readdirSync, appendFileSync, mkdtempSync, readlinkSync, cpSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, rmSync, existsSync, lstatSync, realpathSync, statSync, readdirSync, appendFileSync, mkdtempSync, readlinkSync, cpSync, openSync, fstatSync, closeSync, ftruncateSync, writeSync } from 'node:fs';
 import { join, resolve, relative, dirname, basename, sep, posix } from 'node:path';
 import { tmpdir, userInfo } from 'node:os';
 import { createHash } from 'node:crypto';
@@ -851,99 +851,141 @@ export function exitCode(record) {
 
 // ---------- what the model is shown ----------
 
-// The lane's model calls go through dario, which changes what it carries in two ways
-// (src/cc-template.ts there): a tool result over 30,000 characters is cut, and the product names in
-// its CONTENT_FRAMEWORK_PATTERNS are removed from every message text, tool results included, unless
-// the name sits in a path or a slug. So fix_read and fix_search keep a result under the cut
-// (LIMITS.readChars) and name the lines they show with words removed: on disk those lines are not
-// what the model saw, so fix_edit cannot match them and fix_write does not rewrite their file.
-// 2026-11-25, dario#1936: a default read of src/cc-template.ts (1,000 lines, 54,000 characters)
-// arrived cut at about line 550, with ten lines missing words, and since a whole-file write was the
-// only way to change a file, the fixer spent its turns searching and refused.
+// The lane's model calls go through dario (src/cc-template.ts there), which cuts a tool result over
+// 30,000 characters and removes the product names in its CONTENT_FRAMEWORK_PATTERNS from every
+// message text, tool results included, except a name inside a path or a slug (scrubWithPatterns).
+// So fix_read and fix_search keep the whole result, notes included, under LIMITS.readChars and name
+// the lines they show with words removed; fix_edit's old_text must occur once on disk and once in the
+// file as shown; fix_write does not rewrite a file with such a line. CONNECTION_REMOVES and shownText
+// follow dario's CONTENT_FRAMEWORK_PATTERNS and scrubWithPatterns, and change with them.
 export const CONNECTION_CUT_CHARS = 30_000;
 const CONNECTION_REMOVES = [
   /\b(roo[- ]?cline|roo[- ]?code|big[- ]?agi|claude[- ]?bridge)\b/gi,
   /\b(librechat|typingmind)\b/gi,
 ];
 
-/** True when dario removes a word from this text on its way to the model; a word after . / \ - _ or before / \ stays, as there. */
-export function alteredInTransit(text) {
-  const s = String(text ?? '');
+/** The text as the model is shown it: dario's content scrub, pattern after pattern, with its path and slug exemptions. */
+export function shownText(text) {
+  let out = String(text ?? '');
   for (const re of CONNECTION_REMOVES) {
-    for (const m of s.matchAll(re)) {
-      const before = m.index > 0 ? s[m.index - 1] : '';
-      const after = s[m.index + m[0].length] ?? '';
-      if (before && './\\-_'.includes(before)) continue;
-      if (after === '/' || after === '\\') continue;
-      return true;
-    }
+    re.lastIndex = 0;
+    out = out.replace(re, (match, ...args) => {
+      const offset = args[args.length - 2];
+      const src = args[args.length - 1];
+      const before = offset > 0 ? src[offset - 1] : '';
+      const after = offset + match.length < src.length ? src[offset + match.length] : '';
+      if (before === '.' || before === '/' || before === '\\' || before === '-' || before === '_') return match;
+      if (after === '/' || after === '\\') return match;
+      return '';
+    });
   }
-  return false;
+  return out;
 }
 
-/** The 1-based numbers of the lines of text that alteredInTransit changes. */
+/** True when the model is shown this text with words removed. */
+export const alteredInTransit = (text) => shownText(text) !== String(text ?? '');
+
+/** The 1-based numbers of the lines of text the model is shown with words removed. */
 export function alteredLines(text) {
   const out = [];
   String(text ?? '').split('\n').forEach((line, i) => { if (alteredInTransit(line)) out.push(i + 1); });
   return out;
 }
 
+/** How many times needle occurs in hay, overlapping matches counted. */
+export function occurrences(hay, needle) {
+  if (!needle) return 0;
+  let n = 0;
+  for (let i = hay.indexOf(needle); i !== -1; i = hay.indexOf(needle, i + 1)) n++;
+  return n;
+}
+
 const ALTERED_NOTE = 'shown with words removed on the way to you, and whole on disk';
 /** "line 3" or "lines 3, 9", at most 20 named. */
 const namedLines = (nums) => `${nums.length > 1 ? 'lines' : 'line'} ${nums.slice(0, 20).join(', ')}${nums.length > 20 ? ', ...' : ''}`;
 const isAre = (nums) => (nums.length > 1 ? 'are' : 'is');
+// Room a read or search result keeps for its notes, so the whole result stays under readChars.
+const NOTE_ROOM = 2_000;
 
-/** fix_read: redline_read's numbered lines, at most LIMITS.readLines and LIMITS.readChars, naming the lines alteredInTransit changes. */
+/** fix_read: numbered lines, at most LIMITS.readLines, the whole result under LIMITS.readChars, naming the lines shown with words removed. */
 export function fixRead(root, input = {}) {
+  let text;
+  try {
+    // One descriptor for the check and the read.
+    const fd = openSync(safePath(root, input.path), 'r');
+    try {
+      if (fstatSync(fd).isDirectory()) return 'error: that is a directory; use fix_list';
+      const buf = readFileSync(fd);
+      if (buf.subarray(0, 8192).includes(0)) return 'error: binary file, not readable as text';
+      text = buf.toString('utf8');
+    } finally { closeSync(fd); }
+  } catch (e) {
+    return e?.code === 'EISDIR' ? 'error: that is a directory; use fix_list' : `error: ${e.message}`;
+  }
+  const lines = text.split('\n');
   const start = Math.max(1, Math.floor(Number(input.start_line)) || 1);
-  const end = Math.max(start, Math.min(Math.floor(Number(input.end_line)) || Infinity, start + LIMITS.readLines - 1));
-  const raw = String(readTool(root, 'redline_read', { path: input.path, start_line: start, end_line: end }));
-  if (raw.startsWith('error:')) return raw;
-  const rows = raw.split('\n');
-  const total = rows.length && /^\(file has \d+ lines\)$/.test(rows.at(-1)) ? rows.pop() : '';
+  const asked = Math.floor(Number(input.end_line)) || 0;
+  const wanted = Math.min(lines.length, asked > 0 ? Math.max(asked, start) : Infinity);
+  const end = Math.min(wanted, start + LIMITS.readLines - 1);
+  const budget = LIMITS.readChars - NOTE_ROOM;
   let out = '';
   let last = start - 1;
-  let cut = false;
   const altered = [];
-  for (const row of rows) {
-    const m = /^(\d+)\t/.exec(row);
-    if (!m) continue; // redline_read's own cap note: this cap is lower
-    if (out.length + row.length + 1 > LIMITS.readChars) {
+  for (let i = start; i <= end; i++) {
+    const row = `${i}\t${lines[i - 1]}\n`;
+    if (out.length + row.length > budget) {
       if (!out) {
-        // One line longer than a read: its start, and where it stops.
-        out = `${row.slice(0, LIMITS.readChars - 200)}\n(line ${m[1]} goes on past what one read shows; take fix_edit's old_text from the part above)\n`;
-        if (alteredInTransit(row.slice(m[0].length, LIMITS.readChars - 200))) altered.push(Number(m[1]));
-        last = Number(m[1]);
+        // One line longer than a read: its start, and how much of it that is.
+        const part = lines[i - 1].slice(0, budget - 300);
+        out = `${i}\t${part}\n(line ${i} goes on past what one read shows: its first ${part.length} of ${lines[i - 1].length} characters are above; take fix_edit's old_text from them)\n`;
+        if (alteredInTransit(part)) altered.push(i);
+        last = i;
       }
-      cut = true;
       break;
     }
-    out += `${row}\n`;
-    last = Number(m[1]);
-    if (alteredInTransit(row.slice(m[0].length))) altered.push(last);
+    out += row;
+    last = i;
+    if (alteredInTransit(lines[i - 1])) altered.push(i);
   }
-  if (cut) out += `(output cap reached at line ${last}: read on with start_line ${last + 1})\n`;
+  if (last < wanted) out += `(shown to line ${last} of ${lines.length}: read on with start_line ${last + 1})\n`;
   if (altered.length) {
     out += `(${namedLines(altered)}: ${ALTERED_NOTE}. Never put such a line in fix_edit's old_text: take old_text from the lines around it. Change this file with fix_edit, not fix_write.)\n`;
   }
-  return `${out}${total}`;
+  return `${out}(file has ${lines.length} lines)`;
 }
 
-/** fix_search: redline_search's matches, kept under LIMITS.readChars, naming the matches alteredInTransit changes. */
+/** fix_search: redline_search's matches, the whole result under LIMITS.readChars, naming the matches shown with words removed by path. */
 export function fixSearch(root, input = {}) {
   const raw = String(readTool(root, 'redline_search', input));
   if (raw.startsWith('error:') || raw === '(no matches)') return raw;
+  const rows = raw.split('\n');
+  const capped = rows.at(-1) === '(match cap reached)' ? rows.pop() : '';
+  const budget = LIMITS.readChars - NOTE_ROOM;
   let out = '';
-  let cut = false;
-  const altered = [];
-  for (const row of raw.split('\n')) {
-    if (out.length + row.length + 1 > LIMITS.readChars) { cut = true; break; }
+  let left = 0;
+  const altered = new Map();
+  for (let k = 0; k < rows.length; k++) {
+    const row = rows[k];
+    if (out.length + row.length + 1 > budget) { left = rows.length - k; break; }
     out += `${row}\n`;
-    const m = /^(.+?:\d+): /.exec(row);
-    if (m && alteredInTransit(row.slice(m[0].length))) altered.push(m[1]);
+    const m = /^(.+?):(\d+): /.exec(row);
+    if (m && alteredInTransit(row.slice(m[0].length))) {
+      if (!altered.has(m[1])) altered.set(m[1], []);
+      altered.get(m[1]).push(Number(m[2]));
+    }
   }
-  if (cut) out += '(output cap reached: narrow the pattern or the path)\n';
-  if (altered.length) out += `(${altered.join(', ')}: ${ALTERED_NOTE})\n`;
+  if (capped) out += `${capped}\n`;
+  if (left) out += `(${left} more match${left > 1 ? 'es' : ''} not shown: the output cap; narrow the pattern or the path)\n`;
+  if (altered.size) {
+    let note = '';
+    let more = 0;
+    for (const [path, nums] of altered) {
+      const part = `${path} ${namedLines(nums)}`;
+      if (note.length + part.length + 2 > NOTE_ROOM - 400) { more += nums.length; continue; }
+      note += `${note ? '; ' : ''}${part}`;
+    }
+    out += `(${ALTERED_NOTE}: ${note || 'matches above'}${more ? `; and ${more} more` : ''})\n`;
+  }
   return out.trimEnd();
 }
 
@@ -960,7 +1002,7 @@ export const TOOLS = [
     input_schema: { type: 'object', required: ['path'], properties: { path: { type: 'string' }, start_line: { type: 'integer', minimum: 1 }, end_line: { type: 'integer', minimum: 1 } } } },
   { name: 'fix_search', description: 'Search the checkout with a JavaScript regular expression. At most 80 matches.',
     input_schema: { type: 'object', required: ['pattern'], properties: { pattern: { type: 'string' }, path: { type: 'string', description: 'Directory or file to search; default the root.' } } } },
-  { name: 'fix_edit', description: 'Change part of a file in the checkout: old_text, copied exactly from fix_read without the line numbers and the tab, must occur once in the file, and is replaced by new_text. Take enough lines around the change for old_text to occur once. Use this for every change to a file that exists. The same paths as fix_write.',
+  { name: 'fix_edit', description: 'Change part of a UTF-8 text file in the checkout: old_text, copied exactly from fix_read without the line numbers and the tab, must occur once in the file, both on disk and as fix_read shows it, and is replaced by new_text (empty to delete). Take enough lines around the change for old_text to occur once. Use this for every change to a file that exists. The same paths as fix_write.',
     input_schema: { type: 'object', required: ['path', 'old_text', 'new_text'], properties: { path: { type: 'string' }, old_text: { type: 'string' }, new_text: { type: 'string' } } } },
   { name: 'fix_write', description: 'Write a whole file in the checkout (created if absent). For a new file; to change a file that exists, use fix_edit. Never under .git/ or node_modules/; under .github/ only the files the brief lists as writable there.',
     input_schema: { type: 'object', required: ['path', 'content'], properties: { path: { type: 'string' }, content: { type: 'string' } } } },
@@ -1533,49 +1575,75 @@ async function answerReview(ctx) {
         return { abs, rel };
       };
       if (name === 'fix_edit') {
+        // The tool arguments are the model's: a missing new_text is an error, never a deletion.
+        if (typeof input.old_text !== 'string' || typeof input.new_text !== 'string') return 'error: old_text and new_text must both be strings (new_text may be empty, to delete old_text)';
+        if (!input.old_text) return 'error: old_text is empty; copy the lines to change from fix_read';
+        if (Buffer.byteLength(input.new_text) > LIMITS.writeBytes) return `error: new_text is larger than ${LIMITS.writeBytes} bytes`;
+        let fd = null;
         try {
           const t = target(input.path);
           if (t.error) return t.error;
-          if (!existsSync(t.abs)) return `error: ${t.rel} does not exist; write a new file with fix_write`;
-          if (statSync(t.abs).size > LIMITS.fileBytes) return `error: ${t.rel} is larger than ${LIMITS.fileBytes} bytes`;
-          const buf = readFileSync(t.abs);
+          // One descriptor for the check, the read and the write.
+          try { fd = openSync(t.abs, 'r+'); } catch (e) {
+            if (e?.code === 'ENOENT') return `error: ${t.rel} does not exist; write a new file with fix_write`;
+            throw e;
+          }
+          if (fstatSync(fd).size > LIMITS.fileBytes) return `error: ${t.rel} is larger than ${LIMITS.fileBytes} bytes`;
+          const buf = readFileSync(fd);
           if (buf.includes(0)) return `error: ${t.rel} is a binary file`;
           const text = buf.toString('utf8');
-          let oldText = String(input.old_text ?? '');
-          let newText = String(input.new_text ?? '');
-          if (!oldText) return 'error: old_text is empty; copy the lines to change from fix_read';
-          const count = (needle) => { let n = 0; for (let i = text.indexOf(needle); i !== -1; i = text.indexOf(needle, i + needle.length)) n++; return n; };
-          let n = count(oldText);
-          // A file with CRLF line ends: the lines as read, joined the way the file joins them.
-          if (n === 0 && text.includes('\r\n') && !oldText.includes('\r')) {
-            const crlf = (x) => x.replace(/\n/g, '\r\n');
-            if (count(crlf(oldText)) > 0) { oldText = crlf(oldText); newText = crlf(newText); n = count(oldText); }
-          }
+          // Bytes that are not UTF-8 would come back as U+FFFD: such a file is not edited at all.
+          if (!Buffer.from(text, 'utf8').equals(buf)) return `error: ${t.rel} is not UTF-8 text, so an edit could not keep the rest of its bytes; it is not changed here`;
+          // A file whose every line ends CRLF takes old_text and new_text with the same ends.
+          const crlf = text.includes('\r\n') && !/(^|[^\r])\n/.test(text);
+          const ends = (x) => (crlf ? x.replace(/\r?\n/g, '\r\n') : x);
+          const oldText = ends(input.old_text);
+          const newText = ends(input.new_text);
+          const n = occurrences(text, oldText);
           if (n === 0) {
             const shown = alteredLines(text);
             return `error: old_text is not in ${t.rel}. Read the lines again with fix_read and copy them exactly, without the line numbers and the tab${shown.length ? `; ${namedLines(shown)} of this file ${isAre(shown)} ${ALTERED_NOTE}, so old_text cannot include ${shown.length > 1 ? 'them' : 'it'}` : ''}`;
           }
           if (n > 1) return `error: old_text occurs ${n} times in ${t.rel}; take more of the lines around the change so it occurs once`;
+          // Once on disk is not enough: the model chose old_text from the file as it was shown, so it
+          // must name one place there too, the same one.
+          const seen = occurrences(shownText(text), oldText);
+          if (seen === 0) return `error: old_text holds text that reaches you with words removed (${namedLines(alteredLines(text))} of ${t.rel} ${isAre(alteredLines(text))} ${ALTERED_NOTE}); take old_text from lines that are not`;
+          if (seen > 1) return `error: old_text occurs once in ${t.rel} but ${seen} times in the file as you are shown it, so it does not name one place; take more of the lines around the change`;
           const at = text.indexOf(oldText);
-          const next = text.slice(0, at) + newText + text.slice(at + oldText.length);
-          if (Buffer.byteLength(next) > LIMITS.writeBytes) return `error: the file would be larger than ${LIMITS.writeBytes} bytes`;
-          writeFileSync(t.abs, next);
+          // The text round-trips to the bytes read (checked above), so everything outside the match
+          // is written back byte for byte.
+          const nextText = text.slice(0, at) + newText + text.slice(at + oldText.length);
+          const next = Buffer.from(nextText, 'utf8');
+          if (next.length > LIMITS.fileBytes) return `error: the file would be larger than ${LIMITS.fileBytes} bytes`;
+          ftruncateSync(fd, 0);
+          writeSync(fd, next, 0, next.length, 0);
           written.add(t.rel);
           const from = text.slice(0, at).split('\n').length;
-          return `edited ${t.rel}: lines ${from}-${from + oldText.split('\n').length - 1} replaced by ${newText.split('\n').length} line(s); the file has ${next.split('\n').length} lines`;
-        } catch (e) { return `error: ${e.message}`; }
+          return `edited ${t.rel}: lines ${from}-${from + oldText.split('\n').length - 1} replaced by ${newText.split('\n').length} line(s); the file has ${nextText.split('\n').length} lines`;
+        } catch (e) {
+          return `error: ${e.message}`;
+        } finally {
+          if (fd !== null) closeSync(fd);
+        }
       }
       if (name === 'fix_write') {
+        if (typeof input.content !== 'string') return 'error: content must be a string, the whole file';
+        const content = input.content;
+        if (Buffer.byteLength(content) > LIMITS.writeBytes) return `error: content is larger than ${LIMITS.writeBytes} bytes`;
         try {
-          const content = String(input.content ?? '');
-          if (Buffer.byteLength(content) > LIMITS.writeBytes) return `error: content is larger than ${LIMITS.writeBytes} bytes`;
           const t = target(input.path);
           if (t.error) return t.error;
-          // A file whose lines reach the model with words removed is never written back whole: what
-          // the model saw of those lines is not what is on disk.
-          if (existsSync(t.abs) && statSync(t.abs).size <= LIMITS.fileBytes) {
-            const shown = alteredLines(readFileSync(t.abs, 'utf8'));
-            if (shown.length) return `error: ${namedLines(shown)} of ${t.rel} ${isAre(shown)} ${ALTERED_NOTE}, so writing the file whole would change ${shown.length > 1 ? 'them' : 'it'}; change the file with fix_edit`;
+          // A file that exists is read before it is replaced, through one descriptor: one too large
+          // to read, or with lines that reach the model with words removed, is never written whole.
+          let fd = null;
+          try { fd = openSync(t.abs, 'r'); } catch (e) { if (e?.code !== 'ENOENT') throw e; }
+          if (fd !== null) {
+            try {
+              if (fstatSync(fd).size > LIMITS.fileBytes) return `error: ${t.rel} is larger than ${LIMITS.fileBytes} bytes, too large to check before it is replaced; it is not changed here`;
+              const shown = alteredLines(readFileSync(fd, 'utf8'));
+              if (shown.length) return `error: ${namedLines(shown)} of ${t.rel} ${isAre(shown)} ${ALTERED_NOTE}, so writing the file whole would change ${shown.length > 1 ? 'them' : 'it'}; change the file with fix_edit`;
+            } finally { closeSync(fd); }
           }
           mkdirSync(dirname(t.abs), { recursive: true });
           writeFileSync(t.abs, content);

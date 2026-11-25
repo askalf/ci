@@ -56,7 +56,7 @@
     },
     {
       "name": "fix_edit",
-      "description": "Change part of a file in the checkout: old_text, copied exactly from fix_read without the line numbers and the tab, must occur once in the file, and is replaced by new_text. Take enough lines around the change for old_text to occur once. Use this for every change to a file that exists. The same paths as fix_write.",
+      "description": "Change part of a UTF-8 text file in the checkout: old_text, copied exactly from fix_read without the line numbers and the tab, must occur once in the file, both on disk and as fix_read shows it, and is replaced by new_text (empty to delete). Take enough lines around the change for old_text to occur once. Use this for every change to a file that exists. The same paths as fix_write.",
       "input_schema": {
         "type": "object",
         "required": [

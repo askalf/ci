@@ -20,10 +20,12 @@ names the commit's date and the pull request it came from.
   400). On dario#1936 the fix belonged in `src/cc-template.ts`: a read of it arrived cut at about
   line 550, ten of its lines arrived with words missing, and writing the file back whole would
   have changed text the model never saw, so it searched until the budget ran out and refused.
-  `fix_edit` replaces one exact piece (it must occur once, as on disk; a CRLF file is matched
-  with its own line ends). `fix_read` returns at most 400 lines and 24,000 characters and says
-  where to read on, `fix_read` and `fix_search` name the lines shown with words removed, and
-  `fix_write` refuses to rewrite a file that has one. A run that ends on its budget, or refuses
+  `fix_edit` replaces one exact piece of a UTF-8 file. The piece must occur once on disk and once
+  in the file as the model is shown it, overlapping matches counted. A CRLF file keeps its line
+  ends, and every byte outside the match stays as it was. `fix_read` returns at most 400 lines,
+  keeps its whole result under 24,000 characters and says where to read on. `fix_read` and
+  `fix_search` name the lines shown with words removed, and `fix_write` refuses to replace a file
+  that has one, or one over 1 MB it cannot check. A run that ends on its budget, or refuses
   only once the budget is spent, now starts its notes with `The fix run could not finish:`, as a
   run that died does, so the dispatcher sends one more run at that head instead of leaving the
   pull request at the refusal.

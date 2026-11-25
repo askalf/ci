@@ -17,7 +17,7 @@ import {
   LIMITS, OUTCOMES, AUTHOR, FIX_VERSION, DEFAULT_MODEL, SUBJECT_BANNED, EFFORT_LEVELS, fixEffort, priorRounds, REVIEW_PAGES_MAX,
   HISTORY, FIX_POSTER, appliedFixComments, fixVerdicts, historyFinding, allReviews, repoFixHistory, formatHistory,
   LESSONS, lessonsAccess, lessonQuery, fetchLessons,
-  runIdentity, alteredInTransit, alteredLines, fixRead, fixSearch, UNFINISHED_PREFIX, unfinished, CONNECTION_CUT_CHARS,
+  runIdentity, alteredInTransit, alteredLines, fixRead, fixSearch, UNFINISHED_PREFIX, unfinished, CONNECTION_CUT_CHARS, occurrences, shownText,
 } from './fix.mjs';
 import { bumpCaller, fixCallerYaml, REVIEW_WORKFLOW, FIX_WORKFLOW, PUBLIC_TEXT_WORKFLOW, POST_WORKFLOW, CALLERS } from './pin.mjs';
 
@@ -378,7 +378,20 @@ console.log('\n  what the model is shown');
   let r = fixRead(dir, { path: 'big.txt' });
   const rows = r.split('\n').filter((l) => /^\d+\t/.test(l));
   check('a default read is at most 400 lines and under readChars, and says where to read on',
-    rows.length <= 400 && rows[0].startsWith('1\t') && r.length < LIMITS.readChars + 300 && new RegExp(`read on with start_line ${rows.length + 1}\\)`).test(r) && r.endsWith('(file has 1000 lines)'), r.slice(-200));
+    rows.length <= 400 && rows[0].startsWith('1\t') && r.length <= LIMITS.readChars && new RegExp(`read on with start_line ${rows.length + 1}\\)`).test(r) && r.endsWith('(file has 1000 lines)'), r.slice(-200));
+  writeFileSync(join(dir, 'short.txt'), Array.from({ length: 401 }, (_, i) => `s${i + 1}`).join('\n'));
+  r = fixRead(dir, { path: 'short.txt' });
+  check('401 short lines: 400 shown, and the read says to go on at 401', r.split('\n').filter((l) => /^\d+\t/.test(l)).length === 400 && /\(shown to line 400 of 401: read on with start_line 401\)/.test(r), r.slice(-120));
+  r = fixRead(dir, { path: 'short.txt', start_line: 1, end_line: 900 });
+  check('an end_line past the 400-line cap says to go on too', /read on with start_line 401\)/.test(r));
+  r = fixRead(dir, { path: 'short.txt', start_line: 401 });
+  check('the last line, then nothing to read on', r === '401\ts401\n(file has 401 lines)', r);
+  writeFileSync(join(dir, 'huge-line.txt'), `${'q'.repeat(130_000)}\nafter\n`);
+  r = fixRead(dir, { path: 'huge-line.txt' });
+  check('a first line longer than redline_read\'s own cap still shows its start and how to go on', r.length <= LIMITS.readChars && r.startsWith('1\tqqq')
+    && /its first \d+ of 130000 characters are above/.test(r) && /read on with start_line 2\)/.test(r), r.slice(-300));
+  mkdirSync(join(dir, 'sub'));
+  check('a directory is fix_list\'s', fixRead(dir, { path: 'sub' }) === 'error: that is a directory; use fix_list');
   r = fixRead(dir, { path: 'big.txt', start_line: 990, end_line: 2000 });
   check('a read past the end stops at the last line', r.split('\n').filter((l) => /^\d+\t/.test(l)).length === 11 && !/read on/.test(r));
   r = fixRead(dir, { path: 'big.txt', start_line: 10, end_line: 12 });
@@ -388,15 +401,26 @@ console.log('\n  what the model is shown');
   check('a read names the lines shown with words removed, and only those', /\(line 1: shown with words removed on the way to you, and whole on disk\. Never put such a line in fix_edit's old_text/.test(r) && !/line 2/.test(r), r);
   writeFileSync(join(dir, 'long.txt'), `${'z'.repeat(50_000)}\nsecond\n`);
   r = fixRead(dir, { path: 'long.txt' });
-  check('a line longer than a read shows its start and says so', r.length < LIMITS.readChars + 300 && /\(line 1 goes on past what one read shows/.test(r) && /read on with start_line 2\)/.test(r));
+  check('a line longer than a read shows its start and says so', r.length <= LIMITS.readChars && /\(line 1 goes on past what one read shows/.test(r) && /read on with start_line 2\)/.test(r));
   check('a read error passes through', /^error:/.test(fixRead(dir, { path: '../x' })) && /^error:/.test(fixRead(dir, { path: 'none.txt' })));
-  r = fixSearch(dir, { pattern: 'LibreChat|export' });
-  check('a search names the matches shown with words removed', /names\.js:1: /.test(r) && /\(names\.js:1: shown with words removed/.test(r) && !/names\.js:3: shown/.test(r), r);
+  r = fixSearch(dir, { pattern: 'LibreChat|export', path: 'names.js' });
+  check('a search names the matches shown with words removed, by path', /names\.js:1: /.test(r) && /\(shown with words removed on the way to you, and whole on disk: names\.js line 1\)$/.test(r), r);
   check('a search with no match says so', fixSearch(dir, { pattern: 'nothing-matches-this' }) === '(no matches)');
   writeFileSync(join(dir, 'wide.txt'), Array.from({ length: 80 }, () => 'y'.repeat(400)).join('\n'));
   r = fixSearch(dir, { pattern: 'y{10}', path: 'wide.txt' });
-  check('a search result stays under readChars and says it was cut', r.length < LIMITS.readChars + 100 && /\(output cap reached: narrow the pattern or the path\)$/.test(r), String(r.length));
+  check('a search result stays under readChars and says how many matches it left out', r.length <= LIMITS.readChars && /\(\d+ more matches not shown: the output cap; narrow the pattern or the path\)$/.test(r), r.slice(-200));
+  // 80 matches the model is shown with words removed, in files with long paths: the note is
+  // grouped by path and bounded, so the whole result, note included, stays under readChars.
+  const deep = join(dir, 'a'.repeat(60), 'b'.repeat(60));
+  mkdirSync(deep, { recursive: true });
+  for (let f = 0; f < 8; f++) writeFileSync(join(deep, `${'c'.repeat(40)}${f}.txt`), Array.from({ length: 10 }, (_, i) => `LibreChat ${i}`).join('\n'));
+  r = fixSearch(dir, { pattern: 'LibreChat', path: 'a'.repeat(60) });
+  const note = r.split('\n').at(-1);
+  check('80 altered matches under long paths: grouped by path, bounded, the whole result under readChars', r.length <= LIMITS.readChars
+    && note.startsWith('(shown with words removed') && note.length < 2_000 && /lines 1, 2, 3, 4, 5, 6, 7, 8, 9, 10/.test(note) && (note.match(/c{40}0\.txt/g) ?? []).length === 1, note.slice(0, 300));
   rmSync(dir, { recursive: true, force: true });
+  check('occurrences counts overlapping matches', occurrences('aaa', 'aa') === 2 && occurrences('abab', 'ab') === 2 && occurrences('x', '') === 0);
+  check('shownText removes as dario does, path and slug names kept', shownText('// LibreChat enabled, see src/librechat.ts') === '//  enabled, see src/librechat.ts');
   check('unfinished prefixes the reason the dispatcher reads', unfinished(' the budget ran out. ') === `${UNFINISHED_PREFIX} the budget ran out.` && UNFINISHED_PREFIX === 'The fix run could not finish:');
 }
 const use = (name, input, id = `${name}-${Math.random()}`) => ({ content: [{ type: 'tool_use', id, name, input }] });
@@ -760,6 +784,55 @@ if (!gitOk) {
     const w = world(repo, { turns: [tool('fix_edit', { path: 'src/w.js', old_text: 'const a = 1;\nconst b = 2;', new_text: 'const a = 1;\nconst b = 3;' }), finish()] });
     const { record: r } = await runFix(w.ctx);
     check('a CRLF file is edited with its own line ends', r.outcome === 'fixed' && spawnSync('git', ['show', `${r.new_head}:src/w.js`], { cwd: repo.dir, encoding: 'utf8' }).stdout === 'const a = 1;\r\nconst b = 3;\r\n');
+    rmSync(w.out, { recursive: true, force: true });
+    rmSync(repo.dir, { recursive: true, force: true });
+  }
+  {
+    // The edges of an edit: bytes that are not UTF-8, overlapping matches, a match that is unique on
+    // disk but not as shown, CRLF replacements, a missing argument, a large file, and fix_write on a
+    // file too large to check.
+    const repo = makeRepo();
+    const LATIN1 = Buffer.concat([Buffer.from('// caf'), Buffer.from([0xe9]), Buffer.from('\nconst a = 1;\n')]);
+    writeFileSync(join(repo.dir, 'src', 'latin1.js'), LATIN1);
+    writeFileSync(join(repo.dir, 'src', 'aaa.txt'), 'aaa\n');
+    writeFileSync(join(repo.dir, 'src', 'shown.js'), '// LibreChat enabled\n//  enabled\nconst k = 1;\n');
+    writeFileSync(join(repo.dir, 'src', 'crlf.js'), 'const a = 1;\r\nconst b = 2;\r\n');
+    writeFileSync(join(repo.dir, 'src', 'del.js'), 'keep();\ndrop();\n');
+    const BIG = `${Array.from({ length: 10_000 }, (_, i) => `export const v${i} = ${i}; // ${'p'.repeat(24)}`).join('\n')}\n`;
+    writeFileSync(join(repo.dir, 'src', 'big.js'), BIG);
+    writeFileSync(join(repo.dir, 'src', 'huge.txt'), 'h'.repeat(LIMITS.fileBytes + 10));
+    sh(repo.dir, ['add', '-A']);
+    sh(repo.dir, ['-c', 'user.name=t', '-c', 'user.email=t@x', 'commit', '-q', '-m', 'add edge files']);
+    repo.head = sh(repo.dir, ['rev-parse', 'HEAD']);
+    const w = world(repo, { turns: [
+      tool('fix_edit', { path: 'src/latin1.js', old_text: 'const a = 1;', new_text: 'const a = 2;' }),
+      tool('fix_edit', { path: 'src/aaa.txt', old_text: 'aa', new_text: 'b' }),
+      tool('fix_edit', { path: 'src/shown.js', old_text: '//  enabled', new_text: '// off' }),
+      tool('fix_edit', { path: 'src/shown.js', old_text: '// LibreChat enabled', new_text: '// on' }),
+      tool('fix_edit', { path: 'src/crlf.js', old_text: 'const b = 2;', new_text: 'const b = 2;\nconst c = 3;' }),
+      tool('fix_edit', { path: 'src/crlf.js', old_text: 'const a = 1;', new_text: 'const a = 0;\r\nconst z = 9;' }),
+      tool('fix_edit', { path: 'src/del.js', old_text: 'drop();\n' }),
+      tool('fix_edit', { path: 'src/del.js', old_text: 'drop();\n', new_text: null }),
+      tool('fix_edit', { path: 'src/del.js', old_text: 'drop();\n', new_text: '' }),
+      tool('fix_edit', { path: 'src/big.js', old_text: 'export const v5000 = 5000;', new_text: 'export const v5000 = 5001;' }),
+      tool('fix_write', { path: 'src/huge.txt', content: 'short' }),
+      tool('fix_write', { path: 'src/new.js' }),
+      finish(),
+    ] });
+    const { record: r } = await runFix(w.ctx);
+    const res = (i) => JSON.stringify(w.calls.model[i].messages.at(-1));
+    const at = (p) => spawnSync('git', ['show', `${r.new_head}:${p}`], { cwd: repo.dir, encoding: 'utf8' }).stdout;
+    check('a file that is not UTF-8 is not edited, and its bytes stay', /src\/latin1\.js is not UTF-8 text/.test(res(1)) && readFileSync(join(repo.dir, 'src', 'latin1.js')).equals(LATIN1) && !r.files.includes('src/latin1.js'), res(1));
+    check('overlapping matches count: "aa" in "aaa" occurs twice', /old_text occurs 2 times in src\/aaa\.txt/.test(res(2)), res(2));
+    check('unique on disk but twice as shown: refused, since the model may mean the other one', /old_text occurs once in src\/shown\.js but 2 times in the file as you are shown it/.test(res(3)), res(3));
+    check('old_text holding a word the model is not shown: refused', /old_text holds text that reaches you with words removed \(line 1 of src\/shown\.js is shown/.test(res(4)), res(4));
+    check('a CRLF file: LF replacement lines get CRLF, CRLF ones are not doubled', /edited src\/crlf\.js/.test(res(5)) && /edited src\/crlf\.js/.test(res(6))
+      && at('src/crlf.js') === 'const a = 0;\r\nconst z = 9;\r\nconst b = 2;\r\nconst c = 3;\r\n', JSON.stringify(at('src/crlf.js')));
+    check('a missing or null new_text is an error, never a deletion; an empty one deletes', /must both be strings/.test(res(7)) && /must both be strings/.test(res(8)) && /edited src\/del\.js/.test(res(9)) && at('src/del.js') === 'keep();\n');
+    check('a one-line edit in a 540 KB file lands (the payload limit is the replacement\'s)', /edited src\/big\.js: lines 5001-5001 replaced by 1 line\(s\)/.test(res(10)) && at('src/big.js') === BIG.replace('export const v5000 = 5000;', 'export const v5000 = 5001;'), res(10));
+    check('fix_write will not replace a file too large to check', /src\/huge\.txt is larger than 1000000 bytes, too large to check before it is replaced/.test(res(11)) && statSync(join(repo.dir, 'src', 'huge.txt')).size === LIMITS.fileBytes + 10, res(11));
+    check('fix_write needs its content', /content must be a string/.test(res(12)) && !existsSync(join(repo.dir, 'src', 'new.js')));
+    check('the run is the edits that landed', r.outcome === 'fixed' && r.files.slice().sort().join() === 'src/big.js,src/crlf.js,src/del.js', r.files.join());
     rmSync(w.out, { recursive: true, force: true });
     rmSync(repo.dir, { recursive: true, force: true });
   }
