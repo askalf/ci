@@ -143,6 +143,15 @@ export function baseRef(cwd, given) {
   return head?.trim() || 'origin/main';
 }
 
+/** The repository kinds GitHub's `visibility` names. */
+const VISIBILITIES = new Set(['public', 'private', 'internal']);
+
+/** A repository's kind as GitHub gives it: `visibility`, else `private`; null when neither tells. Pure. */
+export function visibilityOf(repo) {
+  if (VISIBILITIES.has(repo?.visibility)) return repo.visibility;
+  return repo?.private === true ? 'private' : repo?.private === false ? 'public' : null;
+}
+
 /** gh api, parsed; null when gh is missing or the call fails. */
 function ghApi(path) {
   const r = spawnSync('gh', ['api', '--paginate', '--slurp', path], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
@@ -203,7 +212,10 @@ export function buildChange(cwd, opts = {}) {
   const ref = baseRef(cwd, opts.base);
   const base = git(cwd, ['merge-base', ref, head]).trim();
   if (base === head) throw new Error(`HEAD is ${ref}: there is nothing to review (commit the change on a branch first)`);
-  const repo = opts.repo || repoFromUrl(git(cwd, ['remote', 'get-url', 'origin'], { allowFail: true })) || 'local/repository';
+  // The repository as named: null when neither --repo nor origin names one, and only then is the
+  // placeholder shown, so a repository that is really called that is still looked up.
+  const named = opts.repo || repoFromUrl(git(cwd, ['remote', 'get-url', 'origin'], { allowFail: true })) || null;
+  const repo = named ?? 'local/repository';
   const files = changedFiles(cwd, base, head);
   if (!files.length) throw new Error(`no file differs between ${ref} and HEAD`);
   const commits = branchCommits(cwd, base, head);
@@ -213,17 +225,29 @@ export function buildChange(cwd, opts = {}) {
   const attributes = git(cwd, ['show', `${tip}:.gitattributes`], { allowFail: true }) ?? '';
   let pr = null;
   let reviews = [];
+  // What kind of repository it is, for the brief's first line as the gate writes it (review.mjs
+  // repositoryLine): from the PR when one is read, else one read of the repository (fetchRepo; the
+  // command line passes gh's); null when no read told. And where the branch is: the PR's head
+  // repository, and null without a PR, since nothing here says where an unpushed branch will go
+  // (a fork's checkout can name the upstream as its base).
+  let visibility = null;
+  let headRepo = null;
   if (opts.pr) {
     const got = (opts.fetchPr ?? ((r, n) => ({ pr: ghApi(`repos/${r}/pulls/${n}`), reviews: ghApi(`repos/${r}/pulls/${n}/reviews?per_page=100`) })))(repo, opts.pr);
     if (!got?.pr?.number) throw new Error(`could not read ${repo}#${opts.pr} (is gh signed in?)`);
     // A failed read is not an empty history: the review would go ahead without Redline's open requests.
     if (!Array.isArray(got.reviews)) throw new Error(`could not read the reviews of ${repo}#${opts.pr}`);
     pr = got.pr;
+    visibility = visibilityOf(pr.base?.repo);
+    headRepo = typeof pr.head?.repo?.full_name === 'string' && pr.head.repo.full_name ? pr.head.repo.full_name : null;
     reviews = got.reviews.map((r) => ({ user: { login: r.user?.login ?? '' }, state: r.state, commit_id: r.commit_id, body: r.body ?? '' }));
   }
+  if (visibility === null && named !== null && opts.fetchRepo) visibility = visibilityOf(opts.fetchRepo(named));
   const last = commits.at(-1)?.commit.message ?? '';
   return {
     repo,
+    visibility,
+    headRepo,
     number: pr?.number ?? 0,
     title: opts.title ?? pr?.title ?? last.split('\n')[0],
     body: opts.body ?? pr?.body ?? '',
@@ -327,6 +351,8 @@ export function checkChange(change) {
   if (!SHA.test(change.head?.sha ?? '') || !SHA.test(change.base?.sha ?? '')) return { error: 'change.json needs full head and base shas' };
   if (!Array.isArray(change.files) || !change.files.length || change.files.some((f) => typeof f?.filename !== 'string')) return { error: 'change.json has no files' };
   if (!Array.isArray(change.commits)) return { error: 'change.json has no commits' };
+  if (change.visibility != null && !VISIBILITIES.has(change.visibility)) return { error: 'change.json names a visibility that is not public, private, internal or null' };
+  if (change.headRepo != null && (typeof change.headRepo !== 'string' || !change.headRepo)) return { error: 'change.json has a head repository that is not a name' };
   const earlier = change.earlier ?? [];
   if (!Array.isArray(earlier) || earlier.some((e) => !['APPROVED', 'CHANGES_REQUESTED'].includes(e?.state) || typeof e.commit_id !== 'string' || !SHA.test(e.commit_id) || typeof e.body !== 'string' || !e.body.trim())) {
     return { error: 'change.json has an earlier verdict without a state, a full head sha and a body' };
@@ -342,10 +368,12 @@ export async function reviewLocal(ctx, dir) {
   const checked = checkChange(JSON.parse(readFileSync(join(dir, 'change.json'), 'utf8')));
   if (checked.error) throw new Error(checked.error);
   const c = checked.change;
-  const repoRef = { full_name: c.repo };
+  const repoRef = { full_name: c.repo, ...(VISIBILITIES.has(c.visibility) ? { visibility: c.visibility } : {}) };
+  // Where the branch is, only as the pack recorded it: a pack without headRepo says nothing of it.
+  const headRef = typeof c.headRepo === 'string' ? { full_name: c.headRepo } : null;
   const pr = {
     number: c.number || 0, title: String(c.title ?? ''), body: String(c.body ?? ''), user: { login: String(c.author ?? ''), ...(c.authorType ? { type: String(c.authorType) } : {}) },
-    head: { ref: String(c.head.ref ?? ''), sha: c.head.sha, repo: repoRef }, base: { ref: String(c.base.ref ?? ''), sha: c.base.sha, repo: repoRef },
+    head: { ref: String(c.head.ref ?? ''), sha: c.head.sha, repo: headRef }, base: { ref: String(c.base.ref ?? ''), sha: c.base.sha, repo: repoRef },
   };
   const review = { ...ctx, repo: c.repo, checkout: join(dir, 'tree') };
   if (!existsSync(review.checkout)) throw new Error('the pack has no tree/');
@@ -409,7 +437,7 @@ async function main() {
       process.exit(2);
     }
     const change = buildChange(process.cwd(), {
-      base: args.base, pr, repo: args.repo, title: args.title,
+      base: args.base, pr, repo: args.repo, title: args.title, fetchRepo: (r) => ghApi(`repos/${r}`),
       body: args['body-file'] === undefined ? undefined : readFileSync(args['body-file'], 'utf8'),
       earlier,
     });

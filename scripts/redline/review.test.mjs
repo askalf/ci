@@ -8,7 +8,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   parseEnvFile, readPrompt, safePath, buildDiff, planDiff, unshownFiles, checkoutCorpus, quoteIsGrounded, corpusOf, checkSubmission, finalVerdict,
-  renderBody, verdictAtHead, isDeterministicApproval, runTool, runReview, buildBrief, contextSection, changedFilesSection, earlierReviewsSection, REVIEWER_LOGIN, LIMITS, metaPhrase,
+  renderBody, verdictAtHead, isDeterministicApproval, runTool, runReview, buildBrief, repositoryLine, contextSection, changedFilesSection, earlierReviewsSection, REVIEWER_LOGIN, LIMITS, metaPhrase,
   verdictRecord, verdictProblem, saveVerdict, VERDICT_VERSION,
   DESCRIPTION_ONLY_NOTE, reviewRunsOf, verdictAsReview, mergeVerdicts, roundsAsked, isCapNotice, capNoticeRounds, capNoticeQuote, lastRequest, renderCapBody, roundCapOf, DEFAULT_ROUND_CAP, ROUND_CAP_RULE, VERDICT_ARTIFACT, stripComments, DISPATCH_ACTOR, deltaSince, COMPARE_FILES_MAX,
 } from './review.mjs';
@@ -201,6 +201,25 @@ console.log('\n  diff, brief and grounding');
     head: { ref: 'feat/x', sha: HEAD }, base: { ref: 'main', repo: { full_name: 'askalf/r' } } };
   const brief = buildBrief(pr, files, [{ sha: HEAD, commit: { message: 'feat: add token\n\nCo-Authored-By: Someone' } }], diff);
   const corpus = corpusOf(brief);
+  {
+    const at = (base, head) => repositoryLine({ base: { repo: base }, head: { repo: head } });
+    const PRIV = '(private: only people given access to it can open its pull requests)';
+    const SAME = "; this pull request's branch is in the repository itself";
+    check('repositoryLine: a private repository and a branch of its own say both',
+      at({ full_name: 'askalf/p', private: true }, { full_name: 'askalf/p' }) === `Repository: askalf/p ${PRIV}${SAME}`);
+    check('repositoryLine: a branch in another repository is named as one',
+      at({ full_name: 'askalf/p', visibility: 'private' }, { full_name: 'someone/p' }) === `Repository: askalf/p ${PRIV}; this pull request's branch is in another repository, someone/p`);
+    check('repositoryLine: GitHub\'s visibility comes first, internal included; private is the fallback',
+      at({ full_name: 'o/i', visibility: 'internal', private: true }, { full_name: 'o/i' }) === `Repository: o/i (internal)${SAME}`
+      && at({ full_name: 'o/r', private: false }, { full_name: 'o/r' }) === `Repository: o/r (public)${SAME}`
+      && at({ full_name: 'o/r', visibility: 'secret', private: false }, null) === 'Repository: o/r (public)');
+    check('repositoryLine: GitHub\'s names are compared without case, so a same-repository branch spelt otherwise is still its own',
+      at({ full_name: 'Org/Project', private: true }, { full_name: 'org/project' }) === `Repository: Org/Project ${PRIV}${SAME}`);
+    check('repositoryLine: an unknown kind, and an unknown or deleted head repository, say nothing of either',
+      at({ full_name: 'o/r' }, null) === 'Repository: o/r' && at({ full_name: 'o/r', private: 'yes' }, { full_name: '' }) === 'Repository: o/r');
+    check('the brief opens with that line', brief.startsWith('Repository: askalf/r\n')
+      && buildBrief({ ...pr, head: { ...pr.head, repo: { full_name: 'askalf/p' } }, base: { ...pr.base, repo: { full_name: 'askalf/p', private: true } } }, files, [], diff).startsWith(`Repository: askalf/p ${PRIV}${SAME}\n`));
+  }
   check('a quote copied with its + marker is grounded', quoteIsGrounded('+export const token = process.env.X;', corpus));
   check('a quote copied without the marker is grounded', quoteIsGrounded('export const token = process.env.X;', corpus));
   check('a markdown list line from the PR body is grounded', quoteIsGrounded('- adds the token', corpus));
