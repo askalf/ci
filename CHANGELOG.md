@@ -24,6 +24,13 @@ names the commit's date and the pull request it came from.
   (`visibility`), and where the branch is (`headRepo`) only from a PR it reads, so a review before the
   push opens with the gate's line, without the branch's place when there is no PR yet.
 
+- Redline keeps a review's verdict artifact, `redline-verdict`, and the second lens's,
+  `redline-verdict-second`, for 30 days, not 7. A private repository's earlier verdicts are read
+  only from those artifacts, so a pull request whose last verdict was more than seven days old was
+  reviewed as if from zero: no round count, no earlier findings in the brief and no delta. The models records
+  (`redline-models`, `redline-models-second`) stay at 7 days. A caller gets the change when its
+  pin moves to a commit that has it.
+
 - Redline looks for a pull request's earlier rounds in up to ten listings of 100 of the
   repository's finished dispatches since the pull request opened, not in the newest 100 of all of
   them. On a private repository its earlier verdicts are only in its dispatched runs' artifacts,
@@ -43,8 +50,8 @@ names the commit's date and the pull request it came from.
   same runs again, so the runs made in that second are paged through by number, finished or not
   (so a run re-run meanwhile moves no other), and the next listing asks for those made before it. A listing that fails ends the search, and the runs found
   before it are still read. Runs older than those ten listings are still not found. A verdict
-  artifact is still kept seven days, so a verdict older than that cannot be read from its run; a
-  newer round-cap notice still states the count it was capped on.
+  artifact was kept seven days then (30 since the entry above), so a verdict older than that could
+  not be read from its run; a newer round-cap notice still states the count it was capped on.
 
 - The fixer changes part of a file with `fix_edit`, and reads what reaches it whole. Its only
   write tool replaced whole files, and what it read was not always the file: the model is reached

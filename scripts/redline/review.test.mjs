@@ -1290,11 +1290,11 @@ console.log('\n  the reusable workflow');
   check('its verdict goes up as redline-verdict-second, only when the step ran and left a file',
     secondUpload.includes("if: always() && steps.second.outcome != 'skipped' && hashFiles('redline-verdict-second/verdict.json') != ''")
     && second.includes('\n        id: second\n') && secondUpload.includes('name: redline-verdict-second\n') && secondUpload.includes('path: redline-verdict-second/verdict.json\n')
-    && /uses: actions\/upload-artifact@[0-9a-f]{40} # v7\./.test(secondUpload) && /retention-days: [1-7]\n/.test(secondUpload));
+    && /uses: actions\/upload-artifact@[0-9a-f]{40} # v7\./.test(secondUpload) && /retention-days: 30\n/.test(secondUpload));
   check('the upload runs on pass or fail, only when there is a file', upload.includes("if: always() && hashFiles('redline-verdict/verdict.json') != ''"));
-  check('the upload is the pinned upload-artifact, as redline-verdict, short-lived',
+  check('the upload is the pinned upload-artifact, as redline-verdict, kept 30 days',
     /uses: actions\/upload-artifact@[0-9a-f]{40} # v7\./.test(upload) && upload.includes('name: redline-verdict\n')
-    && upload.includes('path: redline-verdict/verdict.json\n') && /retention-days: [1-7]\n/.test(upload));
+    && upload.includes('path: redline-verdict/verdict.json\n') && /retention-days: 30\n/.test(upload));
   check('the cleanup removes both verdicts and both models records too', /run: rm -rf pr \.redline redline-verdict redline-verdict-second redline-models redline-models-second "\$\{RUNNER_TEMP\}\/redline-hosted"\n/.test(steps[cleanAt] ?? ''));
   check('nothing from the PR is interpolated into a run step',!/run:[^\n]*\$\{\{\s*github\.event\.pull_request\.(title|body|head\.ref)/.test(wf));
 
