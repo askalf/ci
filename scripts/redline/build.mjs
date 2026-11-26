@@ -409,7 +409,7 @@ async function buildTicket(ctx, record) {
   // The run's start: the lessons read counts against the budget, as the install does.
   const started = ctx.now();
   mkdirSync(ctx.out, { recursive: true });
-  const why = inputProblem(ctx) ?? (ctx.requireRunAccount ? runAccountProblem(ctx.runAs) : null);
+  const why = startProblem(ctx);
   if (why) return { record: record({ outcome: 'refused', notes: renderNotes({ outcome: 'refused', reason: why }) }) };
   const { title, brief } = ticketText(ctx);
 
@@ -472,6 +472,15 @@ export function runAccountProblem(name) {
   try { return runAccount(name) ? null : NO_RUN_ACCOUNT; } catch (e) { return e.message; }
 }
 
+/**
+ * Why a build cannot start, or null: its inputs (inputProblem), then, with requireRunAccount as the
+ * CLI sets it, its run account (runAccountProblem). A build and a verify run both check it before
+ * the checkout is touched.
+ */
+export function startProblem(ctx) {
+  return inputProblem(ctx) ?? (ctx.requireRunAccount ? runAccountProblem(ctx.runAs) : null);
+}
+
 async function main() {
   const env = process.env;
   const host = hostSetup(env, 'build');
@@ -501,6 +510,15 @@ async function main() {
   if (env.BUILD_CANDIDATE !== undefined) {
     // The attempt the build job ran in, which a verify job re-run alone does not change.
     ctx.buildAttempt = Number(env.BUILD_RUN_ATTEMPT);
+    // The checks a build starts with come before the candidate is read, since reading it fetches
+    // its bundle into the checkout (or, for a dry run, writes its diff into the index).
+    const why = startProblem(ctx);
+    if (why) {
+      const record = lane.record({ outcome: 'refused', notes: renderNotes({ outcome: 'refused', reason: why }) });
+      saveBuild(ctx.out, record);
+      console.log(`Redline build: refused, ${why}`);
+      process.exit(exitCode(record));
+    }
     const read = readCandidate(env.BUILD_CANDIDATE, ctx, (args) => {
       const r = spawnSync('git', args, { cwd: ctx.checkout, encoding: 'utf8', env: { PATH: env.PATH ?? '', HOME: ctx.out, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' } });
       return r.status === 0 ? String(r.stdout ?? '').trim() : null;
