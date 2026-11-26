@@ -222,7 +222,7 @@ export function rejectsForcedToolChoice(model) {
 export const SUBMIT_REQUIRED = 'The read budget is spent. Your next response must be a redline_submit tool call '
   + 'with verdict, summary and findings, based on what you have read. Do not call any other tool and do not answer in text.';
 export const LIMITS = {
-  diffChars: 180_000, bodyChars: 8_000, commitChars: 600, commits: 100, contextChars: 60_000, earlierReviews: 3, earlierReviewChars: 6_000,
+  diffChars: 180_000, bodyChars: 20_000, commitChars: 600, commits: 100, contextChars: 60_000, earlierReviews: 3, earlierReviewChars: 6_000,
   // earlierRuns caps the PR's earlier Redline runs whose verdict artifacts are read, newest first
   // (two reads each, on the job's token); runPages caps the listings of 100 runs made to find them;
   // artifactBytes caps one artifact.
@@ -1381,7 +1381,10 @@ export function repositoryLine(pr) {
 
 export function buildBrief(pr, files, commits, diff, protectedFiles = [], since = null) {
   // The cut comes after the copied text is left out, so Dependabot's own lines are what fill it.
-  const body = (isDependabot(pr) ? withoutCopiedNotes(pr.body) : (pr.body ?? '')).slice(0, LIMITS.bodyChars);
+  // It is stated, as a commit message's is below: a bare cut reads as a description that ends
+  // mid-sentence.
+  const described = isDependabot(pr) ? withoutCopiedNotes(pr.body) : (pr.body ?? '');
+  const body = described.length > LIMITS.bodyChars ? `${described.slice(0, LIMITS.bodyChars)}\n[description cut at ${LIMITS.bodyChars} characters]` : described;
   // A message past LIMITS.commitChars is cut with the cut stated, as context and earlier reviews
   // are: a bare cut reads as a message that ends mid-sentence, and is reviewed as one.
   const commitLines = commits.slice(0, LIMITS.commits).map((c) => {
