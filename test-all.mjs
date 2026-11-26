@@ -18,6 +18,8 @@ const RUNS = [
   ['fuzz/seeds.test.mjs'],
   // The run-account tests in fix.test.mjs need a second account to sudo to and skip without one.
   ['scripts/redline/fix.test.mjs'],
+  // The build tests run the same real run-account test where there is one.
+  ['scripts/redline/build.test.mjs'],
   ['scripts/redline/dump-tools.mjs', '--check'],
 ];
 

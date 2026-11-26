@@ -24,9 +24,10 @@ A fix reaches every caller through the pin bump.
 
 Anything that breaks a boundary this repository draws:
 
-- A caller pointing the review or the fix at a script that is not a commit on `main` here
+- A caller pointing the review, the fix or the build at a script that is not a commit on `main` here
 - The review running code from the pull request it reads, or a read-only tool writing anything
 - The fix lane writing outside the pull request branch it was asked to fix
+- A build's commit carrying a change under `.github/`, its commands running as the account that reads the env file, or a ticket's text changing what the lane may write or run
 - A prompt file, a credential file or a token reaching a job's log, a run page, a process argument
   or a pull request
 - A fork's pull request being reviewed, or its workflows run, before the contributor gate let it in

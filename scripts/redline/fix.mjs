@@ -89,11 +89,15 @@
 // system prompt, installed on the runner host: this repository is public and carries no prompt, so
 // there is no bundled fallback, and a variable that is unset, a file that cannot be read or an empty
 // file ends the run.
+//
+// build.mjs is a second entry point on the same work in the checkout (workCheckout, hostSetup and
+// runToExit below). It starts from a ticket and a base commit where this one starts from a review
+// and a head; the run account, the allowlist, the test gate, the limits, the secret checks and the
+// commit are this file's, so what is said of them above holds there too.
 
-import { readFileSync, writeFileSync, mkdirSync, rmSync, existsSync, lstatSync, realpathSync, statSync, readdirSync, appendFileSync, mkdtempSync, readlinkSync, cpSync, openSync, fstatSync, closeSync, readSync, ftruncateSync, constants as fsConstants } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, rmSync, existsSync, lstatSync, realpathSync, statSync, readdirSync, appendFileSync, mkdtempSync, readlinkSync, cpSync, chmodSync, openSync, fstatSync, closeSync, readSync, ftruncateSync, constants as fsConstants } from 'node:fs';
 import { join, resolve, relative, dirname, basename, sep, posix } from 'node:path';
 import { tmpdir, userInfo } from 'node:os';
-import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 import { parseEnvFile, readPrompt, safePath, runTool as readTool, rejectsForcedToolChoice, metaPhrase, gh, ghAll, callModelWith, buildDiff, OutOfTime, darioAccess, withDarioSocket, PROTECTED_ATTR, protectedFromCheckAttr } from './review.mjs';
@@ -505,12 +509,17 @@ export async function headCompare(ctx, repo, baseSha, headSha) {
   return Array.isArray(c?.files) ? c.files : [];
 }
 
-/** Why a checkout-relative path may not be written, or '' when it may. `github` is editableGithub's set. Pure. */
-function writeRule(rel, github = new Set()) {
+/**
+ * Why a checkout-relative path may not be written, or '' when it may. `github` is editableGithub's
+ * set, or null for a run that writes nothing under .github/ at all (the build lane: it has no pull
+ * request whose own files it could be held to). `lane` names the lane in the reasons. Pure.
+ */
+function writeRule(rel, github = new Set(), lane = 'fix lane') {
   if (/(^|\/)(?:\.git|node_modules)(?:\/|$)/.test(rel)) return 'path is under .git or node_modules';
+  if (github === null && /^\.github(?:\/|$)/.test(rel)) return `nothing under .github/ is written by the ${lane}`;
   if (LANE_WORKFLOWS.test(rel)) return 'the review and fix workflows are never written by the fix lane';
   if (/^\.github(?:\/|$)/.test(rel) && !github.has(rel)) return 'under .github/ the fix lane writes only a file this pull request already changes';
-  if (/(?:^|\/)\.gitattributes$/.test(rel)) return '.gitattributes is never written by the fix lane';
+  if (/(?:^|\/)\.gitattributes$/.test(rel)) return `.gitattributes is never written by the ${lane}`;
   return '';
 }
 
@@ -531,13 +540,14 @@ export function landingPath(root, abs) {
 /**
  * Resolve a path the model wants to write. Inside the checkout, symlinks included; never under
  * .git or node_modules, under .github only a path in `github` (editableGithub: the files the PR
- * changes, less the lane's own workflows) and never a .gitattributes, checked on the path as
- * named and on where it lands through any directory symlink. Returns the absolute path or throws.
+ * changes, less the lane's own workflows; null: nothing there at all) and never a .gitattributes,
+ * checked on the path as named and on where it lands through any directory symlink. Returns the
+ * absolute path or throws.
  */
-export function safeWritePath(root, p, github = new Set()) {
+export function safeWritePath(root, p, github = new Set(), lane = 'fix lane') {
   const rel = posix.normalize(String(p ?? '').replace(/\\/g, '/').replace(/^\/+/, ''));
   if (!rel || rel === '.' || rel === '..' || rel.startsWith('../')) throw new Error('path is outside the checkout');
-  const named = writeRule(rel, github);
+  const named = writeRule(rel, github, lane);
   if (named) throw new Error(named);
   const rootReal = realpathSync(root);
   const abs = resolve(rootReal, rel);
@@ -550,26 +560,27 @@ export function safeWritePath(root, p, github = new Set()) {
   try { st = lstatSync(abs); } catch { /* a new file */ }
   if (st?.isSymbolicLink()) throw new Error('path is a symlink');
   if (st?.isDirectory()) throw new Error('path is a directory');
-  const landed = writeRule(landingPath(root, abs), github);
+  const landed = writeRule(landingPath(root, abs), github, lane);
   if (landed) throw new Error(`${landed} (through a directory symlink)`);
   return abs;
 }
 
 /**
  * Which changed paths become the commit. Everything the checkout shows as changed is staged
- * (`git add -A`) except: paths under .github/ that are not in `github` (editableGithub's set), a
- * .gitattributes, paths marked redline-protected (`protectedSet`), files over LIMITS.fileBytes,
- * and paths the install step dirtied that the model did not write (a lockfile rewritten by npm is
- * not the fix). Pure: `sizeOf(path)` supplies sizes. Returns { keep, skipped: [{ path, why }] }.
+ * (`git add -A`) except: paths under .github/ that are not in `github` (editableGithub's set; null
+ * leaves out every path there), a .gitattributes, paths marked redline-protected (`protectedSet`),
+ * files over LIMITS.fileBytes, and paths the install step dirtied that the model did not write (a
+ * lockfile rewritten by npm is not the fix). `work` names what the run produces in that last
+ * reason. Pure: `sizeOf(path)` supplies sizes. Returns { keep, skipped: [{ path, why }] }.
  */
-export function stageable(paths, { installDirty = [], written = new Set(), sizeOf = () => 0, protectedSet = new Set(), github = new Set() } = {}) {
+export function stageable(paths, { installDirty = [], written = new Set(), sizeOf = () => 0, protectedSet = new Set(), github = new Set(), work = 'fix' } = {}) {
   const keep = [];
   const skipped = [];
   for (const p of paths) {
-    if (/^\.github(?:\/|$)/.test(p) && !github.has(p)) skipped.push({ path: p, why: 'under .github/ and not a file the PR changes' });
+    if (/^\.github(?:\/|$)/.test(p) && !github?.has(p)) skipped.push({ path: p, why: github === null ? 'under .github/' : 'under .github/ and not a file the PR changes' });
     else if (/(?:^|\/)\.gitattributes$/.test(p)) skipped.push({ path: p, why: 'a .gitattributes' });
     else if (protectedSet.has(p)) skipped.push({ path: p, why: `marked ${PROTECTED_ATTR}` });
-    else if (installDirty.includes(p) && !written.has(p)) skipped.push({ path: p, why: 'changed by the install, not by the fix' });
+    else if (installDirty.includes(p) && !written.has(p)) skipped.push({ path: p, why: `changed by the install, not by the ${work}` });
     else if (sizeOf(p) > LIMITS.fileBytes) skipped.push({ path: p, why: `larger than ${LIMITS.fileBytes} bytes` });
     else keep.push(p);
   }
@@ -585,20 +596,32 @@ export const SUBJECT_BANNED = /co-authored|signed-off|generated|\bclaude\b|\bant
 const CLOSERS = /\b(?:fix(?:es|ed)?|close[sd]?|resolve[sd]?)\b\s*:?\s*(?:[\w.-]+\/[\w.-]+)?#\d+/gi;
 
 /**
+ * One line from the model as a commit subject's text: the first line, with issue closers and refs,
+ * links, em dashes and trailing punctuation removed, and cut at a word to `max` characters. The
+ * model's own prefix (`fix:`, `docs(x)!:`) is removed unless `keepPrefix`; a prefix kept with
+ * nothing after it is no subject. A line with nothing left, or one `banned` matches (by default
+ * SUBJECT_BANNED: a credit to a tool, or a name of the machinery), is replaced by `fallback`. Pure.
+ */
+export function cleanSubject(line, { keepPrefix = false, fallback, max, banned = SUBJECT_BANNED }) {
+  let s = String(line ?? '').split('\n')[0].trim();
+  s = s.replace(/\s*[\u2013\u2014]\s*/g, ', ').replace(/\s+/g, ' ');
+  if (!keepPrefix) s = s.replace(/^(?:fix|feat|chore|refactor|docs|test|ci|build|perf|style)(?:\([^)]*\))?!?:\s*/i, '');
+  s = s.replace(CLOSERS, '').replace(/(?:[\w.-]+\/[\w.-]+)?#\d+/g, '').replace(/https?:\/\/\S+/g, '').replace(/\(\s*\)/g, '');
+  s = s.replace(/\s{2,}/g, ' ');
+  const bare = keepPrefix && /^[\w.-]+(?:\([^)]*\))?!?:[\s.,:;-]*$/.test(s.trim());
+  s = s.replace(/^[\s,:;-]+|[\s.,:;-]+$/g, '');
+  if (!s || bare || banned.test(s)) s = fallback;
+  if (s.length > max) s = s.slice(0, max).replace(/\s+\S*$/, '').replace(/[\s.,:;-]+$/, '');
+  return s;
+}
+
+/**
  * The commit subject: `fix: <one line from the model>`, with the model's own prefix, issue
  * closers and refs, em dashes and trailing punctuation removed, and capped. A line that credits
  * a tool or names the machinery is replaced by the default.
  */
 export function commitSubject(line) {
-  let s = String(line ?? '').split('\n')[0].trim();
-  s = s.replace(/\s*[\u2013\u2014]\s*/g, ', ').replace(/\s+/g, ' ');
-  s = s.replace(/^(?:fix|feat|chore|refactor|docs|test|ci|build|perf|style)(?:\([^)]*\))?!?:\s*/i, '');
-  s = s.replace(CLOSERS, '').replace(/(?:[\w.-]+\/[\w.-]+)?#\d+/g, '').replace(/https?:\/\/\S+/g, '').replace(/\(\s*\)/g, '');
-  s = s.replace(/\s{2,}/g, ' ').replace(/^[\s,:;-]+|[\s.,:;-]+$/g, '');
-  if (!s || SUBJECT_BANNED.test(s)) s = 'address the review';
-  const max = LIMITS.subjectChars - 'fix: '.length;
-  if (s.length > max) s = s.slice(0, max).replace(/\s+\S*$/, '').replace(/[\s.,:;-]+$/, '');
-  return `fix: ${s}`;
+  return `fix: ${cleanSubject(line, { fallback: 'address the review', max: LIMITS.subjectChars - 'fix: '.length })}`;
 }
 
 /** Whether a commit message carries an attribution trailer. Checked on the commit itself before the bundle. */
@@ -769,7 +792,7 @@ export function runIdentity(env = process.env) {
 }
 
 /** Why a value is not a run identity { id, attempt }, both positive integers; null when it is one. Pure. */
-function runProblem(run) {
+export function runProblem(run) {
   const ok = run !== null && typeof run === 'object' && !Array.isArray(run)
     && Number.isSafeInteger(run.id) && run.id > 0 && Number.isSafeInteger(run.attempt) && run.attempt > 0;
   return ok ? null : 'run must be null or { id, attempt }, both positive integers';
@@ -1117,7 +1140,8 @@ export const TOOLS = [
 // apps/ci/src/runtime/fix-ci.ts), so the head is dispatched once more, then rests. A refusal the model
 // made before the budget ran out is its judgment on the findings and is reported as it is.
 export const UNFINISHED_PREFIX = 'The fix run could not finish:';
-export const unfinished = (why) => `${UNFINISHED_PREFIX} ${String(why ?? '').trim()}`;
+/** The notes' reason for a run that did not finish: the fix lane's starts UNFINISHED_PREFIX; another lane's names its own run (`work`). */
+export const unfinished = (why, work = 'fix') => `${work === 'fix' ? UNFINISHED_PREFIX : `The ${work} run could not finish:`} ${String(why ?? '').trim()}`;
 
 export const FINISH_REQUIRED = 'The budget is spent. Your next response must be a finish_fix tool call with outcome, subject, summary and '
   + 'tests_run, describing what you changed so far. Do not call any other tool and do not answer in text.';
@@ -1137,8 +1161,12 @@ export function askForFinish(messages) {
   }
 }
 
-/** Validate finish_fix input. Returns { sub } or { error }. Prose that names the machinery is bounced. */
-export function checkFinish(input) {
+/**
+ * Validate finish_fix input. Returns { sub } or { error }. Prose that names the machinery is
+ * bounced. `subjectOf` makes the commit subject from the model's line: commitSubject here, the
+ * build lane's own in build.mjs.
+ */
+export function checkFinish(input, subjectOf = commitSubject) {
   if (!input || typeof input !== 'object') return { error: 'finish_fix needs an object' };
   const outcome = input.outcome ?? 'fixed';
   if (outcome !== 'fixed' && outcome !== 'refused') return { error: 'outcome must be fixed or refused' };
@@ -1158,7 +1186,7 @@ export function checkFinish(input) {
     if (hit) return { error: `${where} says "${hit}". The comment is public and describes only the change: say what changed, where and why, and never mention attribution, generation, models, rules or lanes. Rewrite and call finish_fix again.` };
   }
   if (outcome === 'refused') return { sub: { outcome, reason: str(input.reason) } };
-  return { sub: { outcome, subject: commitSubject(input.subject), summary: str(input.summary), tests_run: str(input.tests_run) } };
+  return { sub: { outcome, subject: subjectOf(input.subject), summary: str(input.summary), tests_run: str(input.tests_run) } };
 }
 
 // ---------- the loop ----------
@@ -1169,14 +1197,28 @@ export function capOutput(text, max = LIMITS.runOutChars) {
 }
 
 /**
+ * The fix lane's own words where the shared work speaks, to the model and in the notes: the lane's
+ * name, what a run produces, the line under the brief, the refusal for a checkout that is somewhere
+ * else, and what the summary is to say about captured data. build.mjs has its own.
+ */
+const FIX_WORDS = {
+  lane: 'fix lane',
+  work: 'fix',
+  ask: 'Answer the review and finish with finish_fix.',
+  notAtStart: 'the checkout is not at the reviewed head',
+  protectedNote: 'this finding is about data the fix lane does not change',
+};
+
+/**
  * The model loop with every side effect injected: ctx.call(messages, toolChoice) -> Messages
  * response, ctx.tool(name, input) -> string, ctx.finalize(input) -> { sub } | { error }, ctx.now,
  * ctx.log, ctx.canForce. Returns { sub, turns } or { refused, turns }; throws only on a broken
  * response. Text-only and empty replies are handled as in review.mjs: three in a row end the run,
- * an empty reply is not kept in the history.
+ * an empty reply is not kept in the history. ctx.ask is the line under the brief and ctx.work the
+ * name of what the run produces; a lane that leaves them out is the fix lane.
  */
 export async function runLoop(ctx, brief) {
-  const messages = [{ role: 'user', content: `${brief}\n\nAnswer the review and finish with finish_fix.` }];
+  const messages = [{ role: 'user', content: `${brief}\n\n${ctx.ask ?? FIX_WORDS.ask}` }];
   // The run's own start when given, so the install counts against the budget.
   const started = ctx.started ?? ctx.now();
   const canForce = ctx.canForce !== false;
@@ -1217,7 +1259,16 @@ export async function runLoop(ctx, brief) {
     }
     messages.push({ role: 'user', content: out });
   }
-  return { refused: `no fix submitted within ${LIMITS.turns} turns`, turns };
+  return { refused: `no ${ctx.work ?? FIX_WORDS.work} submitted within ${LIMITS.turns} turns`, turns };
+}
+
+/** The brief's lines on the toolchain: what was installed, what fix_run accepts, the test script. Pure. */
+export function toolchainLines(plan, installNote) {
+  return [
+    `Toolchain: ${plan.pm ?? 'none'}; install: ${installNote}`,
+    `run accepts: ${allowedCommands(plan).join(', ')}`,
+    plan.scripts.includes('test') ? `Test script: \`${plan.pm} test\`. Run it after your edits.` : 'No test script in package.json.',
+  ];
 }
 
 export function buildBrief({ pr, files, headSha, review, items, plan, installNote, diff, protectedFiles = [], githubFiles = [], history = [], lessons = [], run = null }) {
@@ -1246,9 +1297,7 @@ export function buildBrief({ pr, files, headSha, review, items, plan, installNot
     ...(history.length
       ? ['', `Earlier fixes on this repository by this lane, newest first (${history.length}). Background only: the findings above are what this run answers.`, ...history.map(formatHistory)]
       : []),
-    '', `Toolchain: ${plan.pm ?? 'none'}; install: ${installNote}`,
-    `run accepts: ${allowedCommands(plan).join(', ')}`,
-    plan.scripts.includes('test') ? `Test script: \`${plan.pm} test\`. Run it after your edits.` : 'No test script in package.json.',
+    '', ...toolchainLines(plan, installNote),
     '', 'PR diff:', diff || '(empty)',
   ].join('\n');
 }
@@ -1292,7 +1341,9 @@ export function proxyEnv(proxy) {
 export function runAccount(name) {
   const s = String(name ?? '').trim();
   if (!s) return '';
-  if (!/^[a-z_][a-z0-9_-]{0,31}$/.test(s)) throw new Error(`FIX_RUN_AS is not a user name: ${s.slice(0, 40)}`);
+  // The value is never in the error: it is written to the record, its notes and the job's log, and
+  // a value that is no user name may be a key pasted into the wrong line of the env file.
+  if (!/^[a-z_][a-z0-9_-]{0,31}$/.test(s)) throw new Error('FIX_RUN_AS is not a user name (a lower-case letter or _, then up to 31 lower-case letters, digits, _ or -)');
   return s;
 }
 
@@ -1338,6 +1389,13 @@ function git(cwd, env, args, { allowFail = false } = {}) {
   const r = spawnSync('git', args, { cwd, env, encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 });
   if (r.status !== 0 && !allowFail) throw new Error(`git ${args[0]} failed: ${(r.stderr || r.stdout || r.error?.message || '').trim().slice(0, 300)}`);
   return r.status === 0 ? String(r.stdout ?? '').replace(/\n$/, '') : null;
+}
+
+/** git's output as the bytes it wrote, for what is written out as it is (a diff a file's own bytes are in). Throws on a failure. */
+function gitBytes(cwd, env, args) {
+  const r = spawnSync('git', args, { cwd, env, maxBuffer: 256 * 1024 * 1024 });
+  if (r.status !== 0) throw new Error(`git ${args[0]} failed: ${String(r.stderr || r.stdout || r.error?.message || '').trim().slice(0, 300)}`);
+  return Buffer.from(r.stdout ?? []);
 }
 
 /**
@@ -1423,25 +1481,37 @@ export function onlyOrigins(fetchFn, urls) {
  */
 export async function runFix(ctx) {
   const result = await answerReview(ctx);
-  // Last gate before anything is uploaded: fix.json, notes.md and description.md are public
-  // through the ops tick (the description becomes the PR body), so the description is checked with them.
-  if (leaksSecret(`${JSON.stringify(result.record)}\n${result.description ?? ''}`, runSecrets(ctx))) {
-    for (const f of ['fix.bundle', 'diff.patch']) rmSync(join(ctx.out, f), { force: true });
-    return { record: fixRecord({ repo: ctx.repo, pr: ctx.pr, headSha: ctx.headSha, model: ctx.model, run: ctx.run, outcome: 'refused', turns: result.record.turns,
-      notes: renderNotes({ outcome: 'refused', reason: 'The result carried a credential of this run, so nothing from it is kept.' }) }) };
-  }
-  return result;
+  return sealResult(ctx, result, 'fix.bundle', (fields) => fixRecord({ repo: ctx.repo, pr: ctx.pr, headSha: ctx.headSha, model: ctx.model, run: ctx.run, ...fields }));
 }
 
+/**
+ * The last gate before anything is uploaded: the record, notes.md and description.md are public
+ * through the ops tick (the description becomes a pull request's body), so the description is
+ * checked with them. A result that carries a credential of the run is replaced by a refusal the
+ * lane's own `record` writes, and the bundle or patch already written is removed.
+ */
+export function sealResult(ctx, result, bundle, record) {
+  // Everything the run writes out from the model's words: the record, the description, and what a
+  // verify run is handed (replay).
+  if (!leaksSecret(`${JSON.stringify(result.record)}\n${result.description ?? ''}\n${JSON.stringify(result.replay ?? null)}`, runSecrets(ctx))) return result;
+  for (const f of [bundle, 'diff.patch']) rmSync(join(ctx.out, f), { force: true });
+  return { record: record({ outcome: 'refused', turns: result.record.turns,
+    notes: renderNotes({ outcome: 'refused', reason: 'The result carried a credential of this run, so nothing from it is kept.' }) }) };
+}
+
+/**
+ * The fix lane's own half: read the pull request and its review, and decide what is to be
+ * answered. Everything it refuses is refused before the checkout is touched; the rest is
+ * workCheckout's, with the job this hands it.
+ */
 async function answerReview(ctx) {
-  const { repo, pr: n, headSha, checkout: root, out } = ctx;
+  const { repo, pr: n, headSha, out } = ctx;
+  // The run's start: the reads below count against the budget, as the install does.
   const started = ctx.now();
-  const deadline = started + LIMITS.hardMs;
-  // Seconds a command may still run, inside hardMs; 0 when the budget is spent.
-  const secondsLeft = (want) => { const left = Math.floor((deadline - ctx.now()) / 1000); return left < 30 ? 0 : Math.min(want, left); };
   mkdirSync(out, { recursive: true });
   const base = { repo, pr: n, headSha, model: ctx.model, run: ctx.run };
-  const refuse = (why, extra = {}) => ({ record: fixRecord({ ...base, outcome: 'refused', ...extra, notes: renderNotes({ outcome: 'refused', reason: why }) }) });
+  const record = (fields) => fixRecord({ ...base, ...fields });
+  const refuse = (why, extra = {}) => ({ record: record({ outcome: 'refused', ...extra, notes: renderNotes({ outcome: 'refused', reason: why }) }) });
 
   const ref = parseReviewUrl(ctx.reviewUrl);
   if (!ref) return refuse(`REVIEW_URL is not a pull request review link: ${String(ctx.reviewUrl ?? '').slice(0, 200)}`);
@@ -1494,6 +1564,67 @@ async function answerReview(ctx) {
     }
   }
 
+  return workCheckout(ctx, {
+    start: headSha, started, record, words: FIX_WORDS, effort,
+    // Under .github/ only the pull request's own files, as the compare with the reviewed head has them.
+    githubChanges: compared,
+    tools: TOOLS, subject: commitSubject, refusedMessage: hasAttributionTrailer, bundle: 'fix.bundle',
+    // fix_describe replaces the pull request's description, whole: a result on its own when no
+    // file changed, and never when the brief showed only part of the current one.
+    describe: {
+      replaces: true,
+      problem: (body) => descriptionProblem(body, pr.body),
+      kept: (lines) => `the PR description is replaced with this text (${lines} lines) when the run finishes`,
+    },
+    brief: ({ plan, installNote, githubFiles, attrs }) => {
+      const protectedFiles = [...protectedPaths(attrs, files.map((f) => f.filename))];
+      return buildBrief({ pr, files, headSha, review, items, plan, installNote, diff: buildDiff(files, LIMITS.diffChars), protectedFiles, githubFiles, history, lessons, run: ctx.run });
+    },
+  });
+}
+
+/**
+ * The work in the checkout, shared by the fix lane and the build lane (build.mjs): prove the run
+ * account, install the toolchain, let the model read, write and run until it calls finish_fix,
+ * hold the result to the test gate and the limits, and write one commit on top of job.start as a
+ * bundle under ctx.out, which the lane has made. ctx is the run (the checkout, the model, the run
+ * account, now, log, dryRun); job is what the lane wants done:
+ *   start, started   the commit the work starts from; the run's start, which the budget counts from
+ *   record(fields)   the lane's record, from outcome, notes, turns, tests, files, commits, newHead,
+ *                    subject and description
+ *   words            the lane's words to the model and in the notes (FIX_WORDS has the fix lane's)
+ *   effort           the level every model request names, or nothing
+ *   githubChanges    the compare whose files under .github/ may be written (editableGithub), or
+ *                    null when nothing there may be
+ *   tools, subject   the tools the model gets; the commit subject, made from the model's line
+ *   refusedMessage   whether the commit's message carries what the lane's subject rule refuses,
+ *                    checked on the commit itself before the bundle
+ *   describe         fix_describe. problem(body) says why a text is refused and kept(lines) answers
+ *                    the model. replaces: the text replaces an existing description, so it is a
+ *                    result with no file changed and the notes say so. required: a change needs
+ *                    one, so finish_fix without it is sent back once with `ask`, and fallback(sub)
+ *                    stands in when it still does not come
+ *   brief(facts)     the first user turn, from { plan, installNote, githubFiles, attrs, git }: the
+ *                    toolchain, the writable .github files, the start commit's .gitattributes
+ *                    (headAttributes) and this process's git on the checkout
+ *   bundle           the bundle's file name
+ *   replay           a verify run's candidate, in place of the model: { tree, subject, summary,
+ *                    ranBuild, description, turns }. The tree is written into the
+ *                    checkout as the model's edits were, the test gate decides once with no turn
+ *                    to answer it, and the commit is made as a build's is; the tree it commits must
+ *                    be the candidate's. No model is called and nothing is installed here.
+ * Returns { record, description, replay }: replay, for a fixed result, is what a verify run needs
+ * besides the change (the summary, and whether the model ran the build script). Throws
+ * only on a broken model response or a git failure; the CLI turns that into a refused record.
+ */
+export async function workCheckout(ctx, job) {
+  const { checkout: root, out } = ctx;
+  const { start, started, words } = job;
+  const deadline = started + LIMITS.hardMs;
+  // Seconds a command may still run, inside hardMs; 0 when the budget is spent.
+  const secondsLeft = (want) => { const left = Math.floor((deadline - ctx.now()) / 1000); return left < 30 ? 0 : Math.min(want, left); };
+  const refuse = (why, extra = {}) => ({ record: job.record({ outcome: 'refused', ...extra, notes: renderNotes({ outcome: 'refused', reason: why }) }) });
+
   let runAs;
   try { runAs = runAccount(ctx.runAs); } catch (e) { return refuse(e.message); }
   const home = mkdtempSync(join(tmpdir(), 'redline-fix-home-'));
@@ -1520,6 +1651,9 @@ async function answerReview(ctx) {
   // Off until the run account has passed every check below, so a refused account (root, this
   // account, one that can read the key) is never sent kill -1, not even by the cleanup in finally.
   let armed = false;
+  // The directories the run account works in: the checkout and its HOME, and while the test gate
+  // runs (gateTests), the gate's checkout and HOME as well.
+  const workDirs = [root, home];
   const settle = () => {
     if (!runAs || !armed) return;
     for (let round = 0; ; round++) {
@@ -1536,23 +1670,44 @@ async function answerReview(ctx) {
     // can strip the inherited ACL and set 700): as owner, it gives itself traversal first, then
     // this account an explicit ACL entry, recursively. Then this account must reach every path;
     // a path it cannot is a refusal, never a file git silently skips.
-    asRun(['chmod', '-R', 'u+rwX', root, home]);
-    asRun(['setfacl', '-R', '-m', `u:${me}:rwX,d:u:${me}:rwX`, root, home]);
-    const blocked = spawnSync('find', [root, home, '!', '-type', 'l', '(', '!', '-readable', '-o', '-type', 'd', '!', '-executable', ')', '-print', '-quit'],
+    // Group execute is cleared before X is read. On a file with an ACL the group bits are its mask,
+    // which the setfacl below sets from the named entries, and an entry inherited from a directory's
+    // default carries x: X would then read the file as executable and give its owner x on the next
+    // pass, and git would commit a file the run account made as 100755. Git reads the owner's bit
+    // alone, so what X sees is then the owner's and others' bits, and a script made executable stays so.
+    asRun(['chmod', '-R', 'g-x,u+rwX', ...workDirs]);
+    asRun(['setfacl', '-R', '-m', `u:${me}:rwX,d:u:${me}:rwX`, ...workDirs]);
+    const blocked = spawnSync('find', [...workDirs, '!', '-type', 'l', '(', '!', '-readable', '-o', '-type', 'd', '!', '-executable', ')', '-print', '-quit'],
       { env: sudoEnv, encoding: 'utf8' });
     const stuck = String(blocked.stdout ?? '').trim();
     if (stuck) throw new Error(`the run account left a path this account cannot reach: ${relative(root, stuck).slice(0, 200)}`);
   };
+  const acl = (args) => { const r = spawnSync('setfacl', args, { env: sudoEnv, encoding: 'utf8' }); if (r.status !== 0) throw new Error(`setfacl failed: ${String(r.stderr || r.error?.message || '').trim().slice(0, 200)}`); };
+  // What the run account may do in a checkout and a HOME: write both, read the checkout's .git
+  // and never write it. Default ACLs keep what it creates manageable here.
+  const grant = (dir, dirHome) => {
+    acl(['-R', '-m', `u:${runAs}:rwX,d:u:${runAs}:rwX,d:u:${me}:rwX`, dir]);
+    acl(['-R', '-m', `u:${runAs}:rX,d:u:${runAs}:rX`, join(dir, '.git')]);
+    acl(['-m', `u:${runAs}:rwx,d:u:${runAs}:rwX,d:u:${me}:rwX`, dirHome]);
+  };
+  // While the test gate runs (gateTests), the run account is denied this checkout and the
+  // commands' HOME, so its suite reads neither; letIn gives both back. Nothing outside them is
+  // removed or hidden: the exec rows' sandbox gives the job a /tmp of its own and lets it make no
+  // namespace, so there is no private filesystem to give the suite, and a path a command left in
+  // the job's temporary directories, named again by the suite, is not covered by the gate. The
+  // pull request's own CI runs the suite where none of it exists.
+  const shutOut = () => { for (const d of [root, home]) acl(['-m', `u:${runAs}:---`, d]); };
+  const letIn = () => { for (const d of [root, home]) acl(['-m', `u:${runAs}:rwx`, d]); };
   // Every command the checkout supplies goes through here.
   const exec = (argv, seconds, extraEnv = {}) => { const r = run(root, { ...cenv, ...extraEnv }, argv, seconds, runAs); settle(); return r; };
   try {
-    if (git(root, genv, ['rev-parse', 'HEAD'], { allowFail: true }) !== headSha) return refuse('the checkout is not at the reviewed head');
+    if (git(root, genv, ['rev-parse', 'HEAD'], { allowFail: true }) !== start) return refuse(words.notAtStart);
     if (changedPaths(root, genv).length) return refuse('the checkout is not clean');
-    // The marks as the reviewed head has them, before any command can touch the checkout.
-    const attrs = headAttributes(root, genv, headSha);
-    // The .github files this run may write, pinned to the reviewed head: the compare with that
-    // commit, each path checked against the blob the reviewed tree holds.
-    const github = editableGithub(compared, headBlobs(root, genv, headSha));
+    // The marks as the start commit has them, before any command can touch the checkout.
+    const attrs = headAttributes(root, genv, start);
+    // The .github files this run may write, pinned to the start commit: the compare with that
+    // commit, each path checked against the blob its tree holds. Null: nothing there is written.
+    const github = job.githubChanges === null ? null : editableGithub(job.githubChanges, headBlobs(root, genv, start));
 
     if (runAs) {
       // The run account must work, must not read the key or the brief, may write the checkout
@@ -1576,12 +1731,7 @@ async function answerReview(ctx) {
         cpSync(git(root, genv, ['rev-parse', '--absolute-git-dir']), privateGit, { recursive: true });
         Object.assign(genv, { GIT_DIR: privateGit, GIT_WORK_TREE: realpathSync(root) });
       } catch (e) { return refuse(`the checkout's .git could not be copied aside: ${String(e.message).slice(0, 200)}`); }
-      const acl = (args) => { const r = spawnSync('setfacl', args, { env: sudoEnv, encoding: 'utf8' }); if (r.status !== 0) throw new Error(`setfacl failed: ${String(r.stderr || r.error?.message || '').trim().slice(0, 200)}`); };
-      try {
-        acl(['-R', '-m', `u:${runAs}:rwX,d:u:${runAs}:rwX,d:u:${me}:rwX`, root]);
-        acl(['-R', '-m', `u:${runAs}:rX,d:u:${runAs}:rX`, join(root, '.git')]);
-        acl(['-m', `u:${runAs}:rwx,d:u:${runAs}:rwX,d:u:${me}:rwX`, home]);
-      } catch (e) { return refuse(e.message); }
+      try { grant(root, home); } catch (e) { return refuse(e.message); }
       if (!runCan('-w', root)) return refuse('the run account cannot write the checkout (check that every directory above it is searchable)');
       if (runCan('-w', join(root, '.git'))) return refuse('the run account can write the checkout\'s .git');
       armed = true;
@@ -1600,6 +1750,10 @@ async function answerReview(ctx) {
       plan.install = v.exit === 0 ? berryInstall(v.out) : null;
       if (!plan.install) installNote = `nothing installed: \`yarn --version\` gave no yarn 2+ version (exit ${v.exit}), so no install could skip dependencies' builds`;
     }
+    if (job.replay) {
+      plan.install = null;
+      installNote = 'a verify run installs in the test gate\'s checkout alone';
+    }
     if (plan.install) {
       const r = exec(plan.install, LIMITS.installS, plan.installEnv);
       installNote = `\`${plan.install.join(' ')}\` exited ${r.exit}${r.exit ? ` (tail: ${r.out.slice(-600).replace(/\s+/g, ' ')})` : ''}`
@@ -1612,44 +1766,165 @@ async function answerReview(ctx) {
     let description = null; // fix_describe's text, set as the PR body by the ops tick
     // The fix as it would be staged now: everything changed minus what the contract leaves out.
     // A command may have staged or committed on its own, so HEAD and the index go back to the
-    // reviewed head first (the working tree is kept): every check, the test gate in finalize
-    // included, sees all of the change against the reviewed head, and the commit is the whole of it.
+    // start commit first (the working tree is kept): every check, the test gate in finalize
+    // included, sees all of the change against the start commit, and the commit is the whole of it.
     const sizeOf = (p) => { try { return statSync(join(root, p)).size; } catch { return 0; } };
     const staged = () => {
-      git(root, genv, ['reset', '-q', headSha]);
+      git(root, genv, ['reset', '-q', start]);
       const changed = changedPaths(root, genv);
-      return stageable(changed, { installDirty, written, sizeOf, protectedSet: protectedPaths(attrs, changed), github });
+      return stageable(changed, { installDirty, written, sizeOf, protectedSet: protectedPaths(attrs, changed), github, work: words.work });
     };
-    const runs = [];
-    let seq = 0;
-    // The worktree's changed paths and their bytes, hashed: a test run counts for the fix only
-    // while the stamp it left is the current one, however the files changed since (fix_write, or
-    // a node <file> the model ran).
-    // Measured against the reviewed head, as staged() measures, so a command's own commit cannot
-    // hide a change from it.
-    const stamp = () => {
-      git(root, genv, ['reset', '-q', headSha]);
-      const h = createHash('sha256');
-      for (const p of changedPaths(root, genv).sort()) {
-        h.update(`${p}\0`);
-        try {
-          const abs = join(root, p);
-          const s = lstatSync(abs);
-          // The executable bit as git records it (100755 or 100644): a script that lost it fails
-          // the suite with the same bytes.
-          h.update(s.isSymbolicLink() ? `link:${readlinkSync(abs)}` : s.isFile() ? Buffer.concat([Buffer.from(s.mode & 0o100 ? 'x:' : '-:'), readFileSync(abs)]) : 'other');
-        } catch { h.update('gone'); }
-        h.update('\0');
-      }
-      return h.digest('hex');
+    // The kept paths staged as one tree, the candidate the commit would be: its id, and the paths.
+    const candidate = () => {
+      const { keep } = staged();
+      // Literal pathspecs: a file a command named `*` must not stage everything.
+      if (keep.length) git(root, genv, ['--literal-pathspecs', 'add', '-A', '--', ...keep]);
+      const tree = git(root, genv, ['write-tree']);
+      git(root, genv, ['reset', '-q', start]);
+      return { tree, keep };
     };
     const testArgv = plan.pm && plan.scripts.includes('test') ? [plan.pm, 'test'] : null;
-    const isTest = (argv) => testArgv !== null && argv[0] === testArgv[0] && (argv[1] === 'test' || (argv[1] === 'run' && argv[2] === 'test'));
-    const record = (argv, r) => {
-      const row = { command: argv.join(' '), exit: r.exit, out: r.out, timedOut: r.timedOut, seq: ++seq, isTest: isTest(argv) };
-      if (row.isTest) row.stamp = stamp();
-      runs.push(row);
-      return row;
+    // Whether the model ran the build script here: the gate runs it again before the suite, since
+    // a suite that reads the build's output (an ignored dist/) needs it, and the output made here
+    // is not carried over.
+    let ranBuild = false;
+    // The toolchain the candidate declares, as detectRunner reads the checkout's: the names at the
+    // tree's root and its package.json. The gate runs what the change declares, a first test script
+    // or a new package manager among it; the allowlist the model works with stays the start's.
+    // `broken`, saying why, when a package.json is there and cannot be read: the gate cannot say
+    // what to run. A package.json that is a link, or that sits behind one, is read through it as
+    // the checkout and npm read it, to a file in the same tree (blobAt); a link out of the tree is
+    // refused.
+    // A path in the tree as the checkout would open it: every component, a directory's as well as
+    // the file's, is followed when it is a link, to a path that stays inside the tree, at most
+    // eight links in all. Returns { sha } of the blob it reaches, or { broken } saying why not.
+    const blobAt = (tree, wanted) => {
+      let parts = wanted.split('/').filter(Boolean);
+      let at = tree;
+      let done = [];
+      for (let links = 0; parts.length;) {
+        const [name, ...rest] = parts;
+        if (name === '.') { parts = rest; continue; }
+        if (name === '..') {
+          if (!done.length) return { broken: `the change's package.json leads outside the checkout` };
+          done = done.slice(0, -1);
+          at = done.length ? (git(root, genv, ['rev-parse', `${tree}:${done.join('/')}`]) ?? '') : tree;
+          parts = rest;
+          continue;
+        }
+        // The name is a file name, never a pathspec: one that begins with git's pathspec magic
+        // (`:x`) is looked up as it is spelled.
+        const [meta = ''] = (git(root, genv, ['--literal-pathspecs', 'ls-tree', '-z', at, '--', name]) ?? '').split('\t');
+        const [mode, type, sha] = meta.split(' ');
+        if (!sha) return { broken: `the change's package.json leads to ${[...done, name].join('/')}, which is not in it` };
+        if (mode === '120000') {
+          if (++links > 8) return { broken: 'the change\'s package.json goes through more than eight links' };
+          // The target as the link holds it: git()'s output loses a final newline, which is part
+          // of the name the checkout follows.
+          const target = gitBytes(root, genv, ['cat-file', 'blob', sha]).toString('utf8');
+          if (posix.isAbsolute(target)) return { broken: `the change's package.json links to ${target.slice(0, 120)}, outside the checkout` };
+          parts = [...target.split('/').filter(Boolean), ...rest];
+          continue;
+        }
+        if (!rest.length) return type === 'blob' ? { sha } : { broken: `the change's package.json is not a file (${[...done, name].join('/')})` };
+        if (type !== 'tree') return { broken: `the change's package.json leads through ${[...done, name].join('/')}, which is not a directory` };
+        at = sha;
+        done = [...done, name];
+        parts = rest;
+      }
+      return { broken: 'the change\'s package.json names no file' };
+    };
+    const manifestOf = (tree) => {
+      const found = blobAt(tree, 'package.json');
+      return 'broken' in found ? found : { text: git(root, genv, ['cat-file', 'blob', found.sha]) ?? '' };
+    };
+    const planOf = (tree) => {
+      const names = (git(root, genv, ['ls-tree', '-z', '--name-only', tree]) ?? '').split('\0').filter(Boolean);
+      if (!names.includes('package.json')) return { plan: detectRunner(names, null) };
+      const m = manifestOf(tree);
+      if ('broken' in m) return m;
+      try { return { plan: detectRunner(names, JSON.parse(m.text)) }; } catch { return { broken: 'the change\'s package.json does not parse, so what its tests are cannot be read' }; }
+    };
+    // The test gate. The suite runs on the candidate tree alone, in a checkout of its own made from
+    // the tree's objects, with the install (and the build, when the model ran it) run there afresh
+    // and a HOME of its own, and never in this checkout: an ignored file a command left here (a
+    // local config, a build's output), a file in the commands' HOME, or a change the commit leaves
+    // out can make a suite pass here that fails on the commit. What the suite writes there is
+    // thrown away with it, so the commit is the tree that was tested and nothing the suite did. With
+    // a run account the suite cannot reach this checkout or the commands' HOME (shutOut). A path
+    // outside the checkouts and HOMEs, which a command and the suite can each name, is not covered.
+    // The gate's checkout has a .git of its own, a copy of this process's, with HEAD and the index
+    // at a commit of the candidate on the start commit, and the run account's git trusts that
+    // checkout alone, from a config it can read and not change, so a suite that finds its tests
+    // through git finds them. The first step that fails is the
+    // result: an install or a build that fails fails the gate, whatever a test would say after it.
+    // Returns { command, exit, out, timedOut, tree, stage } (stage: manifest, install, build or
+    // test), or null when neither the start commit nor the change has a test script.
+    const gateTests = (tree, subject) => {
+      const found = planOf(tree);
+      if ('broken' in found) return { command: 'package.json', exit: 1, out: found.broken, timedOut: false, tree, stage: 'manifest' };
+      const p = found.plan;
+      const testCmd = p.pm && p.scripts.includes('test') ? [p.pm, 'test'] : null;
+      if (!testCmd) {
+        if (!testArgv) return null;
+        return { command: 'package.json', exit: 1, out: `the change leaves no \`test\` script in package.json, and the start commit has one (\`${testArgv.join(' ')}\`)`, timedOut: false, tree, stage: 'manifest' };
+      }
+      ctx.log?.('  running the test script in a clean checkout of the change');
+      const dir = realpathSync(mkdtempSync(join(tmpdir(), 'redline-gate-')));
+      const gateHome = mkdtempSync(join(tmpdir(), 'redline-gate-home-'));
+      // The run account's git config for the gate: this checkout is safe, and nothing else is
+      // set. In a directory of this account's, which the run account reads and cannot change.
+      const trust = mkdtempSync(join(tmpdir(), 'redline-gate-trust-'));
+      const genvGate = { ...genv, GIT_DIR: join(dir, '.git'), GIT_WORK_TREE: dir };
+      const result = (stage, argv, exit, out, timedOut = false) => ({ command: argv.join(' '), exit, out, timedOut, tree, stage });
+      try {
+        cpSync(git(root, genv, ['rev-parse', '--absolute-git-dir']), join(dir, '.git'), { recursive: true });
+        // HEAD, the index and the files all the candidate: a commit of its tree on the start commit,
+        // with the subject it would carry, so a suite that finds its tests through git finds them.
+        git(dir, genvGate, ['read-tree', tree]);
+        git(dir, genvGate, ['checkout-index', '-a', '-f']);
+        const who = { GIT_AUTHOR_NAME: AUTHOR.name, GIT_AUTHOR_EMAIL: AUTHOR.email, GIT_COMMITTER_NAME: AUTHOR.name, GIT_COMMITTER_EMAIL: AUTHOR.email };
+        git(dir, genvGate, ['update-ref', '--no-deref', 'HEAD', git(dir, { ...genvGate, ...who }, ['commit-tree', tree, '-p', start, '-m', subject])]);
+        const gitTrust = join(trust, 'gitconfig');
+        writeFileSync(gitTrust, `[safe]\n\tdirectory = ${dir}\n`);
+        // The modes set outright: a file's creation mode passes through this account's umask.
+        chmodSync(gitTrust, 0o644);
+        chmodSync(trust, 0o755);
+        if (runAs) {
+          grant(dir, gateHome);
+          shutOut();
+        }
+        workDirs.push(dir, gateHome);
+        const env = { ...childEnv(ctx.env ?? process.env, gateHome, ctx.proxy), ...(runAs ? { GIT_CONFIG_GLOBAL: gitTrust } : {}) };
+        const gexec = (argv, seconds, extraEnv = {}) => { const r = run(dir, { ...env, ...extraEnv }, argv, seconds, runAs); settle(); return r; };
+        // A step with no time left is a failed step: a change is never reported without its tests.
+        const step = (stage, argv, cap, extraEnv = {}) => {
+          const s = secondsLeft(cap);
+          return s ? gexec(argv, s, extraEnv) : { exit: 124, out: `not run: the time budget was spent before the ${stage} in the clean checkout`, timedOut: true };
+        };
+        let install = p.install;
+        if (p.berry) {
+          const v = step('install', ['yarn', '--version'], 60, p.installEnv);
+          install = v.exit === 0 ? berryInstall(v.out) : null;
+          if (!install) return result('install', ['yarn', '--version'], v.exit || 1, `\`yarn --version\` gave no yarn 2+ version (exit ${v.exit}), so no install could skip dependencies' builds:\n${v.out}`, v.timedOut);
+        }
+        if (install) {
+          const i = step('install', install, LIMITS.installS, p.installEnv);
+          if (i.exit !== 0) return result('install', install, i.exit, i.out, i.timedOut);
+        }
+        if (ranBuild && p.scripts.includes('build')) {
+          const b = step('build', [p.pm, 'run', 'build'], LIMITS.runMaxS);
+          if (b.exit !== 0) return result('build', [p.pm, 'run', 'build'], b.exit, b.out, b.timedOut);
+        }
+        const t = step('test', testCmd, LIMITS.runMaxS);
+        return result('test', testCmd, t.exit, t.out, t.timedOut);
+      } finally {
+        workDirs.splice(2);
+        if (runAs) letIn();
+        for (const d of [dir, gateHome, trust]) {
+          try { rmSync(d, { recursive: true, force: true }); } catch (e) { ctx.log?.(`::warning::could not remove ${d}: ${e.code ?? e.message}`); }
+        }
+      }
     };
 
     const writeIo = ctx.writeIo ?? WRITE_IO;
@@ -1659,13 +1934,13 @@ async function answerReview(ctx) {
       if (name === 'fix_search') return fixSearch(root, input);
       // Where fix_edit and fix_write may write: { abs, rel } or { error }. Throws what safeWritePath throws.
       const target = (path) => {
-        const abs = safeWritePath(root, path, github);
+        const abs = safeWritePath(root, path, github, words.lane);
         const rel = relative(realpathSync(root), abs).split(sep).join('/');
         const landing = landingPath(root, abs);
         const marked = protectedPaths(attrs, [...new Set([rel, landing])]);
-        if (marked.has(rel) || marked.has(landing)) return { error: `error: ${landing} is marked ${PROTECTED_ATTR} in .gitattributes: it is captured data and is never edited here. Leave it as it is and say in the summary that this finding is about data the fix lane does not change` };
+        if (marked.has(rel) || marked.has(landing)) return { error: `error: ${landing} is marked ${PROTECTED_ATTR} in .gitattributes: it is captured data and is never edited here. Leave it as it is and say in the summary that ${words.protectedNote}` };
         const now = staged().keep;
-        if (!now.includes(rel) && now.length >= LIMITS.files) return { error: `error: the fix already changes ${now.length} files, the limit; no further file is written` };
+        if (!now.includes(rel) && now.length >= LIMITS.files) return { error: `error: the ${words.work} already changes ${now.length} files, the limit; no further file is written` };
         return { abs, rel };
       };
       if (name === 'fix_edit') {
@@ -1761,17 +2036,18 @@ async function answerReview(ctx) {
         }
       }
       if (name === 'fix_describe') {
-        const why = descriptionProblem(input.body, pr.body);
+        const why = job.describe.problem(input.body);
         if (why) return `error: ${why}`;
         description = String(input.body).replace(/\r\n/g, '\n').trim();
-        return `the PR description is replaced with this text (${description.split('\n').length} lines) when the run finishes`;
+        return job.describe.kept(description.split('\n').length);
       }
       if (name === 'fix_run') {
         const a = allowedArgv(input.command, plan, root);
         if (a.error) return `error: ${a.error}`;
         const s = secondsLeft(Math.min(LIMITS.runMaxS, Math.max(1, Number(input.timeout_seconds) || LIMITS.runDefaultS)));
         if (!s) return 'error: the time budget is spent; call finish_fix now';
-        const r = record(a.argv, exec(a.argv, s));
+        if (a.argv[0] === plan.pm && a.argv[1] === 'run' && a.argv[2] === 'build') ranBuild = true;
+        const r = exec(a.argv, s);
         return `exit ${r.exit}${r.timedOut ? ' (timed out)' : ''}\n${capOutput(r.out)}`;
       }
       return `error: unknown tool ${name}`;
@@ -1779,65 +2055,126 @@ async function answerReview(ctx) {
 
     let bounces = 0;
     let tests = null;
+    let askedToDescribe = false;
+    // Edits the commit will not carry (staged().skipped: a protected file, .github/ where nothing
+    // there is written, a .gitattributes, an install's own change, a file over the size limit) are
+    // never in the gate's checkout, which holds the candidate tree alone. Once a gate has run they
+    // are put back here as the start commit has them, by this process's git, so the checkout the
+    // model goes on working in is the tree the gate tested; with no test script anywhere no gate
+    // runs and nothing is put back. What was put back is kept for the notes, which name every file
+    // left out.
+    const undone = new Map();
+    const undoSkipped = () => {
+      const { skipped } = staged();
+      for (const { path, why } of skipped) {
+        const tracked = git(root, genv, ['cat-file', '-e', `${start}:${path}`], { allowFail: true }) !== null;
+        if (tracked) git(root, genv, ['--literal-pathspecs', 'checkout', start, '--', path]);
+        else git(root, genv, ['--literal-pathspecs', 'clean', '-f', '-q', '--', path]);
+        undone.set(path, why);
+      }
+      git(root, genv, ['reset', '-q', start]);
+      return skipped.map((x) => x.path);
+    };
     const finalize = async (input) => {
-      const checked = checkFinish(input);
+      const checked = checkFinish(input, job.subject);
       if (checked.error) return checked;
       if (checked.sub.outcome === 'refused') return { sub: checked.sub };
-      if (testArgv && staged().keep.length) {
-        // The suite runs on the files as they are now, by the model or, failing that, here.
-        const now = stamp();
-        let t = [...runs].reverse().find((r) => r.isTest && r.stamp === now);
-        if (!t) {
-          const s = secondsLeft(LIMITS.runMaxS);
-          ctx.log?.(s ? '  no test run after the last edit: running the test script' : '  no test run after the last edit, and no time left to run one');
-          // No time to run the suite is a failed suite: a fix is never reported without its tests.
-          t = record(testArgv, s ? exec(testArgv, s) : { exit: 124, out: 'not run: the time budget was spent', timedOut: true });
-        }
+      // Where a change needs a description of its own, one that comes without is sent back once.
+      if (job.describe.required && description === null && !askedToDescribe && staged().keep.length) {
+        askedToDescribe = true;
+        return { error: job.describe.ask };
+      }
+      if (staged().keep.length) {
+        // The tree is the kept paths alone, so it is the same before and after a left-out edit is put back.
+        const t = gateTests(candidate().tree, checked.sub.subject);
+        // A change with no test script anywhere has no tests to report, whatever an earlier one had.
         tests = t;
-        if (t.exit !== 0 && bounces < LIMITS.testBounces) {
-          bounces++;
-          const failed = failingTests(t.out);
-          const named = failed.length ? `\nFailed: ${failed.join(', ')}` : '';
-          return { error: `The test script fails at your change (\`${t.command}\` exited ${t.exit}${t.timedOut ? ', timed out' : ''}):${named}\n${capOutput(t.out, 6_000)}\n\nFix it and run the tests again, then call finish_fix.` };
+        if (t) {
+          const putBack = undoSkipped();
+          if (t.exit !== 0 && bounces < LIMITS.testBounces) {
+            bounces++;
+            const failed = t.stage === 'test' ? failingTests(t.out) : [];
+            const named = failed.length ? `\nFailed: ${failed.join(', ')}` : '';
+            const what = { install: 'The install fails', build: 'The build script fails', test: 'The test script fails' }[t.stage];
+            const head = t.stage === 'manifest' ? `The change cannot be tested: ${t.out}.`
+              : `${what} at your change, in a clean checkout of it (\`${t.command}\` exited ${t.exit}${t.timedOut ? ', timed out' : ''}):${named}\n${capOutput(t.out, 6_000)}`;
+            return { error: `${head}\n\nThe gate checks out the change alone, with a HOME of its own, installs afresh${ranBuild ? ', runs the build script' : ''} and runs the tests: a file the commit does not carry (an ignored one, or one left out) is not there.`
+              + `${putBack.length ? `\n\nThese edits are not in the commit, so the gate ran without them, and they are now put back here as the start commit has them: ${putBack.join(', ')}.` : ''}\n\nFix it and run the tests again, then call finish_fix.` };
+          }
         }
       }
       return { sub: checked.sub };
     };
 
-    const protectedFiles = [...protectedPaths(attrs, files.map((f) => f.filename))];
-    const brief = buildBrief({ pr, files, headSha, review, items, plan, installNote, diff: buildDiff(files, LIMITS.diffChars), protectedFiles, githubFiles: [...github].sort(), history, lessons, run: ctx.run });
     let loop;
     let calls = 0;
-    try {
-      loop = await runLoop({
-        call: (messages, toolChoice) => (calls++, callModelWith(ctx, { system: ctx.system, messages, tools: TOOLS, toolChoice, maxTokens: LIMITS.maxTokens, timeoutMs: LIMITS.modelTimeoutMs, deadline, effort })),
-        tool: async (name, input) => tool(name, input), finalize, now: ctx.now, started, log: ctx.log, canForce: !rejectsForcedToolChoice(ctx.model),
-      }, brief);
-    } catch (e) {
-      // Past hardMs no model call starts: nothing is reported as fixed without the model finishing.
-      if (e instanceof OutOfTime) return refuse(unfinished(`the time budget was spent before the fix finished (${e.message}).`), { turns: calls });
-      if (e instanceof WriteFailed) return refuse(unfinished(e.message), { turns: calls });
-      throw e;
+    if (job.replay) {
+      // A verify run: the candidate's tree in this checkout as the model's edits were (the index
+      // and HEAD stay at the start commit), every path it changes counted as written, and the
+      // gate run once. A failing gate is the result: there is no model to answer it.
+      const r = job.replay;
+      git(root, genv, ['read-tree', '-m', '-u', start, r.tree]);
+      git(root, genv, ['reset', '-q', start]);
+      for (const p of changedPaths(root, genv)) written.add(p);
+      ranBuild = r.ranBuild === true;
+      // The description is held to the lane's own rule, as fix_describe would hold it: a candidate
+      // is never trusted to carry one the lane refuses.
+      const why = typeof r.description === 'string' ? job.describe.problem(r.description) : 'there is none';
+      if (why) return refuse(`the candidate's description cannot be used: ${why}`, { turns: r.turns });
+      description = r.description;
+      bounces = LIMITS.testBounces;
+      const f = await finalize({ outcome: 'fixed', subject: r.subject, summary: r.summary });
+      if (f.error) return refuse(`the candidate could not be finished: ${f.error}`, { turns: r.turns });
+      loop = { turns: r.turns, sub: f.sub };
+    } else {
+      const brief = job.brief({ plan, installNote, githubFiles: github ? [...github].sort() : [], attrs, git: (args) => git(root, genv, args) });
+      try {
+        loop = await runLoop({
+          call: (messages, toolChoice) => (calls++, callModelWith(ctx, { system: ctx.system, messages, tools: job.tools, toolChoice, maxTokens: LIMITS.maxTokens, timeoutMs: LIMITS.modelTimeoutMs, deadline, effort: job.effort })),
+          tool: async (name, input) => tool(name, input), finalize, now: ctx.now, started, log: ctx.log, canForce: !rejectsForcedToolChoice(ctx.model),
+          ask: words.ask, work: words.work,
+        }, brief);
+      } catch (e) {
+        // Past hardMs no model call starts: nothing is reported as fixed without the model finishing.
+        if (e instanceof OutOfTime) return refuse(unfinished(`the time budget was spent before the ${words.work} finished (${e.message}).`, words.work), { turns: calls });
+        if (e instanceof WriteFailed) return refuse(unfinished(e.message, words.work), { turns: calls });
+        throw e;
+      }
     }
     const turns = loop.turns;
     const testsRecord = tests ? {
       command: tests.command, exit_code: tests.exit, summary: summariseTests(tests.out),
       ...(tests.exit !== 0 ? { failing: failingTests(tests.out) } : {}),
     } : null;
-    if (loop.refused) return refuse(unfinished(`${loop.refused}.`), { turns, tests: testsRecord });
+    if (loop.refused) return refuse(unfinished(`${loop.refused}.`, words.work), { turns, tests: testsRecord });
     const sub = loop.sub;
-    if (sub.outcome === 'refused') return refuse(loop.forced ? unfinished(`the budget was spent before a fix was made. ${sub.reason}`) : sub.reason, { turns, tests: testsRecord });
+    if (sub.outcome === 'refused') return refuse(loop.forced ? unfinished(`the budget was spent before a ${words.work} was made. ${sub.reason}`, words.work) : sub.reason, { turns, tests: testsRecord });
 
     const st = staged();
+    // The notes name every file left out, those the test gate put back among them.
+    const skipped = [...st.skipped, ...[...undone].filter(([path]) => !st.skipped.some((x) => x.path === path)).map(([path, why]) => ({ path, why }))];
+    // A change that needs a description and never got one is described by what stands in for it.
+    if (job.describe.required && description === null && st.keep.length) description = job.describe.fallback(sub);
     const described = description !== null;
     if (!st.keep.length) {
-      return { record: fixRecord({ ...base, outcome: 'no_change', turns, tests: testsRecord, description: described, notes: renderNotes({ outcome: 'no_change', summary: sub.summary, skipped: st.skipped, tests: testsRecord, described }) }), description };
+      // With no file changed a description is a result only where it replaces an existing one.
+      const kept = described && job.describe.replaces === true;
+      return { record: job.record({ outcome: 'no_change', turns, tests: testsRecord, description: kept, notes: renderNotes({ outcome: 'no_change', summary: sub.summary, skipped, tests: testsRecord, described: kept }) }), description: kept ? description : null };
     }
-    if (st.keep.length > LIMITS.files) return refuse(`the fix changes ${st.keep.length} files; the limit is ${LIMITS.files}`, { turns, tests: testsRecord });
+    if (st.keep.length > LIMITS.files) return refuse(`the ${words.work} changes ${st.keep.length} files; the limit is ${LIMITS.files}`, { turns, tests: testsRecord });
     // Literal pathspecs: a file a command named `*` must not stage everything.
     git(root, genv, ['--literal-pathspecs', 'add', '-A', '--', ...st.keep]);
-    const diff = git(root, genv, ['diff', '--cached', '--binary', headSha]) ?? '';
-    const diffBytes = Buffer.byteLength(diff);
+    // The commit is the tree the gate tested: nothing runs between the gate and here, so a tree
+    // that differs is a fault, never a change to carry untested.
+    const tree = git(root, genv, ['write-tree']);
+    if (tests && tree !== tests.tree) throw new Error('the change is not the tree its tests ran on');
+    if (job.replay && tree !== job.replay.tree) throw new Error('the change this verify run would commit is not the candidate\'s tree');
+    // The diff as git wrote it: a file's bytes that are not UTF-8 are in a text hunk as they are,
+    // and diff.patch is written with them, never decoded and encoded again.
+    const patch = gitBytes(root, genv, ['diff', '--cached', '--binary', start]);
+    const diff = patch.toString('utf8');
+    const diffBytes = patch.length;
+    const patchFile = patch.length && patch[patch.length - 1] === 0x0a ? patch : Buffer.concat([patch, Buffer.from('\n')]);
     if (diffBytes > LIMITS.diffBytes) return refuse(`the diff is ${diffBytes} bytes; the limit is ${LIMITS.diffBytes}`, { turns, tests: testsRecord });
     // The index is what the bundle carries: a clean filter (a .gitattributes rule and a .git/config
     // entry a command can write) can stage bytes the working tree does not have.
@@ -1847,15 +2184,18 @@ async function answerReview(ctx) {
     const blobIssue = stagedProblem(root, genv, st.keep, runSecrets(ctx));
     if (blobIssue) return refuse(blobIssue, { turns });
     const common = { turns, tests: testsRecord, files: st.keep };
-    const notes = (outcome) => renderNotes({ outcome, summary: sub.summary, files: st.keep, skipped: st.skipped, tests: testsRecord, described: described && outcome === 'fixed' });
+    const notes = (outcome) => renderNotes({ outcome, summary: sub.summary, files: st.keep, skipped, tests: testsRecord, described: described && job.describe.replaces === true && outcome === 'fixed' });
 
     if (testsRecord && testsRecord.exit_code !== 0) {
-      writeFileSync(join(out, 'diff.patch'), `${diff}\n`);
-      return { record: fixRecord({ ...base, ...common, outcome: 'tests_failed', notes: notes('tests_failed') }) };
+      writeFileSync(join(out, 'diff.patch'), patchFile);
+      return { record: job.record({ ...common, outcome: 'tests_failed', notes: notes('tests_failed') }) };
     }
+    // What a verify run needs to build the result again: the summary, whether the build script ran,
+    // and the tree the gate tested, which the verify run's change must be byte for byte.
+    const replay = { summary: sub.summary, ran_build: ranBuild, tree };
     if (ctx.dryRun) {
-      writeFileSync(join(out, 'diff.patch'), `${diff}\n`);
-      return { record: fixRecord({ ...base, ...common, outcome: 'fixed', description: described, notes: notes('fixed') }), description };
+      writeFileSync(join(out, 'diff.patch'), patchFile);
+      return { record: job.record({ ...common, outcome: 'fixed', subject: sub.subject, description: described, notes: notes('fixed') }), description, replay };
     }
 
     // One commit as askalf, hooks off, then the message is checked and the bundle written.
@@ -1865,23 +2205,26 @@ async function answerReview(ctx) {
     mkdirSync(hooks, { recursive: true });
     git(root, genv, ['-c', `user.name=${AUTHOR.name}`, '-c', `user.email=${AUTHOR.email}`, '-c', `core.hooksPath=${hooks}`,
       'commit', '--quiet', '--no-verify', '-m', sub.subject]);
-    const message = git(root, genv, ['log', '-1', '--format=%B']) ?? '';
-    if (hasAttributionTrailer(message)) throw new Error('the commit message carries an attribution trailer');
+    // The message is the subject alone, and the lane's own check on a commit's message
+    // (job.refusedMessage) passes it.
+    const message = (git(root, genv, ['log', '-1', '--format=%B']) ?? '').replace(/\n+$/, '');
+    if (message !== sub.subject) throw new Error('the commit message is not the subject alone');
+    if (job.refusedMessage(message)) throw new Error('the commit message carries an attribution');
     const newHead = git(root, genv, ['rev-parse', 'HEAD']);
     // The commit holds the kept paths and nothing protected, checked on the commit itself. Under
     // .github/ it holds only the PR's own files, and removes none: a fix answers a finding in a
-    // workflow, it does not take the workflow away.
-    const landed = (git(root, genv, ['diff', '--name-only', '-z', '--no-renames', headSha, 'HEAD']) ?? '').split('\0').filter(Boolean);
-    const removed = (git(root, genv, ['diff', '--name-only', '-z', '--no-renames', '--diff-filter=D', headSha, 'HEAD']) ?? '').split('\0').filter(Boolean);
-    const stray = landed.filter((p) => !st.keep.includes(p) || /(?:^|\/)\.gitattributes$/.test(p) || (/^\.github(?:\/|$)/.test(p) && (!github.has(p) || removed.includes(p))));
+    // workflow, it does not take the workflow away. Where nothing there is written, it holds none.
+    const landed = (git(root, genv, ['diff', '--name-only', '-z', '--no-renames', start, 'HEAD']) ?? '').split('\0').filter(Boolean);
+    const removed = (git(root, genv, ['diff', '--name-only', '-z', '--no-renames', '--diff-filter=D', start, 'HEAD']) ?? '').split('\0').filter(Boolean);
+    const stray = landed.filter((p) => !st.keep.includes(p) || /(?:^|\/)\.gitattributes$/.test(p) || (/^\.github(?:\/|$)/.test(p) && (!github?.has(p) || removed.includes(p))));
     const marked = protectedPaths(attrs, landed);
-    if (stray.length || marked.size) throw new Error(`the commit carries a path the fix lane leaves out: ${[...new Set([...stray, ...marked])].join(', ').slice(0, 300)}`);
-    const commits = (git(root, genv, ['log', '--format=%H%x00%s', `${headSha}..HEAD`]) ?? '').split('\n').filter(Boolean)
+    if (stray.length || marked.size) throw new Error(`the commit carries a path the ${words.lane} leaves out: ${[...new Set([...stray, ...marked])].join(', ').slice(0, 300)}`);
+    const commits = (git(root, genv, ['log', '--format=%H%x00%s', `${start}..HEAD`]) ?? '').split('\n').filter(Boolean)
       .map((l) => { const [sha, subject] = l.split('\0'); return { sha, subject }; }).reverse();
-    const bundle = join(out, 'fix.bundle');
-    git(root, genv, ['bundle', 'create', bundle, `${headSha}..HEAD`]);
+    const bundle = join(out, job.bundle);
+    git(root, genv, ['bundle', 'create', bundle, `${start}..HEAD`]);
     git(root, genv, ['bundle', 'verify', bundle]);
-    return { record: fixRecord({ ...base, ...common, outcome: 'fixed', newHead, commits, description: described, notes: notes('fixed') }), description };
+    return { record: job.record({ ...common, outcome: 'fixed', subject: sub.subject, newHead, commits, description: described, notes: notes('fixed') }), description, replay };
   } finally {
     // Cleanup never replaces the result: a failure here is a warning.
     try { settle(); } catch (e) { ctx.log?.(`::warning::${e.message}`); }
@@ -1893,8 +2236,16 @@ async function answerReview(ctx) {
 
 // ---------- CLI ----------
 
-async function main() {
-  const env = process.env;
+/**
+ * What either entry point (this file's and build.mjs's) reads from the runner host before its own
+ * inputs: the env file, the prompt, the output directory, dario's address and credential, the
+ * effort and lessons settings, the run account and the proxy. A setup error is annotated and ends
+ * the process with 2. `work` names the lane's run in the one warning that needs it. Returns
+ * { need, secrets, effort, fetchTo, ctx }: need(name) reads a variable the lane cannot run without,
+ * fetchTo(origins) is the run's fetch, limited to those origins, dario and the lessons service,
+ * and ctx holds the fields every lane's run reads.
+ */
+export function hostSetup(env, work) {
   const need = (k, src = env) => { if (!src[k]) { console.error(`::error::${k} is not set`); process.exit(2); } return src[k]; };
   let secrets;
   try { secrets = parseEnvFile(readFileSync(need('FIX_ENV_FILE'), 'utf8')); } catch (e) {
@@ -1913,42 +2264,69 @@ async function main() {
   const { darioUrl, darioKey, darioSocket } = dario;
   const effortSetting = String(secrets.FIX_EFFORT ?? '').trim().toLowerCase();
   if (effortSetting && !EFFORT_LEVELS.includes(effortSetting)) {
-    console.log(`::warning::FIX_EFFORT is not one of ${EFFORT_LEVELS.join(', ')}; the fix runs with no effort field`);
+    console.log(`::warning::FIX_EFFORT is not one of ${EFFORT_LEVELS.join(', ')}; the ${work} runs with no effort field`);
   }
   const lessons = lessonsAccess(secrets);
-  const ctx = {
-    repo: need('REPO'), pr: Number(need('PR')), headSha: need('HEAD_SHA'), reviewUrl: need('REVIEW_URL'), checkout: need('CHECKOUT'), out,
-    run: runIdentity(process.env),
-    readToken: need('GH_READ_TOKEN'), darioUrl, darioKey, model: secrets.FIX_MODEL || DEFAULT_MODEL,
+  return {
+    need, secrets,
     effort: EFFORT_LEVELS.includes(effortSetting) ? effortSetting : '',
-    history: String(secrets.FIX_HISTORY ?? '').trim().toLowerCase() !== 'off',
-    lessons,
-    system,
-    fetch: onlyOrigins(withDarioSocket(globalThis.fetch, darioUrl, darioSocket), ['https://api.github.com', darioUrl, ...(lessons ? [lessons.url] : [])]),
-    sleep: (ms) => new Promise((r) => setTimeout(r, ms)), now: () => Date.now(),
-    dryRun: env.DRY_RUN === '1' || env.DRY_RUN === 'true',
-    // The run account and the proxy are host settings, from the same env file as the key.
-    runAs: secrets.FIX_RUN_AS || '', proxy: secrets.FIX_PROXY || '',
-    guardFiles: [env.FIX_ENV_FILE, env.FIX_PROMPT_FILE],
-    // A key socket is a credential the run account must not be able to use.
-    guardSockets: [darioSocket],
+    fetchTo: (origins) => onlyOrigins(withDarioSocket(globalThis.fetch, darioUrl, darioSocket), [...origins, darioUrl, ...(lessons ? [lessons.url] : [])]),
+    ctx: {
+      out,
+      run: runIdentity(env),
+      darioUrl, darioKey, model: secrets.FIX_MODEL || DEFAULT_MODEL,
+      lessons,
+      system,
+      sleep: (ms) => new Promise((r) => setTimeout(r, ms)), now: () => Date.now(),
+      dryRun: env.DRY_RUN === '1' || env.DRY_RUN === 'true',
+      // The run account and the proxy are host settings, from the same env file as the key.
+      runAs: secrets.FIX_RUN_AS || '', proxy: secrets.FIX_PROXY || '',
+      guardFiles: [env.FIX_ENV_FILE, env.FIX_PROMPT_FILE],
+      // A key socket is a credential the run account must not be able to use.
+      guardSockets: [darioSocket],
+    },
   };
+}
+
+/**
+ * The end of either entry point: run the lane and leave its record, whatever happens. `lane` is
+ * { name, run, record, save, exit }: the lane's name in the log, its run (ctx -> { record,
+ * description }), its record from the fields a refusal carries, the writer of its files and the
+ * exit status of a record. Ends the process.
+ */
+export async function runToExit(ctx, lane) {
   // The job log of a public repository is public: no line in it carries the key or the token.
   const hidden = runSecrets(ctx);
   ctx.log = (line) => console.log(maskSecrets(line, hidden));
-  // A job killed at its timeout or cancelled still leaves the ops tick a fix.json that says so.
-  saveFix(out, fixRecord({ ...ctx, outcome: 'refused', notes: renderNotes({ outcome: 'refused', reason: 'The fix run ended before it finished: the job timed out or was cancelled.' }) }));
+  const refused = (reason) => lane.record({ outcome: 'refused', notes: renderNotes({ outcome: 'refused', reason }) });
+  // A job killed at its timeout or cancelled still leaves the ops tick a record that says so.
+  lane.save(ctx.out, refused(`The ${lane.name} run ended before it finished: the job timed out or was cancelled.`));
   let record;
   let description = null;
-  try { ({ record, description = null } = await runFix(ctx)); } catch (e) {
-    console.error(`::error::the fix run could not finish: ${maskSecrets(e.message, hidden)}`);
-    record = fixRecord({ ...ctx, outcome: 'refused', notes: renderNotes({ outcome: 'refused', reason: unfinished(maskSecrets(e.message, hidden)) }) });
+  let replay = null;
+  try { ({ record, description = null, replay = null } = await lane.run(ctx)); } catch (e) {
+    console.error(`::error::the ${lane.name} run could not finish: ${maskSecrets(e.message, hidden)}`);
+    record = refused(unfinished(maskSecrets(e.message, hidden), lane.name));
   }
-  saveFix(out, record, description);
-  const line = `Redline fix: ${record.outcome}${record.new_head ? ` at ${record.new_head}` : ''}${record.files.length ? ` (${record.files.length} file${record.files.length === 1 ? '' : 's'})` : ''}`;
+  lane.save(ctx.out, record, description, replay);
+  const line = `Redline ${lane.name}: ${record.outcome}${record.new_head ? ` at ${record.new_head}` : ''}${record.files.length ? ` (${record.files.length} file${record.files.length === 1 ? '' : 's'})` : ''}`;
   console.log(line);
-  if (env.GITHUB_STEP_SUMMARY) appendFileSync(env.GITHUB_STEP_SUMMARY, `${line}\n\n${record.notes}\n`);
-  process.exit(exitCode(record));
+  if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, `${line}\n\n${record.notes}\n`);
+  process.exit(lane.exit(record));
+}
+
+async function main() {
+  const host = hostSetup(process.env, 'fix');
+  const { need, secrets } = host;
+  const ctx = {
+    repo: need('REPO'), pr: Number(need('PR')), headSha: need('HEAD_SHA'), reviewUrl: need('REVIEW_URL'), checkout: need('CHECKOUT'),
+    readToken: need('GH_READ_TOKEN'),
+    effort: host.effort,
+    history: String(secrets.FIX_HISTORY ?? '').trim().toLowerCase() !== 'off',
+    fetch: host.fetchTo(['https://api.github.com']),
+    ...host.ctx,
+  };
+  await runToExit(ctx, { name: 'fix', run: runFix, record: (fields) => fixRecord({ ...ctx, ...fields }), save: saveFix, exit: exitCode });
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {

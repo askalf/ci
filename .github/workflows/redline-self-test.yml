@@ -1,4 +1,4 @@
-# Runs Redline's tests on every pull request. The tests read the review and fix scripts, their
+# Runs Redline's tests on every pull request. The tests read the review, fix and build scripts, their
 # reusable workflows, this repo's callers and the pin bump workflow; they take seconds. `test` is a
 # required check on main, and a required check from a path-filtered workflow never reports on a PR
 # outside its paths, which then cannot merge.
@@ -64,12 +64,16 @@ jobs:
             echo "::notice::no run account on this runner; the run-account job runs the real run-account tests"
           fi
       - run: node scripts/redline/fix.test.mjs
-      # tools.json and fix-tools.json are TOOLS as files; this fails when review.mjs or fix.mjs
-      # changed a tool without them.
+      # The build lane, which is the fix lane's work in the checkout started from a ticket: its own
+      # inputs, brief, tools and record, its reusable workflow, and the run account as above.
+      - run: node scripts/redline/build.test.mjs
+      # tools.json, fix-tools.json and build-tools.json are TOOLS as files; this fails when
+      # review.mjs, fix.mjs or build.mjs changed a tool without them.
       - run: node scripts/redline/dump-tools.mjs --check
 
   # The fix tests against a real second account, on GitHub's runners, where the job has the sudo
   # to make one: the run account's boundary is tested on every PR whichever runner `test` used.
+  # The build tests follow, since a build runs its commands as the same account.
   # Not a required check, so a hosted outage holds no PR.
   run-account:
     runs-on: ubuntu-latest
@@ -86,5 +90,8 @@ jobs:
           sudo useradd --system --no-create-home --shell /usr/sbin/nologin redline-run
           command -v setfacl >/dev/null || { sudo apt-get update -q && sudo apt-get install -y -q acl; }
       - run: node scripts/redline/fix.test.mjs
+        env:
+          REDLINE_TEST_RUN_AS: redline-run
+      - run: node scripts/redline/build.test.mjs
         env:
           REDLINE_TEST_RUN_AS: redline-run

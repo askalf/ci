@@ -43,6 +43,29 @@
         "fix_write": "15b5c97773f720fbb873d5ed7e0a4db9b81fad8ce446ccfe9bcbf015ff270556",
         "(manifest)": "0e4479c1706c1f6cb18d0fdc445ae73b6cdfd77b9dca7e1025572822f0683b66"
       }
+    },
+    "redline-build": {
+      "source": "scripts/redline/build-tools.json",
+      "kind": "mcp",
+      "hash": "5379b05b5c8e93b6a2a453531a937859b0f72e31bc5470719f7d040ada95dc34",
+      "scannedAt": "2026-11-25T17:45:42.802Z",
+      "verdict": "clean",
+      "findings": 0,
+      "detection": {
+        "engine": "redstamp",
+        "version": "0.7.5"
+      },
+      "parts": {
+        "finish_fix": "3cdf05290a97710f994ffe02af3d498a21ded2269bc2e7628ac3808492b2aeda",
+        "fix_describe": "cea5209c6d7a8becabc6fafc7097682a5bf80edf2065840ec45bba50a52e92bc",
+        "fix_edit": "85efde0b60f5619dee714e2a41a8bc720506803b34c262d5a74635b75a190fb5",
+        "fix_list": "265160c0dedba110cf715301f353474129227d07d7a851f4ae80087053b9cdfd",
+        "fix_read": "6602780842c664ad906d6594066b42ac5190731898931c5cc98d6ec61a233bcc",
+        "fix_run": "cef3d4dda0e99c49b9bbcb9f0645ab8040f2abba41b3306205e26963d5e81ecf",
+        "fix_search": "0c3c7c9ca699a572122104ebafdb69ca3dfe5c03ffd3fa53f7c64d87c50643a1",
+        "fix_write": "0a09ed67222182edcb6719ac24067a060f401c6c1002cb4495881fdab0b72f11",
+        "(manifest)": "acd502ad1219833c49c6221b39ee6a69c24e68782ae03a8d9ea50ecaead480f8"
+      }
     }
   }
 }

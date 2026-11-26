@@ -8,7 +8,7 @@ gate our public repositories' pull requests pass through.
 - Be respectful. This project follows our [Code of Conduct](CODE_OF_CONDUCT.md).
 - Found a security issue? **Do not open a public issue**: follow [SECURITY.md](SECURITY.md) to report
   it privately.
-- The prompts the review and the fix read are never committed here. A pull request that adds prompt
+- The prompts the review, the fix and the build read are never committed here. A pull request that adds prompt
   text is closed; the tests use the stand-ins in `scripts/redline/test-fixtures/`.
 
 ## Development setup
@@ -24,11 +24,11 @@ node test-all.mjs
 
 `test-all.mjs` runs every test the `test` check runs, in the same list as
 `.github/workflows/redline-self-test.yml`: the review, post, local, public-text, drift-report,
-fleet-status, check, pin-bump and fix tests, and the `tools.json` drift check. Each file also runs
+fleet-status, check, pin-bump, fix and build tests, and the `tools.json` drift check. Each file also runs
 on its own, for example `node scripts/redline/post.test.mjs`.
 
 The model and GitHub are stubbed in every test: no credential, no network. The run-account tests
-in `fix.test.mjs` need a second account to `sudo` to and skip where there is none; CI provides one.
+in `fix.test.mjs` and `build.test.mjs` need a second account to `sudo` to and skip where there is none; CI provides one.
 
 ## Making a change
 
@@ -36,9 +36,10 @@ in `fix.test.mjs` need a second account to `sudo` to and skip where there is non
 2. Keep the change focused: one concern per pull request.
 3. Add or update tests for any behavior change. A change to what the review or the fix may do, to
    the ref check a called workflow performs, or to what the pin bump rewrites must be covered.
-4. A tool added to or changed in `review.mjs` or `fix.mjs` is also a change to `tools.json` or
-   `fix-tools.json`: `node scripts/redline/dump-tools.mjs` rewrites them, and `--check` fails CI
-   when they drift.
+4. A tool added to or changed in `review.mjs`, `fix.mjs` or `build.mjs` is also a change to
+   `tools.json`, `fix-tools.json` or `build-tools.json`: `node scripts/redline/dump-tools.mjs`
+   rewrites them, and `--check` fails CI when they drift. `build.mjs` words the fixer's tools for the
+   build lane, so a change to a tool in `fix.mjs` can move `build-tools.json` too.
 5. Run `node test-all.mjs` before pushing.
 6. Open a pull request against `main`.
 
@@ -65,8 +66,8 @@ imports must not need a build step, and a new target is a `fuzz/<name>.fuzz.js` 
 Every pull request must pass these checks to merge:
 
 - `test`: the tests `test-all.mjs` runs, on Node **22**
-- `verify pinned reviewer surface`: the tool definitions the reviewer and the fixer read are pinned
-  with truecopy, and the build fails when their bytes change
+- `verify pinned reviewer surface`: the tool definitions the reviewer, the fixer and the builder
+  read are pinned with truecopy, and the job fails when their bytes change
 - **CodeQL** static analysis of the scripts and the workflows
 
 OpenSSF Scorecard also runs on the repository.

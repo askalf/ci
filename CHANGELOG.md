@@ -117,6 +117,65 @@ names the commit's date and the pull request it came from.
   lines and anything outside those blocks are read as before, so attribution or a secret there
   still blocks. A block of that shape is left out whoever wrote it. `local.mjs pack --pr` carries
   the author's account type, so a local review reads the description as CI does.
+- The fix lane's test gate runs the suite on the tree the commit holds. It ran the suite in the
+  checkout the model worked in, or took the model's own last run there, and three things that are
+  not in the commit could make it pass: a change the commit leaves out (a `redline-protected`
+  file, `.github/` the pull request does not change, a `.gitattributes`, what the install dirtied,
+  a file over the size limit), a file the repository ignores that a command left (a local config,
+  a build's output), and a file in the commands' HOME. A suite that rewrote a tracked file after
+  its assertions also had those bytes committed untested. The kept paths are now staged as one tree
+  before the gate, and the suite runs on that tree in a checkout of its own made from the tree's
+  objects, with a copy of `.git` whose HEAD and index are a commit of that tree, which the run
+  account's git trusts from a config it cannot change, and a HOME of its own, as the run account,
+  so a suite that finds its tests through git finds the new ones. What
+  to run is read from that tree, so a change that adds the first test script, or moves to another
+  package manager, is tested as it stands; the install runs afresh there, the build script runs
+  first when the model ran it, and an install or a build that fails fails the gate, whatever a test
+  would say after it. A change that drops the start commit's test script, or whose package.json
+  does not parse, cannot pass; a package.json that is a link is read through it to a file in the
+  same tree, and one that links out of the tree is refused. What the suite writes is removed with its checkout, and the commit
+  must be the tree the gate tested. With a run account the suite is denied the model's checkout and
+  the commands' HOME until the gate ends. A path outside the checkouts and HOMEs, which a command
+  and the suite can each name, is not covered: the exec rows' sandbox gives the job its own
+  temporary directories and allows no namespace, so there is no private filesystem to give the
+  suite, and nothing is removed for it. The pull request's own CI runs the suite where none of that
+  exists. A change left out is also put back in the model's
+  checkout, and the bounce says which step failed in the clean checkout and names what was put
+  back. The commit's message is checked by the lane's own rule: the fix lane's attribution check
+  read `Claude support for offline builds`, a title the build lane allows, as a credit line, and
+  refused the build after the commit was made.
+- A file a command made as the run account is committed with the mode it was made with. The
+  cleanup after every command reads `X` from a file's group bits, which on a file with an ACL are
+  its mask, and the mask it sets from the named entries carries the execute bit a directory's
+  default entry gives them: from the second command on, a file the run account had made gained its
+  owner's execute bit, and git committed it as 100755. The cleanup now clears group execute before
+  it reads `X`; a file a command made executable stays so.
+- A build lane turns a ticket into a change. `redline-build-run.yml` and `scripts/redline/build.mjs`
+  start from a ticket's id, title and brief and a commit of the default branch, and leave one commit
+  on top of that commit, as the fix lane leaves one on a pull request's head. The work in the
+  checkout is the fix lane's own, split out of `fix.mjs` as `workCheckout` so both lanes run it: the
+  run account, the allowlist, the test gate, the limits, the secret checks and the commit as askalf.
+  Its commit carries nothing under `.github/`, it refuses to run on a runner without a run account
+  of its own (`FIX_RUN_AS`), and its base must be a commit of the caller's default branch. It must describe the
+  pull request its commit becomes (`fix_describe`, asked for once, then the summary stands in), in
+  text that passes the public-text check's credit rule (`creditHits`) either way,
+  keeps the model's own subject prefix, and uploads the `redline-build` artifact: `build.json`,
+  `notes.md`, `description.md` and `build.bundle`. It pushes nothing and opens no pull request. The
+  ticket's title and brief show in the run's log, so on a public repository they are public. A
+  second job, `verify`, on a runner job of its own, takes the build job's candidate
+  (`redline-build-candidate`, fetched by `candidate.mjs` with the job's token by the id the build
+  job gave as an output, with the attempt it ran in, so a re-run of `verify` alone reads the same
+  one) and nothing else: it builds a fixed candidate, a dry run's too, again on a fresh checkout
+  of the base with no model, from the tree the build job's gate tested (a dry run's diff is kept
+  as git wrote it, byte for byte), runs the test gate there, and alone uploads `redline-build`,
+  from an output directory of its own. So every fixed result is built again in a job that never
+  ran the model's commands, and when the tree declares a test script its suite must pass there; a
+  tree that declares none gives a fixed result with `tests: null`, which says only that the gate
+  ran no suite on the accepted tree, not what ran on an earlier one. A record that is not a fixed
+  build is passed on as it is. The fix lane's gate still runs in the job that edited, as before. Its
+  tools, the fix lane's with `fix_edit` among them and nothing under `.github/` written by either
+  write tool, are pinned as `build-tools.json`. No repository calls the workflow yet: a caller pins a
+  commit that is already on `main`, so it comes in a later change.
 - A review before the push can be given Redline's earlier verdicts on the branch.
   `local.mjs pack --earlier <file>`, once per file and oldest first, adds a verdict the author
   kept to the earlier reviews the brief shows: a CI review's `verdict.json`, or the saved output
