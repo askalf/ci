@@ -1356,6 +1356,29 @@ export function withoutCopiedNotes(body) {
   return [...out, ...lines.slice(i)].join('\n');
 }
 
+/** The repository kinds GitHub's `visibility` names. */
+const VISIBILITIES = new Set(['public', 'private', 'internal']);
+
+/**
+ * The brief's first line: the base repository, what kind it is, and where the pull request's branch
+ * is. The kind is GitHub's `visibility` (public, private or internal), else its `private`; nothing is
+ * said of it when neither tells, nor of the branch when the head repository is not known (GitHub's
+ * names are compared without case, as GitHub compares them). The rubric
+ * weighs both when it asks who can produce an input: only people given access to a private repository
+ * can open its pull requests, and a branch in the repository itself was pushed by someone who can
+ * write to it. Pure.
+ */
+export function repositoryLine(pr) {
+  const base = pr?.base?.repo ?? {};
+  const kind = VISIBILITIES.has(base.visibility) ? base.visibility : base.private === true ? 'private' : base.private === false ? 'public' : '';
+  const kindText = kind === 'private' ? ' (private: only people given access to it can open its pull requests)' : kind ? ` (${kind})` : '';
+  const head = pr?.head?.repo?.full_name;
+  const from = typeof head !== 'string' || !head ? ''
+    : head.toLowerCase() === String(base.full_name ?? '').toLowerCase() ? "; this pull request's branch is in the repository itself"
+    : `; this pull request's branch is in another repository, ${head}`;
+  return `Repository: ${base.full_name}${kindText}${from}`;
+}
+
 export function buildBrief(pr, files, commits, diff, protectedFiles = [], since = null) {
   // The cut comes after the copied text is left out, so Dependabot's own lines are what fill it.
   const body = (isDependabot(pr) ? withoutCopiedNotes(pr.body) : (pr.body ?? '')).slice(0, LIMITS.bodyChars);
@@ -1367,7 +1390,7 @@ export function buildBrief(pr, files, commits, diff, protectedFiles = [], since 
     return `- ${c.sha.slice(0, 7)} ${text.replace(/\n/g, '\n  ')}`;
   });
   return [
-    `Repository: ${pr.base.repo.full_name}`,
+    repositoryLine(pr),
     `PR #${pr.number}: ${pr.title}`,
     `Author: ${pr.user?.login}; ${pr.head.ref} -> ${pr.base.ref}; head ${pr.head.sha}`,
     '', 'PR description:', body || '(empty)',

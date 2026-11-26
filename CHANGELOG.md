@@ -13,6 +13,17 @@ names the commit's date and the pull request it came from.
 
 ## November 2026
 
+- Redline's brief opens with what kind of repository it is and where the pull request's branch is:
+  `Repository: <owner/name>`, then `(private: only people given access to it can open its pull
+  requests)`, `(public)` or `(internal)` as GitHub's `visibility` (else `private`) says, then `; this
+  pull request's branch is in the repository itself` or `; this pull request's branch is in another
+  repository, <owner/name>`; each part is left out when it is not known. The rubric decides a finding
+  that rests on an input by who can produce it: only people given access to a private repository can
+  open its pull requests, and a branch in the repository itself was pushed by someone who can write to
+  it. GitHub's names are compared without case. `local.mjs` `pack` records the kind in `change.json`
+  (`visibility`), and where the branch is (`headRepo`) only from a PR it reads, so a review before the
+  push opens with the gate's line, without the branch's place when there is no PR yet.
+
 - Redline keeps a review's verdict artifact, `redline-verdict`, and the second lens's,
   `redline-verdict-second`, for 30 days, not 7. A private repository's earlier verdicts are read
   only from those artifacts, so a pull request whose last verdict was more than seven days old was

@@ -294,6 +294,36 @@ console.log('\n  checkChange');
   check('a whole change passes', !checkChange(ok).error);
   check('short shas, no files or no repo fail', !!checkChange({ ...ok, head: { sha: 'abc' } }).error && !!checkChange({ ...ok, files: [] }).error
     && !!checkChange({ ...ok, repo: '' }).error && !!checkChange(null).error);
+  check('visibility is public, private, internal, null or absent; anything else fails',
+    ['public', 'private', 'internal', null, undefined].every((v) => !checkChange({ ...ok, visibility: v }).error)
+    && ['secret', true, 1, {}].every((v) => !!checkChange({ ...ok, visibility: v }).error));
+  check('headRepo is a name, null or absent; anything else fails',
+    ['a/b', null, undefined].every((v) => !checkChange({ ...ok, headRepo: v }).error) && ['', 1, {}].every((v) => !!checkChange({ ...ok, headRepo: v }).error));
+}
+{
+  // Whether the repository is private: from the PR when one is read, else from one read of the repository.
+  const asked = [];
+  const repoSays = (answer) => (r) => { asked.push(r); return answer; };
+  check('buildChange: no repository read given, nothing is said of its kind; with no PR, nothing of where the branch is',
+    buildChange(repo, { base: 'main', repo: 'askalf/r' }).visibility === null && buildChange(repo, { base: 'main', repo: 'askalf/r' }).headRepo === null);
+  check('buildChange: a fork\'s checkout that names the upstream as its base is not told it is the upstream\'s branch',
+    buildChange(repo, { base: 'main', repo: 'upstream/project', fetchRepo: repoSays({ private: true }) }).headRepo === null);
+  check('buildChange: the repository read names its kind, visibility first, private as the fallback',
+    buildChange(repo, { base: 'main', repo: 'askalf/r', fetchRepo: repoSays({ visibility: 'internal', private: true }) }).visibility === 'internal'
+    && buildChange(repo, { base: 'main', repo: 'askalf/r', fetchRepo: repoSays({ private: true }) }).visibility === 'private'
+    && buildChange(repo, { base: 'main', repo: 'askalf/r', fetchRepo: repoSays({ private: false }) }).visibility === 'public' && asked.at(-1) === 'askalf/r');
+  check('buildChange: a read that fails, or does not say, leaves it null',
+    buildChange(repo, { base: 'main', repo: 'askalf/r', fetchRepo: repoSays(null) }).visibility === null
+    && buildChange(repo, { base: 'main', repo: 'askalf/r', fetchRepo: repoSays({ private: 'yes' }) }).visibility === null);
+  check('buildChange: a repository really named local/repository is still looked up',
+    buildChange(repo, { base: 'main', repo: 'local/repository', fetchRepo: repoSays({ private: true }) }).visibility === 'private' && asked.at(-1) === 'local/repository');
+  const before = asked.length;
+  const fromPr = buildChange(repo, { base: 'main', repo: 'askalf/r', pr: 7, fetchRepo: repoSays({ private: false }),
+    fetchPr: () => ({ pr: { number: 7, title: 't', head: { repo: { full_name: 'someone/r' } }, base: { repo: { visibility: 'private' } } }, reviews: [] }) });
+  check('buildChange: the PR\'s own repositories answer first (kind and head), and the repository is not read again',
+    fromPr.visibility === 'private' && fromPr.headRepo === 'someone/r' && asked.length === before);
+  const gone = buildChange(repo, { base: 'main', repo: 'askalf/r', pr: 7, fetchPr: () => ({ pr: { number: 7, title: 't', head: { repo: null }, base: { repo: { private: true } } }, reviews: [] }) });
+  check('buildChange: a PR whose head repository is gone leaves the head repository null', gone.headRepo === null && gone.visibility === 'private');
 }
 
 console.log('\n  packChange and reviewLocal');
@@ -342,6 +372,28 @@ const unpacked = mkdtempSync(join(tmpdir(), 'redline-local-in-'));
   const ctx = { darioUrl: 'http://dario/', darioKey: 'k', model: 'routine', deepModel: 'deep', pinModel: '', fallbackModel: '', system: 'sys', context: '',
     fetch, sleep: async () => {}, now: () => (t += 1000), log: () => {} };
   check('a change that removes every file is reviewed, not refused', (await reviewLocal(ctx, out3)).verdict === 'APPROVE');
+  // The brief a local review sends names the repository's visibility, as the gate's does.
+  const out4 = mkdtempSync(join(tmpdir(), 'redline-local-private-in-'));
+  const x4 = spawnSync('tar', ['-x', '-f', '-'], { cwd: out4, input: packChange(r3, buildChange(r3, { base: 'main', repo: 'askalf/empty', fetchRepo: () => ({ visibility: 'private' }) })) });
+  const sent = [];
+  const seen = async (_url, init) => { sent.push(String(init?.body ?? '')); return fetch(); };
+  const v4 = x4.status === 0 ? await reviewLocal({ ...ctx, fetch: seen }, out4) : null;
+  // The brief says where the branch is only from a recorded head repository: this pack has none (no PR), so nothing.
+  check('reviewLocal: a private repository\'s brief says so on its first line, and says nothing of a branch it was not told of',
+    v4?.verdict === 'APPROVE' && sent.some((b) => b.includes('Repository: askalf/empty (private: only people given access to it can open its pull requests)\\n')));
+  rmSync(out4, { recursive: true, force: true });
+  // A pack that recorded where the branch is says so; one from before the field says nothing of it.
+  const out5 = mkdtempSync(join(tmpdir(), 'redline-local-head-in-'));
+  const c5 = { ...buildChange(r3, { base: 'main', repo: 'askalf/empty', fetchRepo: () => ({ visibility: 'private' }) }), headRepo: 'Askalf/Empty' };
+  const x5 = spawnSync('tar', ['-x', '-f', '-'], { cwd: out5, input: packChange(r3, c5) });
+  const sent5 = [];
+  const v5 = x5.status === 0 ? await reviewLocal({ ...ctx, fetch: async (_u, init) => { sent5.push(String(init?.body ?? '')); return fetch(); } }, out5) : null;
+  check('reviewLocal: a recorded head repository, spelt in another case, is the repository\'s own branch',
+    v5?.verdict === 'APPROVE' && sent5.some((b) => b.includes("(private: only people given access to it can open its pull requests); this pull request's branch is in the repository itself")));
+  rmSync(out5, { recursive: true, force: true });
+  const legacy = { ...c5 };
+  delete legacy.headRepo;
+  check('checkChange: a legacy pack with no headRepo still passes', !checkChange(legacy).error);
   rmSync(r3, { recursive: true, force: true });
   rmSync(out3, { recursive: true, force: true });
 }
