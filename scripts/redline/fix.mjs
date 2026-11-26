@@ -1341,7 +1341,9 @@ export function proxyEnv(proxy) {
 export function runAccount(name) {
   const s = String(name ?? '').trim();
   if (!s) return '';
-  if (!/^[a-z_][a-z0-9_-]{0,31}$/.test(s)) throw new Error(`FIX_RUN_AS is not a user name: ${s.slice(0, 40)}`);
+  // The value is never in the error: it is written to the record, its notes and the job's log, and
+  // a value that is no user name may be a key pasted into the wrong line of the env file.
+  if (!/^[a-z_][a-z0-9_-]{0,31}$/.test(s)) throw new Error('FIX_RUN_AS is not a user name (a lower-case letter or _, then up to 31 lower-case letters, digits, _ or -)');
   return s;
 }
 

@@ -435,16 +435,21 @@ if (!gitOk) {
     check('a tree that declares no test script is fixed in the verify job with tests: null, which says no suite ran there', !existsSync(join(repo.dir, 'package.json')) && v.record.tests === null && built.record.tests === null);
     rmSync(out2, { recursive: true, force: true });
     rmSync(c.dir, { recursive: true, force: true });
-    {
-      // A verify runner whose env file names no run account: refused before the candidate is read,
-      // so its bundle is never fetched into the checkout.
+    // A verify runner whose env file names no run account, or a value that is no user name (a key
+    // pasted into the wrong line): refused before the candidate is read, so its bundle is never
+    // fetched into the checkout, and the value is in no output file and not in the log.
+    const SENTINEL = 'DK_SENTINEL_0123456789abcdefghijklmnop';
+    for (const [name, line, why] of [
+      ['no run account', 'FIX_RUN_AS=', (notes) => notes === NO_RUN_ACCOUNT],
+      ['a run account value that is no user name', `FIX_RUN_AS=${SENTINEL}`, (notes) => /^FIX_RUN_AS is not a user name/.test(notes)],
+    ]) {
       const v2 = fresh();
       const cliDir = mkdtempSync(join(tmpdir(), 'redline-build-verify-cli-'));
       const prompt = join(cliDir, 'build-prompt.md');
       copyFileSync(fileURLToPath(new URL('./test-fixtures/fix-prompt.md', import.meta.url)), prompt);
       chmodSync(prompt, 0o600);
       const envFile = join(cliDir, 'fix.env');
-      writeFileSync(envFile, 'DARIO_API_KEY=dk_test_0123456789\nDARIO_URL=http://127.0.0.1:9\nFIX_RUN_AS=\n');
+      writeFileSync(envFile, `DARIO_API_KEY=dk_test_0123456789\nDARIO_URL=http://127.0.0.1:9\n${line}\n`);
       const outDir = join(cliDir, 'verify-out');
       mkdirSync(outDir);
       const x = spawnSync(process.execPath, [fileURLToPath(new URL('./build.mjs', import.meta.url))], { encoding: 'utf8', env: {
@@ -453,9 +458,10 @@ if (!gitOk) {
         GITHUB_RUN_ID: '7', GITHUB_RUN_ATTEMPT: '1', BUILD_CANDIDATE: w.out, BUILD_RUN_ATTEMPT: '1',
       } });
       const rec = existsSync(join(outDir, 'build.json')) ? JSON.parse(readFileSync(join(outDir, 'build.json'), 'utf8')) : {};
-      check('a verify runner with no run account is refused before the candidate is read: its commit is never fetched into the checkout',
-        x.status === 1 && rec.outcome === 'refused' && rec.notes === NO_RUN_ACCOUNT && v2.git(['cat-file', '-e', `${built.record.new_head}^{commit}`]) === null
-        && v2.git(['status', '--porcelain']) === '', `${x.status} ${rec.notes} ${x.stderr}`);
+      const written = readdirSync(outDir).map((f) => readFileSync(join(outDir, f), 'utf8')).join('\n');
+      check(`a verify runner with ${name} is refused before the candidate is read: its commit is never fetched into the checkout, and the value is written nowhere`,
+        x.status === 1 && rec.outcome === 'refused' && why(String(rec.notes ?? '')) && v2.git(['cat-file', '-e', `${built.record.new_head}^{commit}`]) === null
+        && v2.git(['status', '--porcelain']) === '' && !written.includes(SENTINEL) && !`${x.stdout}${x.stderr}`.includes(SENTINEL), `${x.status} ${rec.notes} ${x.stderr}`);
       rmSync(cliDir, { recursive: true, force: true });
       rmSync(v2.dir, { recursive: true, force: true });
     }
