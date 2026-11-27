@@ -534,6 +534,10 @@ console.log('\n  earlier reviews on the PR');
     const longCommit = mk(`${'z'.repeat(LIMITS.commitChars)}TAIL`);
     check('a long commit message is cut, and says so', longCommit.includes(`\n  [message cut at ${LIMITS.commitChars} characters]`) && !longCommit.includes('TAIL'));
     check('a commit message at the limit is not cut', !mk('z'.repeat(LIMITS.commitChars)).includes('[message cut'));
+    const described = (body) => buildBrief({ number: 1, title: 't', body, user: { login: 'a' }, head: { ref: 'h', sha: HEAD }, base: { ref: 'main', repo: { full_name: 'askalf/r' } } }, [], [], 'diff');
+    const longBody = described(`${'d'.repeat(LIMITS.bodyChars)}TAIL`);
+    check('a long description is cut, and says so', longBody.includes(`${'d'.repeat(LIMITS.bodyChars)}\n[description cut at ${LIMITS.bodyChars} characters]`) && !longBody.includes('TAIL'));
+    check('a description at the limit is not cut', !described('d'.repeat(LIMITS.bodyChars)).includes('[description cut'));
   }
   const { ctx, calls } = world({ reviews: [ask('The loop skips the last item.')], turns: [submit(APPROVE)] });
   await runReview(ctx);
@@ -1984,7 +1988,7 @@ console.log('\n  the delta since the last verdict');
       !bot.includes('UPSTREAM-') && !quoteIsGrounded(NOTE, corpusOf(bot)) && quoteIsGrounded('A NOTE A PERSON ADDED, on a requirement <2.0 and `code`', corpusOf(bot)) && bot.includes(MARK('Release notes')));
     check('...the same description is not filtered for a person, for an account that only carries the name, for a bot under another name, or with no author type',
       [{ login: 'a', type: 'User' }, { login: DEPENDABOT_LOGIN, type: 'User' }, { login: 'dependabot', type: 'Bot' }, { login: DEPENDABOT_LOGIN }].every((u) => quoteIsGrounded(NOTE, corpusOf(prBy(u)))));
-    const LONG = bodyOf(`<li>${'UPSTREAM-LONG '.repeat(700)}</li>`).join('\n');
+    const LONG = bodyOf(`<li>${'UPSTREAM-LONG '.repeat(Math.ceil(LIMITS.bodyChars / 14) + 100)}</li>`).join('\n');
     check('...the description\'s cut comes after the copied text is left out: a second update below a long block is still shown',
       LONG.indexOf('Updates `beta`') > LIMITS.bodyChars && prBy({ login: DEPENDABOT_LOGIN, type: 'Bot' }, LONG).includes('Updates `beta` from 2.0.0 to 2.1.0') && !prBy({ login: 'a', type: 'User' }, LONG).includes('Updates `beta` from 2.0.0 to 2.1.0'));
   }

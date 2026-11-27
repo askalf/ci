@@ -13,6 +13,10 @@ names the commit's date and the pull request it came from.
 
 ## November 2026
 
+- Redline's brief gives a pull request's description 20,000 characters instead of 8,000, and a
+  description cut there ends with `[description cut at 20000 characters]`, as a cut commit message
+  already does. The cut was bare, so a longer description read as one that ends mid-sentence, and was
+  reviewed as one.
 - Redline's brief opens with what kind of repository it is and where the pull request's branch is:
   `Repository: <owner/name>`, then `(private: only people given access to it can open its pull
   requests)`, `(public)` or `(internal)` as GitHub's `visibility` (else `private`) says, then `; this
