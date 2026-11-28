@@ -10,7 +10,7 @@ import { join } from 'node:path';
 import {
   parseDispatchTitle, pinOnlyPatchSha, callerPin, referencedPin, runFromApi, zipEntry, exitCode, postRun,
   ruleNotYetReviewed, rulePrRun, ruleDispatchRun, ruleNoCiChanges, ruleDispatchOnDefault, rulePinnedOnMain, ruleVerdictMatches,
-  baseCallerChoice, CALLER_PATH, BASE_CALLER_COMMITS,
+  baseCallerChoice, CALLER_PATH, BASE_CALLER_COMMITS, plainLine, refusalReasons,
 } from './post.mjs';
 
 let pass = 0;
@@ -158,7 +158,7 @@ function world(o = {}) {
       return json(200, list);
     }
     if (p === `/repos/${REPO}/pulls/5/reviews` && method === 'POST') {
-      return json(s.postStatus, s.postStatus === 200 ? { html_url: 'https://github.com/askalf/demo/pull/5#review' } : { message: 'nope' });
+      return json(s.postStatus, s.postStatus === 200 ? { html_url: 'https://github.com/askalf/demo/pull/5#review' } : (s.postAnswer ?? { message: 'nope' }));
     }
     return json(404, { message: `no stub for ${method} ${p}` });
   };
@@ -395,6 +395,26 @@ console.log('\n  postRun, pull_request');
   const w = world({ postStatus: 422 });
   const out = await postRun(w.ctx);
   check('a failed post fails the run, sent once', out[0].outcome === 'failed' && w.posts().length === 1 && exitCode(out) === 1);
+  check('with no errors list the reason is the status and the message', out[0].reason === 'the post failed: HTTP 422 nope');
+}
+{
+  const w = world({ postStatus: 422, postAnswer: { message: 'Unprocessable Entity', errors: ['Can not approve your own pull request'] } });
+  const out = await postRun(w.ctx);
+  check("a refused post says GitHub's reason", out[0].outcome === 'failed' && out[0].reason === 'the post failed: HTTP 422 Unprocessable Entity: Can not approve your own pull request' && w.posts().length === 1);
+}
+{
+  check('reasons: strings and objects with a message, joined', refusalReasons({ errors: ['one', { message: 'two' }] }) === ': one; two');
+  check('reasons: entries with no text are left out', refusalReasons({ errors: [null, 7, {}, { message: 9 }, '', '  ', 'kept'] }) === ': kept');
+  check('reasons: no list, no reasons', refusalReasons({}) === '' && refusalReasons(null) === '' && refusalReasons({ errors: 'x' }) === '' && refusalReasons({ errors: [] }) === '');
+  const hostile = refusalReasons({ errors: ['line one\n::error::made up\r\n![x](https://e.example/a) <img src=x> `c` | [l](u)'] });
+  check('reasons: one line, no markup characters', !/[\r\n<>\[\]()`|!]/.test(hostile) && hostile.startsWith(': line one ::error::made up'));
+  check('reasons: each is bounded, and so is the whole', refusalReasons({ errors: ['a'.repeat(500)] }).length === 2 + 120 && refusalReasons({ errors: Array.from({ length: 50 }, () => 'b'.repeat(100)) }).length === 2 + 300);
+  check('plainLine: a non-string is empty, text is trimmed and cut', plainLine(undefined, 10) === '' && plainLine({ a: 1 }, 10) === '' && plainLine('  abc\tdef  ', 5) === 'abc d');
+}
+{
+  const w = world({ postStatus: 422, postAnswer: { message: 'Unprocessable\nEntity', errors: ['a\nb'] } });
+  const out = await postRun(w.ctx);
+  check('neither the message nor a reason can add a line to the result', out[0].reason === 'the post failed: HTTP 422 Unprocessable Entity: a b');
 }
 {
   const w = world({ failRead: /\/contents\// });

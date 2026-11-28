@@ -445,6 +445,28 @@ async function prFiles(ctx, pr) {
 }
 
 /** Post the review once, as sprayberry-redline. Never retried; see the header. */
+/**
+ * One line of plain text from a string GitHub answered with, at most `max` characters. The text
+ * goes to the job log, a workflow annotation and the step summary, which is Markdown, so anything
+ * outside printable ASCII becomes a space (a line break could start a line of its own there) and
+ * so do the characters that make a tag, a link, an image, code or a table cell there.
+ */
+export function plainLine(value, max) {
+  return String(typeof value === 'string' ? value : '').replace(/[^\x20-\x7e]+/g, ' ').replace(/[<>\[\]()`|!\\]/g, ' ').replace(/ +/g, ' ').trim().slice(0, max);
+}
+
+/**
+ * GitHub's own reasons for refusing a post, from the `errors` list of its answer: ": a; b", or ''
+ * when it gave none. On a 422 the `message` says only "Unprocessable Entity"; the reason (an
+ * account approving its own pull request, a comment on a line outside the diff) is in `errors`, as
+ * strings or as objects with a message. Each is cleaned by plainLine and the whole is bounded.
+ */
+export function refusalReasons(data) {
+  const list = Array.isArray(data?.errors) ? data.errors.slice(0, 10) : [];
+  const text = list.map((e) => plainLine(typeof e === 'string' ? e : e?.message, 120)).filter(Boolean).join('; ').slice(0, 300);
+  return text ? `: ${text}` : '';
+}
+
 async function postReview(ctx, prNumber, review) {
   try {
     const res = await ctx.fetch(`https://api.github.com/repos/${ctx.repo}/pulls/${prNumber}/reviews`, {
@@ -454,7 +476,7 @@ async function postReview(ctx, prNumber, review) {
       signal: AbortSignal.timeout(30_000),
     });
     const data = await res.json().catch(() => ({}));
-    if (res.status < 200 || res.status >= 300) return { ok: false, why: `HTTP ${res.status} ${String(data?.message ?? '').slice(0, 200)}` };
+    if (res.status < 200 || res.status >= 300) return { ok: false, why: `HTTP ${res.status} ${plainLine(data?.message, 200)}${refusalReasons(data)}` };
     return { ok: true, url: String(data?.html_url ?? '') };
   } catch (e) {
     return { ok: false, why: e.message };

@@ -13,6 +13,11 @@ names the commit's date and the pull request it came from.
 
 ## November 2026
 
+- A post GitHub refuses now says why. The reason of a refused review is in the `errors` list of
+  GitHub's answer (a 422's `message` is only "Unprocessable Entity"), and the post step logged the
+  status and the message alone, so a second reviewer whose token belonged to the pull request's
+  author read as `HTTP 422 Unprocessable Entity` and nothing more. The failure line now carries
+  those reasons, each cleaned to one line of plain text and bounded, as the message is.
 - A round after a verdict no longer takes a rewritten branch's whole change for the change since the
   last review. GitHub compares `base...head` from the two commits' merge base, so once a branch was
   rebased, squashed or amended, the compare of the head last judged and the new one listed the whole
