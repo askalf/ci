@@ -445,6 +445,81 @@ async function prFiles(ctx, pr) {
 }
 
 /** Post the review once, as sprayberry-redline. Never retried; see the header. */
+/**
+ * One line of printable ASCII from a string GitHub answered with, at most `max` characters:
+ * anything else becomes a space and runs of spaces close up. This normalizes and bounds the text
+ * and nothing more. What an output does with it is that output's business: commandData for an
+ * annotation, literal for the step summary.
+ */
+export function plainLine(value, max) {
+  return String(typeof value === 'string' ? value : '').replace(/[^\x20-\x7e]+/g, ' ').replace(/ +/g, ' ').trim().slice(0, max);
+}
+
+/**
+ * GitHub's own reasons for refusing a post, from the `errors` list of its answer: ": a; b", or ''
+ * when it gave none. On a 422 the `message` says only "Unprocessable Entity"; the reason (an
+ * account approving its own pull request, a comment on a line outside the diff) is in `errors`, as
+ * strings or as objects with a message. The first ten entries are read, each through plainLine,
+ * and the whole is bounded.
+ */
+export function refusalReasons(data) {
+  const list = Array.isArray(data?.errors) ? data.errors.slice(0, 10) : [];
+  const text = list.map((e) => plainLine(typeof e === 'string' ? e : e?.message, 120)).filter(Boolean).join('; ').slice(0, 300);
+  return text ? `: ${text}` : '';
+}
+
+/**
+ * Text as the data of a workflow command (`::error::`, `::warning::`). The runner decodes %25, %0D
+ * and %0A in a command's message, so a literal "%0A" in the text would become a line break in the
+ * annotation: the percent sign is encoded first, then the two line breaks themselves.
+ */
+export function commandData(text) {
+  return String(text ?? '').replace(/%/g, '%25').replace(/\r/g, '%0D').replace(/\n/g, '%0A');
+}
+
+/**
+ * Text as a plain line of the job log, one that is no annotation. A line break would start a line
+ * of its own, and the runner reads its older command form, `##[name]data`, wherever that stands in
+ * a line, so a line break becomes a space and `##[` is parted.
+ */
+export function logLine(text) {
+  return String(text ?? '').replace(/[\r\n]+/g, ' ').replace(/##\[/g, '## [');
+}
+
+/**
+ * Text as a Markdown code span, for the step summary: shown as written, so a bare URL in it is not
+ * made a link and no tag, image or table cell in it is rendered. The fence is one backtick longer
+ * than the longest run of them in the text, and line breaks become spaces (a code span is one line).
+ */
+export function literal(text) {
+  const s = String(text ?? '').replace(/[\r\n]+/g, ' ');
+  const longest = Math.max(0, ...(s.match(/`+/g) ?? []).map((run) => run.length));
+  const fence = '`'.repeat(longest + 1);
+  return `${fence} ${s} ${fence}`;
+}
+
+// The link a posted review is reported with comes from GitHub's answer too. It is shown only when
+// it is an https address on github.com made of the characters such an address uses; anything else
+// is left out, so the link can add no line and no markup to either output.
+const REVIEW_LINK = /^https:\/\/github\.com\/[A-Za-z0-9._\/#?=&%+-]{1,280}$/;
+
+/**
+ * The two lines one result is reported with: `log` for the job log (an annotation when the result
+ * is failed or refused) and `summary` for the step summary. A reason can hold text this job did not
+ * write (GitHub's answer to a refused post, a run's title), so each output gets the reason encoded
+ * for that output and neither takes it raw. The link follows the reason only when REVIEW_LINK
+ * takes it.
+ */
+export function resultLines(repo, runId, r) {
+  const ref = r.pr ? `${repo}#${r.pr}` : `${repo} run ${runId}`;
+  const url = typeof r.url === 'string' && REVIEW_LINK.test(r.url) ? ` ${r.url}` : '';
+  const line = `${ref}: ${r.outcome}: ${r.reason}${url}`;
+  const log = r.outcome === 'failed' ? `::error::${commandData(line)}`
+    : r.outcome === 'refused' ? `::warning::${commandData(line)}`
+    : logLine(line);
+  return { log, summary: `${ref}: ${r.outcome}: ${literal(r.reason)}${url}` };
+}
+
 async function postReview(ctx, prNumber, review) {
   try {
     const res = await ctx.fetch(`https://api.github.com/repos/${ctx.repo}/pulls/${prNumber}/reviews`, {
@@ -454,7 +529,7 @@ async function postReview(ctx, prNumber, review) {
       signal: AbortSignal.timeout(30_000),
     });
     const data = await res.json().catch(() => ({}));
-    if (res.status < 200 || res.status >= 300) return { ok: false, why: `HTTP ${res.status} ${String(data?.message ?? '').slice(0, 200)}` };
+    if (res.status < 200 || res.status >= 300) return { ok: false, why: `HTTP ${res.status} ${plainLine(data?.message, 200)}${refusalReasons(data)}` };
     return { ok: true, url: String(data?.html_url ?? '') };
   } catch (e) {
     return { ok: false, why: e.message };
@@ -605,12 +680,9 @@ async function main() {
   };
   const results = await postRun(ctx);
   for (const r of results) {
-    const ref = r.pr ? `${ctx.repo}#${r.pr}` : `${ctx.repo} run ${ctx.runId}`;
-    const line = `${ref}: ${r.outcome}: ${r.reason}${r.url ? ` ${r.url}` : ''}`;
-    if (r.outcome === 'failed') console.log(`::error::${line}`);
-    else if (r.outcome === 'refused') console.log(`::warning::${line}`);
-    else console.log(line);
-    if (env.GITHUB_STEP_SUMMARY) appendFileSync(env.GITHUB_STEP_SUMMARY, `${line}\n`);
+    const { log, summary } = resultLines(ctx.repo, ctx.runId, r);
+    console.log(log);
+    if (env.GITHUB_STEP_SUMMARY) appendFileSync(env.GITHUB_STEP_SUMMARY, `${summary}\n`);
   }
   process.exit(exitCode(results));
 }

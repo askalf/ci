@@ -10,7 +10,7 @@ import { join } from 'node:path';
 import {
   parseDispatchTitle, pinOnlyPatchSha, callerPin, referencedPin, runFromApi, zipEntry, exitCode, postRun,
   ruleNotYetReviewed, rulePrRun, ruleDispatchRun, ruleNoCiChanges, ruleDispatchOnDefault, rulePinnedOnMain, ruleVerdictMatches,
-  baseCallerChoice, CALLER_PATH, BASE_CALLER_COMMITS,
+  baseCallerChoice, CALLER_PATH, BASE_CALLER_COMMITS, plainLine, refusalReasons, commandData, logLine, literal, resultLines,
 } from './post.mjs';
 
 let pass = 0;
@@ -158,7 +158,7 @@ function world(o = {}) {
       return json(200, list);
     }
     if (p === `/repos/${REPO}/pulls/5/reviews` && method === 'POST') {
-      return json(s.postStatus, s.postStatus === 200 ? { html_url: 'https://github.com/askalf/demo/pull/5#review' } : { message: 'nope' });
+      return json(s.postStatus, s.postStatus === 200 ? { html_url: 'https://github.com/askalf/demo/pull/5#review' } : (s.postAnswer ?? { message: 'nope' }));
     }
     return json(404, { message: `no stub for ${method} ${p}` });
   };
@@ -395,6 +395,58 @@ console.log('\n  postRun, pull_request');
   const w = world({ postStatus: 422 });
   const out = await postRun(w.ctx);
   check('a failed post fails the run, sent once', out[0].outcome === 'failed' && w.posts().length === 1 && exitCode(out) === 1);
+  check('with no errors list the reason is the status and the message', out[0].reason === 'the post failed: HTTP 422 nope');
+}
+{
+  const w = world({ postStatus: 422, postAnswer: { message: 'Unprocessable Entity', errors: ['Can not approve your own pull request'] } });
+  const out = await postRun(w.ctx);
+  check("a refused post says GitHub's reason", out[0].outcome === 'failed' && out[0].reason === 'the post failed: HTTP 422 Unprocessable Entity: Can not approve your own pull request' && w.posts().length === 1);
+}
+{
+  check('reasons: strings and objects with a message, joined', refusalReasons({ errors: ['one', { message: 'two' }] }) === ': one; two');
+  check('reasons: entries with no text are left out', refusalReasons({ errors: [null, 7, {}, { message: 9 }, '', '  ', 'kept'] }) === ': kept');
+  check('reasons: no list, no reasons', refusalReasons({}) === '' && refusalReasons(null) === '' && refusalReasons({ errors: 'x' }) === '' && refusalReasons({ errors: [] }) === '');
+  const hostile = refusalReasons({ errors: ['line one\n::error::made up\r\n![x](https://e.example/a) <img src=x> `c` | [l](u)'] });
+  check('reasons: one line of printable text, left for the outputs to encode', hostile === ': line one ::error::made up ![x](https://e.example/a) <img src=x> `c` | [l](u)');
+  check('reasons: each is bounded, and so is the whole', refusalReasons({ errors: ['a'.repeat(500)] }).length === 2 + 120 && refusalReasons({ errors: Array.from({ length: 50 }, () => 'b'.repeat(100)) }).length === 2 + 300);
+  const eleven = Array.from({ length: 11 }, (_, i) => `r${i + 1}`);
+  check('reasons: only the first ten entries are read', refusalReasons({ errors: eleven }) === `: ${eleven.slice(0, 10).join('; ')}`);
+  check('plainLine: a non-string is empty, text is trimmed and cut', plainLine(undefined, 10) === '' && plainLine({ a: 1 }, 10) === '' && plainLine('  abc\tdef  ', 5) === 'abc d');
+}
+{
+  check('an annotation: a literal %0A stays text, a line break is encoded', commandData('50% of a%0Ab\r\nc') === '50%25 of a%250Ab%0D%0Ac');
+  check('a plain log line: one line, and no older-form command in it', logLine('a\r\nb ##[add-mask]x ###[error]y') === 'a b ## [add-mask]x ### [error]y');
+  check('the summary: a bare URL is inside a code span', literal('see https://e.example/a') === '` see https://e.example/a `');
+  check('the summary: the fence outruns the backticks in the text', literal('a `b` ``c``') === '``` a `b` ``c`` ```');
+  check('the summary: a code span is one line', literal('a\r\nb') === '` a b `');
+  const refusedPost = { outcome: 'failed', pr: 5, reason: 'the post failed: HTTP 422 Unprocessable Entity: see https://e.example/a %0A::error::made up' };
+  const lines = resultLines('askalf/demo', '77', refusedPost);
+  check('a failed result is one error annotation whose percent signs are data',
+    lines.log === '::error::askalf/demo#5: failed: the post failed: HTTP 422 Unprocessable Entity: see https://e.example/a %250A::error::made up');
+  check('and its reason is literal text in the summary',
+    lines.summary === 'askalf/demo#5: failed: ` the post failed: HTTP 422 Unprocessable Entity: see https://e.example/a %0A::error::made up `');
+  const refused = resultLines('askalf/demo', '77', { outcome: 'refused', pr: 5, reason: 'a\nb' });
+  check('a refused result is one warning annotation', refused.log === '::warning::askalf/demo#5: refused: a%0Ab' && refused.summary === 'askalf/demo#5: refused: ` a b `');
+  const posted = resultLines('askalf/demo', '77', { outcome: 'posted', pr: 5, reason: 'posted APPROVE at abc1234', url: 'https://github.com/askalf/demo/pull/5#review' });
+  check('a posted result keeps its link outside the code span',
+    posted.log === 'askalf/demo#5: posted: posted APPROVE at abc1234 https://github.com/askalf/demo/pull/5#review'
+    && posted.summary === 'askalf/demo#5: posted: ` posted APPROVE at abc1234 ` https://github.com/askalf/demo/pull/5#review');
+  const link = (url) => resultLines('askalf/demo', '77', { outcome: 'posted', pr: 5, reason: 'r', url });
+  const none = { log: 'askalf/demo#5: posted: r', summary: 'askalf/demo#5: posted: ` r `' };
+  const same = (a, b) => a.log === b.log && a.summary === b.summary;
+  check('a link with a line break, or one that ends in one, is left out', same(link('https://github.com/a\n::error::made up'), none) && same(link('https://github.com/a\n'), none));
+  check('a link to another host is left out', same(link('https://github.com.e.example/a'), none) && same(link('http://github.com/a'), none) && same(link('https://e.example/github.com/a'), none));
+  check('a link carrying markup is left out', same(link('https://github.com/a](https://e.example)'), none) && same(link('https://github.com/a<img src=x>'), none) && same(link('https://github.com/a b'), none));
+  check('a link that is not text, or is too long, is left out', same(link({ a: 1 }), none) && same(link(undefined), none) && same(link(`https://github.com/${'a'.repeat(281)}`), none));
+  const titled = resultLines('askalf/demo', '77', { outcome: 'skipped', pr: 5, reason: 'run 9 is titled "##[error]made up", which names no review' });
+  check('a skipped result cannot carry a command from a title', titled.log === 'askalf/demo#5: skipped: run 9 is titled "## [error]made up", which names no review');
+  const skipped = resultLines('askalf/demo', '77', { outcome: 'skipped', pr: 0, reason: 'one\ntwo' });
+  check('a result for no pull request names the run, and a plain log line stays one line', skipped.log === 'askalf/demo run 77: skipped: one two' && skipped.summary === 'askalf/demo run 77: skipped: ` one two `');
+}
+{
+  const w = world({ postStatus: 422, postAnswer: { message: 'Unprocessable\nEntity', errors: ['a\nb'] } });
+  const out = await postRun(w.ctx);
+  check('neither the message nor a reason can add a line to the result', out[0].reason === 'the post failed: HTTP 422 Unprocessable Entity: a b');
 }
 {
   const w = world({ failRead: /\/contents\// });
