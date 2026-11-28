@@ -13,6 +13,19 @@ names the commit's date and the pull request it came from.
 
 ## November 2026
 
+- A round after a verdict no longer takes a rewritten branch's whole change for the change since the
+  last review. GitHub compares `base...head` from the two commits' merge base, so once a branch was
+  rebased, squashed or amended, the compare of the head last judged and the new one listed the whole
+  pull request, and whatever the base branch gained in between, and the brief showed it under "Diff
+  since the last review": every line read as new work. A compare whose status is `diverged` is now
+  no delta: the whole change is shown as the whole change, and a log line says why. Fix commits
+  pushed on top of the reviewed head keep the delta.
+- The review before the push (`local.mjs`) reads the delta first, as a round after a verdict does in
+  CI. `pack` records the files that differ between the head of the newest earlier verdict (the pull
+  request's own, then the ones kept with `--earlier`) and HEAD, from the two trees in the local
+  repository, so a squash or a rebase in between does not widen it; `review` shows it when it starts
+  at the head its own rule picks. An earlier head whose commit is not in the repository leaves no
+  delta. Before, every review here showed the whole change, whatever had been reviewed already.
 - Redline's brief gives a pull request's description 20,000 characters instead of 8,000, and a
   description cut there ends with `[description cut at 20000 characters]`, as a cut commit message
   already does. The cut was bare, so a longer description read as one that ends mid-sentence, and was
