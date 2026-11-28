@@ -394,6 +394,77 @@ const unpacked = mkdtempSync(join(tmpdir(), 'redline-local-in-'));
   const legacy = { ...c5 };
   delete legacy.headRepo;
   check('checkChange: a legacy pack with no headRepo still passes', !checkChange(legacy).error);
+  // ---- the change since the last review: the two trees' difference, whatever happened to the history
+  const rd = mkdtempSync(join(tmpdir(), 'redline-local-delta-'));
+  const gd = (...args) => git(rd, args);
+  gd('init', '-q', '-b', 'main');
+  gd('config', 'user.name', 'tester');
+  gd('config', 'user.email', 'tester@example.invalid');
+  gd('config', 'core.autocrlf', 'false');
+  writeFileSync(join(rd, 'base.js'), 'export const base = 0;\n');
+  gd('add', '-A');
+  gd('commit', '-q', '-m', 'base');
+  const MAIN_D = gd('rev-parse', 'HEAD').trim();
+  gd('checkout', '-q', '-b', 'feat');
+  writeFileSync(join(rd, 'a.js'), 'export const a = 1;\n');
+  writeFileSync(join(rd, 'b.js'), 'export const b = 1;\n');
+  gd('add', '-A');
+  gd('commit', '-q', '-m', 'first');
+  const OLD_D = gd('rev-parse', 'HEAD').trim();
+  gd('branch', 'reviewed', OLD_D);
+  // The branch is rewritten: squashed onto main, with one line changed since the review.
+  gd('reset', '-q', '--soft', 'main');
+  writeFileSync(join(rd, 'b.js'), 'export const b = 2;\n');
+  gd('add', '-A');
+  gd('commit', '-q', '-m', 'squashed');
+  const NEW_D = gd('rev-parse', 'HEAD').trim();
+  const asked = (commit_id, body = 'asked for a change') => ({ state: 'CHANGES_REQUESTED', commit_id, body });
+  const posted = (commit_id, login = REVIEWER_LOGIN) => ({ user: { login }, state: 'CHANGES_REQUESTED', commit_id, body: 'posted on the PR' });
+  const withPrD = (reviews, earlier = []) => buildChange(rd, { base: 'main', repo: 'askalf/r', pr: 7, earlier, fetchPr: () => ({ pr: { number: 7, title: 't' }, reviews }) });
+  const d1 = buildChange(rd, { base: 'main', repo: 'askalf/r', earlier: [asked(OLD_D)] });
+  check('pack: the delta is what differs between the tree last judged and HEAD, though that head is no ancestor of HEAD',
+    git(rd, ['merge-base', '--is-ancestor', OLD_D, NEW_D], { allowFail: true }) === null
+    && d1.since?.head === OLD_D && d1.since.files.length === 1 && d1.since.files[0].filename === 'b.js' && d1.since.files[0].status === 'modified'
+    && d1.since.files[0].patch.includes('-export const b = 1;') && d1.since.files[0].patch.includes('+export const b = 2;'));
+  check('...while the whole change still lists every file', d1.files.map((f) => f.filename).sort().join() === 'a.js,b.js' && d1.files.find((f) => f.filename === 'b.js').status === 'added');
+  check('pack: no earlier verdict, or one at HEAD only, is no delta', buildChange(rd, { base: 'main', repo: 'askalf/r' }).since === null
+    && buildChange(rd, { base: 'main', repo: 'askalf/r', earlier: [asked(NEW_D)] }).since === null);
+  const sinceOf = (earlier) => { try { return buildChange(rd, { base: 'main', repo: 'askalf/r', earlier }).since; } catch (e) { return `threw: ${e.message}`; } };
+  check('pack: an earlier head whose commit is not in the repository is no delta', sinceOf([asked('1'.repeat(40))]) === null);
+  check('pack: the delta starts at the newest earlier verdict, the last one given',
+    buildChange(rd, { base: 'main', repo: 'askalf/r', earlier: [asked(MAIN_D), asked(OLD_D)] }).since?.head === OLD_D
+    && buildChange(rd, { base: 'main', repo: 'askalf/r', earlier: [asked(OLD_D), asked(MAIN_D)] }).since?.files.map((f) => f.filename).sort().join() === 'a.js,b.js');
+  check('pack: the pull request\'s own review by the reviewer counts, a kept verdict comes after it, and another login\'s does not count',
+    withPrD([posted(OLD_D)]).since?.head === OLD_D && withPrD([posted(OLD_D)], [asked(MAIN_D)]).since?.head === MAIN_D
+    && withPrD([posted(OLD_D, 'someone')]).since === null);
+  // A reworded commit: another head, the same tree.
+  gd('commit', '-q', '--amend', '-m', 'squashed, reworded');
+  check('pack: an earlier head with the same tree as HEAD is no delta', gd('rev-parse', 'HEAD').trim() !== NEW_D
+    && buildChange(rd, { base: 'main', repo: 'askalf/r', earlier: [asked(NEW_D)] }).since === null
+    && buildChange(rd, { base: 'main', repo: 'askalf/r', earlier: [asked(OLD_D)] }).since?.files.length === 1);
+  const cD = buildChange(rd, { base: 'main', repo: 'askalf/r', earlier: [asked(OLD_D)] });
+  check('checkChange: a delta needs a full head sha and files; none at all passes',
+    !checkChange(cD).error && !checkChange({ ...cD, since: null }).error && !checkChange((({ since, ...rest }) => rest)(cD)).error
+    && [{ ...cD.since, head: 'abc' }, { ...cD.since, files: [] }, { ...cD.since, files: 'b.js' }, { ...cD.since, files: [{}] }, 'yes']
+      .every((since) => /delta without a full head sha and files/.test(checkChange({ ...cD, since }).error ?? '')));
+  const briefOf = async (change) => {
+    const out = mkdtempSync(join(tmpdir(), 'redline-local-delta-in-'));
+    const x = spawnSync('tar', ['-x', '-f', '-'], { cwd: out, input: packChange(rd, change) });
+    const sent = [];
+    const logs = [];
+    const v = x.status === 0 ? await reviewLocal({ ...ctx, log: (l) => logs.push(l), fetch: async (_u, init) => { sent.push(String(init?.body ?? '')); return fetch(); } }, out) : null;
+    rmSync(out, { recursive: true, force: true });
+    return { verdict: v?.verdict, sent: sent.join('\n'), logs };
+  };
+  const shown = await briefOf(cD);
+  check('reviewLocal: the delta is what the brief shows first, as a round after a verdict in CI',
+    shown.verdict === 'APPROVE' && shown.sent.includes(`Diff since the last review, at ${OLD_D.slice(0, 7)}`) && shown.sent.includes('+export const b = 2;'));
+  const first = await briefOf(buildChange(rd, { base: 'main', repo: 'askalf/r' }));
+  check('reviewLocal: with no earlier verdict the whole change is shown, as before', first.verdict === 'APPROVE' && !first.sent.includes('Diff since the last review'));
+  const other = await briefOf({ ...cD, since: { head: MAIN_D, files: cD.files } });
+  check('reviewLocal: a delta that does not start at the head last judged is not shown, and a log line says so',
+    other.verdict === 'APPROVE' && !other.sent.includes('Diff since the last review') && other.logs.some((l) => /is not the head last judged, so the whole change is shown/.test(l)));
+  rmSync(rd, { recursive: true, force: true });
   rmSync(r3, { recursive: true, force: true });
   rmSync(out3, { recursive: true, force: true });
 }

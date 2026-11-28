@@ -13,7 +13,11 @@
 //           file and oldest first, adds an earlier Redline verdict the author kept: a CI
 //           review's verdict.json, or the saved output of an earlier `review` here. A review
 //           here records nothing, and on a private repository none is posted, so without
-//           them each review of a branch starts with no memory of the last.
+//           them each review of a branch starts with no memory of the last. With one, pack
+//           also records what moved since the head it judged (the difference of the two
+//           trees, so a squash or a rebase in between does not widen it), and review shows
+//           that first, as a round after a verdict does in CI. That head has to be a commit
+//           in this repository: keep it on a branch or a tag until the next review.
 //   review  runs on the host, on an unpacked tar: reviewChange() from review.mjs with the host's
 //           env file (REDLINE_ENV_FILE) and prompt (REDLINE_PROMPT_FILE), the same model pins
 //           (hostSettings), the same model routing, the same grounding. It posts nothing and
@@ -31,7 +35,7 @@ import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 import {
-  parseEnvFile, readPrompt, darioAccess, modelContext, routeModel, reviewChange, renderBody, protectedIn, PROTECTED_ATTR, withModelsFile, REVIEWER_LOGIN,
+  parseEnvFile, readPrompt, darioAccess, modelContext, routeModel, reviewChange, renderBody, protectedIn, PROTECTED_ATTR, withModelsFile, REVIEWER_LOGIN, lastJudged,
 } from './review.mjs';
 
 const SHA = /^[0-9a-f]{40}$/;
@@ -205,6 +209,11 @@ export function earlierReview(text, name = 'the file') {
  * body, repo, fetchPr(repo, n) -> { pr, reviews } (gh by default) for --pr, and earlier: the
  * verdicts the author kept (earlierReview), packed apart from the PR's reviews and in the order
  * given; the host merges them after those, under its own reviewer login.
+ *
+ * `since` is what a round after a verdict reads first: { head, files } for the head last judged
+ * (review.mjs lastJudged over the PR's reviews and then the kept ones) and the files that differ
+ * between that commit's tree and HEAD's, or null when there is no such verdict, its commit is not
+ * in this repository, or the two trees are the same.
  */
 export function buildChange(cwd, opts = {}) {
   const head = git(cwd, ['rev-parse', 'HEAD']).trim();
@@ -243,6 +252,14 @@ export function buildChange(cwd, opts = {}) {
     reviews = got.reviews.map((r) => ({ user: { login: r.user?.login ?? '' }, state: r.state, commit_id: r.commit_id, body: r.body ?? '' }));
   }
   if (visibility === null && named !== null && opts.fetchRepo) visibility = visibilityOf(opts.fetchRepo(named));
+  // The trees are compared, not the histories: after a squash or a rebase the head last judged is no
+  // ancestor of HEAD, and a compare from their merge base would be the whole change again.
+  const judged = lastJudged([...reviews, ...(opts.earlier ?? []).map((e) => ({ ...e, user: { login: REVIEWER_LOGIN } }))], head);
+  let since = null;
+  if (judged && git(cwd, ['cat-file', '-e', `${judged.commit_id}^{commit}`], { allowFail: true }) !== null) {
+    const moved = changedFiles(cwd, judged.commit_id, head);
+    if (moved.length) since = { head: judged.commit_id, files: moved };
+  }
   const last = commits.at(-1)?.commit.message ?? '';
   return {
     repo,
@@ -257,7 +274,7 @@ export function buildChange(cwd, opts = {}) {
     authorType: opts.body === undefined ? String(pr?.user?.type ?? '') : '',
     head: { ref: headRef, sha: head },
     base: { ref: ref.replace(/^origin\//, ''), sha: base },
-    files, commits, attributes, reviews, earlier: opts.earlier ?? [],
+    files, commits, attributes, reviews, earlier: opts.earlier ?? [], since,
   };
 }
 
@@ -357,6 +374,10 @@ export function checkChange(change) {
   if (!Array.isArray(earlier) || earlier.some((e) => !['APPROVED', 'CHANGES_REQUESTED'].includes(e?.state) || typeof e.commit_id !== 'string' || !SHA.test(e.commit_id) || typeof e.body !== 'string' || !e.body.trim())) {
     return { error: 'change.json has an earlier verdict without a state, a full head sha and a body' };
   }
+  const since = change.since ?? null;
+  if (since !== null && (typeof since !== 'object' || !SHA.test(String(since.head ?? '')) || !Array.isArray(since.files) || !since.files.length || since.files.some((f) => typeof f?.filename !== 'string'))) {
+    return { error: 'change.json has a delta without a full head sha and files' };
+  }
   return { change };
 }
 
@@ -387,7 +408,12 @@ export async function reviewLocal(ctx, dir) {
   // The verdicts the author kept are Redline's by the login this host reads Redline's reviews by,
   // whatever the login was where they were packed; they follow the PR's own reviews.
   const kept = (c.earlier ?? []).map((e) => ({ user: { login: REVIEWER_LOGIN }, state: e.state, commit_id: e.commit_id, body: e.body }));
-  const { review: r, verdict, notes } = await reviewChange(review, { pr, files: c.files, commits: c.commits, reviews: [...(c.reviews ?? []), ...kept], protectedSet });
+  const reviews = [...(c.reviews ?? []), ...kept];
+  // The delta is shown only when it starts at the head this host's own rule picks from those reviews.
+  const judged = lastJudged(reviews, c.head.sha);
+  const since = c.since && judged?.commit_id === c.since.head ? c.since : null;
+  if (c.since && !since) ctx.log?.(`the pack's delta starts at ${c.since.head.slice(0, 7)}, which is not the head last judged, so the whole change is shown`);
+  const { review: r, verdict, notes } = await reviewChange(review, { pr, files: c.files, commits: c.commits, reviews, protectedSet, since });
   return { verdict, body: renderBody(r, verdict, c.head.sha, notes), model: review.model };
 }
 
@@ -442,6 +468,7 @@ async function main() {
       earlier,
     });
     console.error(`redline local: ${change.files.length} file(s), ${change.commits.length} commit(s), ${change.base.ref}@${change.base.sha.slice(0, 7)}..${change.head.sha.slice(0, 7)}${change.number ? `, as ${change.repo}#${change.number}` : ''}`);
+    console.error(change.since ? `redline local: ${change.since.files.length} file(s) moved since ${change.since.head.slice(0, 7)} was reviewed; they are read first` : 'redline local: no delta (no earlier verdict at another head whose commit is in this repository), so the whole change is read');
     process.stdout.write(packChange(process.cwd(), change));
     return;
   }

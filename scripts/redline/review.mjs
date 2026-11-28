@@ -43,7 +43,10 @@
 //     the head Redline last judged (GitHub's compare of that head and this one), and the whole
 //     change against the base is one redline_diff call away. Findings may quote either; both are
 //     in the corpus. A first review, or a delta that cannot be read, shows the whole change as
-//     before. The earlier findings are checked against what moved, not found again in what did not.
+//     before. So does a branch rewritten since that head (a rebase, a squash, an amend): GitHub
+//     compares from the two heads' merge base, so that compare is the whole pull request, not
+//     what moved. The earlier findings are checked against what moved, not found again in what
+//     did not.
 //   - Redline's earlier verdicts on the PR reach the model whether or not they were posted: they
 //     are read from the PR's earlier dispatched runs' redline-verdict artifacts as well as from
 //     the posted reviews. On a private repository nothing is ever posted (the post runs on public
@@ -1412,23 +1415,41 @@ export function buildBrief(pr, files, commits, diff, protectedFiles = [], since 
 
 /**
  * What to read first in a round after an earlier verdict: the compare of the head Redline last
- * judged (its newest approve or request at another head) and this head, as { head, files }, or
- * null for a first review, a compare that cannot be read, or one that shows nothing new. A read
+ * judged (lastJudged) and this head, as { head, files }, or null for a first review, a compare
+ * that cannot be read, one that shows nothing new, or one whose status is `diverged`. A read
  * that fails is logged; the review then shows the whole change, as a first review does.
+ *
+ * `diverged` is a branch rewritten since the head last judged (a rebase, a squash, an amend), so
+ * that head is no ancestor of this one. GitHub compares `base...head` from the two commits' merge
+ * base: the files it lists are then the whole pull request, and whatever the base branch gained
+ * in between, not what moved since the review. Shown as the delta, every line read as new work.
  */
 /** GitHub's compare lists at most this many files; a delta that reaches it may be cut, and is not shown as the delta. */
 export const COMPARE_FILES_MAX = 300;
 
-export async function deltaSince(ctx, reviews, headSha) {
+/**
+ * The review a later round reads the delta from: Redline's newest approve or request that a model
+ * read (a cap notice is none), at a full sha other than this head, or null. Newest by
+ * submitted_at; reviews with no time, or one time, keep the order given. Pure.
+ */
+export function lastJudged(reviews, headSha) {
   const at = (r) => Date.parse(r?.submitted_at ?? '') || 0;
   const judged = (reviews ?? []).filter((r) => isRead(r) && (r.state === 'APPROVED' || r.state === 'CHANGES_REQUESTED') && /^[0-9a-f]{40}$/.test(String(r.commit_id ?? '')) && r.commit_id !== headSha);
-  const last = judged.sort((a, b) => at(a) - at(b)).at(-1);
+  return judged.sort((a, b) => at(a) - at(b)).at(-1) ?? null;
+}
+
+export async function deltaSince(ctx, reviews, headSha) {
+  const last = lastJudged(reviews, headSha);
   if (!last) return null;
   try {
     const cmp = await gh(ctx, `/repos/${ctx.repo}/compare/${last.commit_id}...${headSha}`);
     // No files (identical trees, or a change and its revert) is nothing to read first; a list at
     // the endpoint's cap may be cut, and a delta with files missing would hide them from the brief.
     if (!Array.isArray(cmp?.files) || cmp.files.length === 0 || cmp.status === 'identical' || cmp.status === 'behind') return null;
+    if (cmp.status === 'diverged') {
+      ctx.log?.(`the branch was rewritten since ${last.commit_id.slice(0, 7)} was reviewed (the compare starts at their merge base), so the whole change is shown`);
+      return null;
+    }
     if (cmp.files.length >= COMPARE_FILES_MAX) {
       ctx.log?.(`the change since ${last.commit_id.slice(0, 7)} lists ${cmp.files.length} files, the compare endpoint's cap, so the whole change is shown`);
       return null;

@@ -10,7 +10,7 @@ import {
   parseEnvFile, readPrompt, safePath, buildDiff, planDiff, unshownFiles, checkoutCorpus, quoteIsGrounded, corpusOf, checkSubmission, finalVerdict,
   renderBody, verdictAtHead, isDeterministicApproval, runTool, runReview, buildBrief, repositoryLine, contextSection, changedFilesSection, earlierReviewsSection, REVIEWER_LOGIN, LIMITS, metaPhrase,
   verdictRecord, verdictProblem, saveVerdict, VERDICT_VERSION,
-  DESCRIPTION_ONLY_NOTE, reviewRunsOf, verdictAsReview, mergeVerdicts, roundsAsked, isCapNotice, capNoticeRounds, capNoticeQuote, lastRequest, renderCapBody, roundCapOf, DEFAULT_ROUND_CAP, ROUND_CAP_RULE, VERDICT_ARTIFACT, stripComments, DISPATCH_ACTOR, deltaSince, COMPARE_FILES_MAX,
+  DESCRIPTION_ONLY_NOTE, lastJudged, reviewRunsOf, verdictAsReview, mergeVerdicts, roundsAsked, isCapNotice, capNoticeRounds, capNoticeQuote, lastRequest, renderCapBody, roundCapOf, DEFAULT_ROUND_CAP, ROUND_CAP_RULE, VERDICT_ARTIFACT, stripComments, DISPATCH_ACTOR, deltaSince, COMPARE_FILES_MAX,
 } from './review.mjs';
 import { deflateRawSync } from 'node:zlib';
 import * as reviewModule from './review.mjs';
@@ -2036,6 +2036,17 @@ console.log('\n  the delta since the last verdict');
     const logged = [];
     const reverted = await deltaSince(cmpCtx({ status: 'ahead', files: [] }), [ask('x')], HEAD);
     check('an ahead compare with no files (a change and its revert) is no delta: the whole change is shown', reverted === null);
+    // A branch rewritten since the head last judged: GitHub's files are the change since the merge base.
+    const rewritten = await deltaSince(cmpCtx({ status: 'diverged', ahead_by: 1, behind_by: 1, files: [{ filename: 'whole-pr.js', patch: '+x' }] }), [ask('x')], HEAD);
+    check('a diverged compare (a rebase, a squash, an amend since the review) is no delta, and a log line says why',
+      rewritten === null && logged.some((l) => /the branch was rewritten since aaaaaaa was reviewed \(the compare starts at their merge base\), so the whole change is shown/.test(l)));
+    const ahead = await deltaSince(cmpCtx({ status: 'ahead', files: [{ filename: 'moved.js', patch: '+x' }] }), [ask('x')], HEAD);
+    check('...while fix commits on top of the reviewed head (ahead) are the delta, from that head', ahead?.head === 'a'.repeat(40) && ahead.files[0].filename === 'moved.js');
+    check('lastJudged is the head deltaSince compares from: the newest by time, a cap notice passed over, this head and a short sha left out, null for none',
+      lastJudged([ask('x'), newest], HEAD)?.commit_id === 'b'.repeat(40) && lastJudged([newest, ask('x')], HEAD)?.commit_id === 'b'.repeat(40)
+      && lastJudged([ask('x'), newest, capAtC], HEAD)?.commit_id === 'b'.repeat(40)
+      && lastJudged([ask('x', { commit_id: HEAD })], HEAD) === null && lastJudged([ask('x', { commit_id: 'abc1234' })], HEAD) === null && lastJudged([], HEAD) === null && lastJudged(null, HEAD) === null
+      && lastJudged([ask('first', { submitted_at: undefined }), ask('second', { commit_id: 'd'.repeat(40), submitted_at: undefined })], HEAD)?.commit_id === 'd'.repeat(40));
     const capped = await deltaSince(cmpCtx({ status: 'ahead', files: Array.from({ length: COMPARE_FILES_MAX }, (_, i) => ({ filename: `f${i}.js`, patch: '+x' })) }), [ask('x')], HEAD);
     check("a compare at the endpoint's file cap may be cut: no delta, and a log line says so", capped === null && logged.some((l) => /compare endpoint's cap, so the whole change is shown/.test(l)) && COMPARE_FILES_MAX === 300);
     const { ctx: emptyWorld, calls: emptyCalls } = world({ reviews: [ask('x')], compare: [], turns: [submit(APPROVE)] });
