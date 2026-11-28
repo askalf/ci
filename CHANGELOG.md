@@ -17,7 +17,12 @@ names the commit's date and the pull request it came from.
   GitHub's answer (a 422's `message` is only "Unprocessable Entity"), and the post step logged the
   status and the message alone, so a second reviewer whose token belonged to the pull request's
   author read as `HTTP 422 Unprocessable Entity` and nothing more. The failure line now carries
-  those reasons, each cleaned to one line of plain text and bounded, as the message is.
+  those reasons, each brought to one line of printable text and bounded, as the message is. What
+  the post step reports is now encoded for where it goes: a failed or refused result is escaped
+  as workflow-command data in its annotation (a literal `%0A` stays text), a plain log line
+  cannot carry the runner's older `##[` command form, and every reason is shown as literal text
+  in the step summary, where a link in it stays text. A posted review's own link is shown only
+  when it is a plain `https://github.com/` address.
 - A round after a verdict no longer takes a rewritten branch's whole change for the change since the
   last review. GitHub compares `base...head` from the two commits' merge base, so once a branch was
   rebased, squashed or amended, the compare of the head last judged and the new one listed the whole
